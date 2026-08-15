@@ -45,7 +45,6 @@ watching and understanding — you write the code, I learn from how and why.
 - Triton needs a host C compiler to build its per-kernel launcher shim.
   gcc 11.4.0 is installed (`build-essential`). `import triton` succeeding does
   NOT prove kernels can run — only a compiled launch does.
-  shim. `import triton` succeeding does NOT prove kernels can run.
 - Dev environment: WSL2 + Linux Triton (not native-Windows triton-windows fork)
 - Hardware constraint: 4GB VRAM is tight — keep test configs small
   (small batch, seq_len in the hundreds to low thousands for correctness
