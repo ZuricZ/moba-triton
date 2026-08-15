@@ -65,6 +65,15 @@ def select_blocks(
     it holds the most recent context and is the only block requiring an
     internal causal mask.
 
+    Note the return shape: selection is per *query*, not per query block. Two
+    queries sitting in the same block routinely choose different KV blocks.
+    This is the central difficulty in kernelizing MoBA. FlashAttention
+    amortizes a KV tile load across a whole query tile, which assumes the tile
+    shares one KV iteration order; here it does not. The union of blocks
+    wanted by a 64-query tile can be far larger than any single query's
+    top_k+1, and the divergence grows as block_size shrinks. Any kernel design
+    must answer this directly.
+
     Args:
         q: Queries shaped [B, H, S, D].
         kbar: Block representatives shaped [B, H, num_blocks, D].
