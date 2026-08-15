@@ -38,7 +38,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]
+pythonpath = ["tests", "."]
 addopts = "-v --strict-markers"
 markers = [
     "slow: benchmarks or large shapes, deselect with -m 'not slow'",
