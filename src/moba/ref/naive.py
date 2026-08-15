@@ -125,19 +125,51 @@ def select_blocks(
     return selected
 
 
+def moba_selection(
+    q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig
+) -> torch.Tensor:
+    """Convenience wrapper: pools keys and returns the block selection mask.
+
+    Args:
+        q: Queries shaped [B, H, S, D].
+        k: Keys shaped [B, H, S, D].
+        cfg: Configuration.
+
+    Returns:
+        Boolean selection mask shaped [B, H, S, num_blocks].
+    """
+    return select_blocks(q, block_representatives(k, cfg), cfg)
+
+
 def moba_attention_naive(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cfg: MoBAConfig
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cfg: MoBAConfig,
+    selected: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention the slow, obvious way.
 
     Materializes the full [S, S] logit matrix. Memory is O(B*H*S^2), so this
     is for correctness on modest shapes, never for speed.
 
+    The optional `selected` argument exists because the gate is a
+    *discontinuous* function of its inputs: top_k is a ranking, and two blocks
+    scoring within rounding error of each other can swap order when the inputs
+    are cast to a lower precision. That one query then attends to entirely
+    different keys and its output changes by O(1), not O(eps).
+
+    Measuring precision loss therefore requires holding selection fixed, or
+    the measurement conflates smooth arithmetic error with discrete routing
+    flips. See `moba.tolerance`.
+
     Args:
         q: Queries shaped [B, H, S, D].
         k: Keys shaped [B, H, S, D].
         v: Values shaped [B, H, S, D].
         cfg: Configuration.
+        selected: Optional precomputed selection mask shaped
+            [B, H, S, num_blocks]. Computed from `q` and `k` when omitted.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
@@ -145,8 +177,8 @@ def moba_attention_naive(
     b, h, s, d = q.shape
     scale = d ** -0.5
 
-    kbar = block_representatives(k, cfg)
-    selected = select_blocks(q, kbar, cfg)           # [B, H, S, num_blocks]
+    if selected is None:
+        selected = moba_selection(q, k, cfg)         # [B, H, S, num_blocks]
 
     # Expand block-level selection to token-level visibility. Indexing the
     # block axis with a per-token block id broadcasts each block's decision

@@ -122,4 +122,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Tasks 1-4 done (env, config, oracle, backend registry), 38 tests green. Task 5 (tolerance policy) next.
+> Status: Tasks 1-5 done (env, config, oracle, registry, tolerance policy), 52 tests green. Task 6 (tier-2 sweep) next.
