@@ -1,0 +1,6 @@
+# WSL runs Linux. A .sh file checked out with CRLF fails there with the
+# famously unhelpful `bad interpreter: /usr/bin/env bash^M`, because the
+# carriage return is read as part of the interpreter path.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf

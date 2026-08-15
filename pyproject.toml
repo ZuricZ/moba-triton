@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moba"
+version = "0.1.0"
+description = "MoBA (Mixture of Block Attention) Triton kernel — learning project"
+requires-python = ">=3.13"
+dependencies = ["torch", "triton", "numpy"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# torch must come from the cu126 index.
+#
+# Default PyPI wheels are torch==2.13.0+cu130, which install cleanly and then
+# fail at CUDA init with "driver too old (found version 12070)". CUDA
+# guarantees *minor* version compatibility -- any 12.x runtime runs on any
+# driver supporting 12.0+ -- but crossing the 12 -> 13 *major* boundary breaks
+# that guarantee. This machine's driver is CUDA 12.7, so the runtime must stay
+# on the 12.x line.
+#
+# `explicit = true` means this index is used ONLY for packages that name it in
+# [tool.uv.sources]. Without it, uv would search this index for every
+# dependency, which both slows resolution and risks pulling an unrelated
+# package from PyTorch's mirror.
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-v --strict-markers"
+markers = [
+    "slow: benchmarks or large shapes, deselect with -m 'not slow'",
+]

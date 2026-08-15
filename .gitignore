@@ -7,6 +7,12 @@ claude-ds.sh
 .claude/
 .claude.local.md
 
+# --- Vendored reference repos (read-only, fetched via scripts) ---
+references/
+
+# --- Benchmark output ---
+results/
+
 # --- Python ---
 __pycache__/
 *.py[cod]

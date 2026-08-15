@@ -14,8 +14,10 @@
 
 - `src/` layout, package name `moba`. Import as `from moba...`.
 - Primary dtype `torch.bfloat16`; secondary `torch.float16`. Minimum compute capability **8.0**.
+- Environment managed by **uv** (installed at `~/.local/bin/uv` in WSL). Never conda: Miniconda is installed on *Windows* and its `win-64` binaries cannot run under WSL's Linux kernel.
+- Python **3.13**. torch **must** come from the **cu126** index — default wheels are `+cu130` and fail CUDA init against this machine's 12.7 driver.
 - All GPU commands run in WSL2: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && <cmd>'`
-- `python3`, never `python`.
+- Inside WSL, invoke Python as `uv run <cmd>`, never bare `python`.
 - Local VRAM budget: 4 GB. Never write a test config exceeding it.
 - `references/` is gitignored, read-only, never imported as a package.
 - `TOLERANCE_FACTOR = 2.0`, `TOLERANCE_FLOOR = 1e-6`.
@@ -34,37 +36,22 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: an importable `moba` package with `moba.__version__: str`; a working venv at `.venv/` inside WSL with `torch` and `triton` importable and CUDA available.
+- Produces: an importable `moba` package with `moba.__version__: str`; a uv-managed `.venv/` inside WSL on Python 3.13 with `torch` (cu126) and `triton` importable and CUDA available; a committed `uv.lock`.
 
-- [ ] **Step 1: Write `scripts/setup_env.sh`**
+- [ ] **Step 1: Write `.gitattributes`**
 
-```bash
-#!/usr/bin/env bash
-# Creates the WSL virtualenv and installs torch + triton.
-# Run from the project root inside WSL.
-set -euo pipefail
+CRLF endings break shell scripts under WSL with `bad interpreter: ...^M`. Fix this before any `.sh` file is committed.
 
-PYTHON=${PYTHON:-python3}
-VENV=${VENV:-.venv}
-
-if [ ! -d "$VENV" ]; then
-  "$PYTHON" -m venv "$VENV"
-fi
-# shellcheck disable=SC1091
-source "$VENV/bin/activate"
-
-pip install --upgrade pip wheel setuptools
-# cu124 wheels work against the CUDA 12.7 driver (minor-version compatible).
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install triton pytest numpy
-
-python -c "import torch, triton; print('torch', torch.__version__, 'triton', triton.__version__, 'cuda', torch.cuda.is_available())"
+```
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
 ```
 
-- [ ] **Step 2: Run the setup script**
+- [ ] **Step 2: Verify uv is present**
 
-Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && bash scripts/setup_env.sh'`
-Expected: final line prints `cuda True`. If `python3 -m venv` fails with an `ensurepip` error, run `sudo apt install -y python3-venv` first and retry.
+Run: `wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; uv --version'`
+Expected: `uv 0.12.x`. If missing: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 - [ ] **Step 3: Write `pyproject.toml`**
 
@@ -77,17 +64,29 @@ build-backend = "setuptools.build_meta"
 name = "moba"
 version = "0.1.0"
 description = "MoBA (Mixture of Block Attention) Triton kernel — learning project"
-requires-python = ">=3.10"
-dependencies = ["torch", "triton"]
+requires-python = ">=3.13"
+dependencies = ["torch", "triton", "numpy"]
 
-[project.optional-dependencies]
-dev = ["pytest", "numpy"]
+[dependency-groups]
+dev = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# torch must come from the cu126 index. Default PyPI wheels are +cu130 and
+# fail CUDA init on this machine's 12.7 driver: CUDA guarantees minor-version
+# compatibility (any 12.x runtime on any 12.0+ driver) but not major.
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-v --strict-markers"
 markers = [
     "slow: benchmarks or large shapes, deselect with -m 'not slow'",
@@ -136,18 +135,18 @@ def test_bfloat16_supported():
 
 - [ ] **Step 6: Run tests to verify they fail**
 
-Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && .venv/bin/python -m pytest tests/test_smoke.py -v'`
-Expected: FAIL with `ModuleNotFoundError: No module named 'moba'`.
+Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && uv run pytest tests/test_smoke.py -v'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'moba'` (or a collection error).
 
-- [ ] **Step 7: Install the package in editable mode**
+- [ ] **Step 7: Sync the environment**
 
-Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && .venv/bin/pip install -e ".[dev]"'`
-Expected: `Successfully installed moba-0.1.0`.
+Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && uv sync'`
+Expected: creates `.venv/` on Python 3.13, installs `torch==2.13.0+cu126`, `triton==3.7.1`, numpy, pytest, and the local `moba` package in editable mode. Writes `uv.lock`.
 
 - [ ] **Step 8: Run tests to verify they pass**
 
-Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && .venv/bin/python -m pytest tests/test_smoke.py -v'`
-Expected: 4 passed.
+Run: `wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && uv run pytest tests/test_smoke.py -v'`
+Expected: 4 passed. If `cuda_available` fails with "driver too old", the cu126 index pin in `pyproject.toml` did not take effect — check `uv run python -c "import torch;print(torch.__version__)"` shows `+cu126`, not `+cu130`.
 
 - [ ] **Step 9: Add build artifacts to `.gitignore`**
 
@@ -164,8 +163,8 @@ dist/
 - [ ] **Step 10: Commit**
 
 ```bash
-git add pyproject.toml src/moba/__init__.py scripts/setup_env.sh tests/test_smoke.py .gitignore
-git commit -m "feat: project skeleton, WSL env setup, GPU capability smoke tests"
+git add pyproject.toml uv.lock .gitattributes src/moba/__init__.py tests/test_smoke.py .gitignore
+git commit -m "feat: project skeleton, uv env on py3.13 + cu126, GPU capability smoke tests"
 ```
 
 ---

@@ -38,8 +38,12 @@ watching and understanding — you write the code, I learn from how and why.
 
 ## Project facts
 - Language: Triton (Python)
-- GPU: NVIDIA GeForce RTX 3050 Laptop, Ampere, compute capability 8.6,
-  4096 MiB VRAM, driver 566.07, CUDA 12.7, WDDM (native Windows)
+- GPU (measured, not assumed): NVIDIA GeForce RTX 3050 **Ti** Laptop, Ampere
+  sm_86, 4095 MiB VRAM, 20 SMs, 99 KiB shared memory per block (101376 B),
+  driver 566.07 / CUDA 12.7, WDDM
+- Toolchain: Python 3.13.15, torch 2.13.0+cu126, triton 3.7.1
+- Triton needs a host C compiler (`gcc`) to build its per-kernel launcher
+  shim. `import triton` succeeding does NOT prove kernels can run.
 - Dev environment: WSL2 + Linux Triton (not native-Windows triton-windows fork)
 - Hardware constraint: 4GB VRAM is tight — keep test configs small
   (small batch, seq_len in the hundreds to low thousands for correctness
@@ -94,18 +98,27 @@ fresh clone — it's a local launcher, not part of the project.
 
 ## Running things — Claude Code runs on Windows, the GPU stack lives in WSL2
 Run every Python/Triton/CUDA command by shelling into WSL yourself. Don't ask
-me to relay output. Verified working pattern:
+me to relay output. **Canonical command prefix — use this every time:**
 
 ```bash
-wsl -e bash -lc 'cd "/mnt/c/D/Side Projects/GPU Kernel" && <command>'
+wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
+  export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/moba"; \
+  cd "/mnt/c/D/Side Projects/GPU Kernel" && uv run <command>'
 ```
 
-- It's `python3`, not `python` — there is no `python` alias in WSL.
-- No Python env exists yet: no torch, no triton, no venv/conda. Creating one
-  is the first setup task; don't assume any package is importable.
-- `nvidia-smi` works inside WSL, so the GPU is reachable from there.
+- **The venv lives at `~/.venvs/moba`, NOT in the repo.** This is deliberate
+  and load-bearing: `/mnt/c` is a 9p bridge to the Windows drive, and a venv
+  there cannot be hard-linked from uv's cache, so every file gets copied.
+  Measured: `uv sync` 11 min vs 1.5 s, `import torch` 68 s vs 8 s. Source
+  stays on `/mnt/c` so it's editable from Windows; the binary tree does not.
+  Omitting `UV_PROJECT_ENVIRONMENT` silently recreates the slow venv.
+- Environment is **uv**, never conda. Miniconda is installed on *Windows*
+  (`C:\Users\zanzu\miniconda3`); its win-64 binaries cannot run under WSL.
+- Python **3.13** (pinned in `.python-version`).
+- torch **must** come from the cu126 index — pinned in `pyproject.toml`.
+  Default wheels are `+cu130` and fail CUDA init against this 12.7 driver.
 - Never run Python/Triton on the Windows side — no CUDA there.
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: empty repo. No env, no code yet.
+> Status: Task 1 (skeleton + env) done except Triton's C compiler — needs `sudo apt install build-essential`. Task 2 next.
