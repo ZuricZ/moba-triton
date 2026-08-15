@@ -4,7 +4,7 @@ import torch
 
 from moba.backends.base import register
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_attention_naive
+from moba.ref.naive import moba_attention_naive, moba_selection
 
 
 class NaiveTorchBackend:
@@ -28,6 +28,27 @@ class NaiveTorchBackend:
         cfg: MoBAConfig,
     ) -> torch.Tensor:
         return moba_attention_naive(q, k, v, cfg)
+
+    def selection(
+        self, q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig
+    ) -> torch.Tensor:
+        """Exposes routing so it can be checked exactly, separate from output.
+
+        Optional part of the Backend interface. A backend that implements it
+        gets its gate verified directly; one that does not is covered only
+        indirectly, through output comparison. Direct is far better: a routing
+        bug and a precision bug look identical in the output but need
+        completely different fixes.
+
+        Args:
+            q: Queries shaped [B, H, S, D].
+            k: Keys shaped [B, H, S, D].
+            cfg: Configuration.
+
+        Returns:
+            Boolean selection mask shaped [B, H, S, num_blocks].
+        """
+        return moba_selection(q, k, cfg)
 
 
 register(NaiveTorchBackend())

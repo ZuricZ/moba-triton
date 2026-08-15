@@ -66,6 +66,7 @@ def reference_error(
     k: torch.Tensor,
     v: torch.Tensor,
     cfg: MoBAConfig,
+    query_chunk: int | None = None,
 ) -> tuple[torch.Tensor, float]:
     """Establishes ground truth and the precision cost of `cfg.dtype`.
 
@@ -82,6 +83,8 @@ def reference_error(
         k: Keys shaped [B, H, S, D], float64.
         v: Values shaped [B, H, S, D], float64.
         cfg: Configuration; `cfg.dtype` is the precision being characterized.
+        query_chunk: Passed through to the oracle to bound peak memory. Does
+            not change results at realistic sizes.
 
     Returns:
         A tuple of (truth, ref_error) where `truth` is the fp64 oracle output
@@ -90,9 +93,16 @@ def reference_error(
     """
     selected = moba_selection(q.to(cfg.dtype), k.to(cfg.dtype), cfg)
 
-    truth = moba_attention_naive(q, k, v, cfg, selected=selected)
+    truth = moba_attention_naive(
+        q, k, v, cfg, selected=selected, query_chunk=query_chunk
+    )
     low = moba_attention_naive(
-        q.to(cfg.dtype), k.to(cfg.dtype), v.to(cfg.dtype), cfg, selected=selected
+        q.to(cfg.dtype),
+        k.to(cfg.dtype),
+        v.to(cfg.dtype),
+        cfg,
+        selected=selected,
+        query_chunk=query_chunk,
     )
     return truth, max_abs_error(low, truth)
 
