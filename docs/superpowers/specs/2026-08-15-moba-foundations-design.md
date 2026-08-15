@@ -174,13 +174,32 @@ vanishing. A silently short benchmark table is worse than no table.
 
 ### Tolerance policy
 
+**Revised 2026-08-15 after measurement.** MoBA has a smooth part (attention
+arithmetic) and a discrete part (top-k routing). Only the smooth part gets a
+tolerance; routing is checked exactly. The original formulation below
+conflated them, and measurement showed the conflation dominated: casting
+inputs to bf16 flipped routing for ~9 queries in 2048 at S=1024, and that
+alone pushed `ref_error` to 9.0e-1, jumping 200x between sequence lengths. A
+budget that loose would accept a broken kernel.
+
 For a given config and dtype:
 
-1. Compute the oracle in **fp64** — call it `truth`.
-2. Compute the oracle in the **target dtype** (bf16/fp16) — call it
+1. Compute the selection mask **once**, from the *low-precision* inputs — the
+   same inputs a real backend sees. Hold it fixed for both runs below.
+2. Compute the oracle in **fp64** under that selection — call it `truth`.
+3. Compute the oracle in the **target dtype** under the same selection —
    `ref_error = max_abs(oracle_dtype - truth)`.
-3. A backend passes if
+4. A backend passes if
    `max_abs(backend_out - truth) <= max(TOLERANCE_FACTOR * ref_error, floor)`.
+5. **Separately and exactly**, the backend's selection mask must equal the
+   oracle's for identical inputs. A routing difference is not "less
+   accurate"; it computes a different function for that query, and it is
+   reported as a routing bug so the reader gets the right diagnosis.
+
+Measured `ref_error` after this change is stable: ~1.3e-2 for bf16 and ~2e-3
+for fp16 across S=128..1024. The ~8x ratio is 2^3, the three extra mantissa
+bits fp16 has over bf16 — evidence the measurement now isolates format
+precision.
 
 `TOLERANCE_FACTOR = 2.0`, following the FlashAttention paper's methodology.
 `floor = 1e-6` guards the degenerate case where `ref_error` is ~0 on tiny
