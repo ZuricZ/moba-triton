@@ -159,7 +159,36 @@ consumer instead of 64.
 
 Finer blocks make the router more discriminating, so queries within a tile
 agree *less*, so the union grows relative to what any one query needs.
-Sketching the trend for a 64-query tile at S=1024, `top_k=2`:
+**Measured** (`docs/divergence-measurements.md`), at `top_k=2`, reporting the
+fraction of computed block-query pairs that survive masking:
+
+| seq_len | block_size | BLOCK_M=16 | BLOCK_M=64 | BLOCK_M=128 |
+|---:|---:|---:|---:|---:|
+| 1024 | 128 | 0.429 | 0.417 | 0.417 |
+| 1024 | 16 | 0.165 | 0.075 | 0.059 |
+| 4096 | 128 | 0.203 | 0.128 | 0.121 |
+| 4096 | **16** | **0.134** | **0.043** | **0.028** |
+
+At S=4096 with `block_size=16` and FlashAttention's conventional tile height of
+128, a query-major kernel **discards 97.2% of its tensor-core work.**
+
+> **The counterintuitive part.** In dense attention, raising `BLOCK_M`
+> *improves* arithmetic intensity — a larger tile amortizes each KV load across
+> more consumers, which is why FA-2 tiles are large. Here raising `BLOCK_M`
+> **degrades** utilization, because the union grows faster than the tile does.
+> At S=4096, `block_size=16`, mean union goes 14.9 → 46.2 → 72.2 blocks as
+> `BLOCK_M` goes 16 → 64 → 128, while each query's need stays fixed at 2.
+>
+> Query-major is therefore in a vise with no good setting: small `BLOCK_M`
+> preserves utilization but cannot fill a tensor core and abandons
+> amortization; large `BLOCK_M` fills the tensor core and then discards 97% of
+> what it computed.
+
+Utilization also decays with sequence length at fixed configuration, so the
+problem worsens exactly in the long-context regime MoBA exists to serve.
+
+The superseded sketch, kept for orientation — a 64-query tile at S=1024,
+`top_k=2`:
 
 | block_size | num_blocks | tile spans own-blocks | union vs. per-query need | utilization |
 |---:|---:|---:|---|---:|
@@ -168,10 +197,7 @@ Sketching the trend for a 64-query tile at S=1024, `top_k=2`:
 | 32 | 32 | 2 | growing | low |
 | 16 | 64 | 4 | union approaches everything | **very low** |
 
-> **Not yet measured.** These are mechanism, not data. The exact union size is
-> data-dependent, and we can compute it precisely — the oracle already produces
-> the selection masks, so mean union size per tile is a cheap reduction over
-> them. Worth doing before the spec fixes a tile size.
+The measurement confirmed the direction and was harsher than the sketch.
 
 This is the measured curve in `docs/baseline-results.md`: available speedup
 rises 2.90× → 21.13× while latency rises 5.95 ms → 15.35 ms.
@@ -195,6 +221,28 @@ group was gathered by the property *"wanted this block."* Utilization returns
 to 100%. Divergence stops mattering, because queries are no longer iterated at
 the outer level; they are the payload gathered for a block already resident in
 SRAM.
+
+### How full is that inner loop? A closed form
+
+Each of `S` queries selects about `top_k` blocks, and there are
+`S / block_size` blocks. So the average number of queries per block is
+
+```
+S · top_k / (S / block_size)  =  top_k · block_size
+```
+
+**`S` cancels.** The inverted kernel's amortization factor is a constant fixed
+by the gate configuration, while query-major utilization *decays* with `S`. The
+gap between the designs widens with context length.
+
+Measurement confirms it to within a percent
+(`docs/divergence-measurements.md`): 31.9 consumers per block at
+`block_size=16, top_k=2`, unchanged across S = 1024, 2048, 4096.
+
+And note what that means for the hardest case. At `block_size=16, top_k=2` —
+where query-major bottoms out at 2.8% utilization — the inverted kernel still
+has **32 queries per loaded block**: two full tensor-core rows, nothing padded,
+nothing masked away.
 
 Note what did *not* change: not one FLOP was saved. Same math, same selections,
 same result. Only which loop is outer — and therefore how many times each byte
