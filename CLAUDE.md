@@ -122,4 +122,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Tasks 1-7 done — harness + vendored refs, 135 tests green. Moonshot runs and DISAGREES with our oracle (7.2e-1); Task 8 diagnoses it.
+> Status: Tasks 1-8 done — oracle now matches MoonshotAI bitwise; 140 tests green. Task 9 (benchmark suite) next.

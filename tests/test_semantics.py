@@ -86,13 +86,45 @@ def test_future_blocks_never_selected():
 
 
 def test_selection_count_respects_top_k():
-    """A late query has many candidates but may take only top_k, plus its own."""
+    """Under the default convention top_k counts the query's own block."""
     q, k, _ = make_qkv(1, 1, 256, 16)
     cfg = MoBAConfig(block_size=32, top_k=2)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
-    # Query 255 sits in block 7; candidates are blocks 0..6.
-    assert sel[0, 0, 255].sum().item() == 3  # 2 chosen + own block
+    # Query 255 sits in block 7; candidates are blocks 0..6. top_k=2 buys the
+    # own block plus one past block.
+    assert sel[0, 0, 255].sum().item() == 2
+
+
+def test_top_k_convention_flag_changes_the_budget():
+    """Both readings of top_k are reachable, and they differ by exactly one.
+
+    Default (True) matches MoonshotAI's reference, verified bitwise. Setting
+    it False restores the reading where the own block is free -- kept because
+    it is the more natural definition of "how many blocks of context do I get
+    to look at", and because a future reference may use it.
+    """
+    q, k, _ = make_qkv(1, 1, 256, 16)
+
+    inclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=True)
+    exclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=False)
+
+    n_inc = select_blocks(q, block_representatives(k, inclusive), inclusive)
+    n_exc = select_blocks(q, block_representatives(k, exclusive), exclusive)
+
+    assert n_inc[0, 0, 255].sum().item() == 3
+    assert n_exc[0, 0, 255].sum().item() == 4
+
+
+def test_top_k_of_one_selects_only_the_current_block():
+    """Edge case of the inclusive convention: the budget is entirely spent."""
+    q, k, _ = make_qkv(1, 1, 128, 16)
+    cfg = MoBAConfig(block_size=32, top_k=1)
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    pos = torch.arange(128, device=DEVICE)
+    assert (sel.sum(-1) == 1).all()
+    assert sel[0, 0, pos, pos // 32].all()
 
 
 def test_early_queries_select_all_available_candidates():
@@ -111,7 +143,9 @@ def test_ties_resolve_to_lower_block_index():
     g = torch.Generator(device=DEVICE).manual_seed(0)
     q = torch.randn(b, h, s, d, generator=g, device=DEVICE, dtype=torch.float64)
     k = torch.ones(b, h, s, d, device=DEVICE, dtype=torch.float64)
-    cfg = MoBAConfig(block_size=32, top_k=1)
+    # top_k=2 under the inclusive convention buys exactly one past block, so
+    # the tie-break decides which one.
+    cfg = MoBAConfig(block_size=32, top_k=2)
 
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 

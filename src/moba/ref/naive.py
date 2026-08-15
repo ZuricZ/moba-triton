@@ -109,7 +109,11 @@ def select_blocks(
     else:
         order = torch.argsort(masked, dim=-1, descending=True)
 
-    take = min(cfg.top_k, num_blocks)
+    # How many *past* blocks the budget allows. Under the default
+    # `top_k_includes_current`, the query's own block consumes one slot --
+    # the convention MoonshotAI's reference uses, where the own block is
+    # given +inf and then competes in the same topk as everything else.
+    take = cfg.past_blocks_selected(num_blocks)
     chosen = order[..., :take]
 
     selected = torch.zeros_like(masked, dtype=torch.bool)

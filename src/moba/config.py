@@ -26,8 +26,19 @@ class MoBAConfig:
 
     Attributes:
         block_size: Number of key positions per block.
-        top_k: Number of past blocks selected per query, excluding the query's
-            own block.
+        top_k: Number of blocks attended per query. Whether this count
+            includes the query's own block is governed by
+            `top_k_includes_current`.
+        top_k_includes_current: If True (default), the query's own block
+            consumes one of the `top_k` slots, so a query attends to exactly
+            `top_k` blocks. If False, the own block is free and a query
+            attends to `top_k + 1`.
+
+            Default True to match MoonshotAI's reference implementation,
+            verified bitwise: their `moba_topk=n` equals our `top_k=n` under
+            this setting. The project targets FlashMoBA's published numbers,
+            so an off-by-one here would silently benchmark at a different
+            sparsity than the results we compare against.
         dtype: Compute dtype for the attention itself. The gate and the oracle
             may run at higher precision.
         always_select_current: If True, the block containing the query is
@@ -45,6 +56,7 @@ class MoBAConfig:
     top_k: int
     dtype: torch.dtype = torch.bfloat16
     always_select_current: bool = True
+    top_k_includes_current: bool = True
     tie_break_low_index: bool = True
     pool_masked_only: bool = False
 
@@ -53,6 +65,23 @@ class MoBAConfig:
             raise ValueError(f"block_size must be positive, got {self.block_size}")
         if self.top_k <= 0:
             raise ValueError(f"top_k must be positive, got {self.top_k}")
+
+    def past_blocks_selected(self, num_blocks: int) -> int:
+        """Returns how many *past* blocks the gate may select per query.
+
+        The query's own block is handled separately by
+        `always_select_current`; this is the budget for everything else.
+
+        Args:
+            num_blocks: Total blocks covering the sequence.
+
+        Returns:
+            Count of past blocks to select, clamped to [0, num_blocks].
+        """
+        budget = self.top_k
+        if self.always_select_current and self.top_k_includes_current:
+            budget -= 1
+        return max(0, min(budget, num_blocks))
 
     def num_blocks(self, seq_len: int) -> int:
         """Returns the number of blocks covering `seq_len` positions.
