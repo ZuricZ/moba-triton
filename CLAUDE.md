@@ -122,4 +122,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Tasks 1-9 done — benchmark suite live, 160 tests green. Baseline attainment ~0.001 at block=16. Task 10 (FlashMoBA digest) next.
+> Status: FOUNDATIONS COMPLETE (tasks 1-10), 160 tests green. FlashMoBA digest done: it inverts the loop to KV-block-major CSC. Next: kernel spec.
