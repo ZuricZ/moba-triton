@@ -147,6 +147,7 @@ def moba_attention_naive(
     v: torch.Tensor,
     cfg: MoBAConfig,
     selected: torch.Tensor | None = None,
+    query_chunk: int | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention the slow, obvious way.
 
@@ -170,6 +171,17 @@ def moba_attention_naive(
         cfg: Configuration.
         selected: Optional precomputed selection mask shaped
             [B, H, S, num_blocks]. Computed from `q` and `k` when omitted.
+        query_chunk: If set, process queries in row-blocks of this size,
+            reducing peak memory from O(S^2) to O(query_chunk * S). Purely a
+            memory optimization -- results are unchanged.
+
+            Chunking over *queries* is safe because softmax is computed per
+            row: a block of queries evaluated against all keys has every
+            column it needs, so no running statistics are involved. Chunking
+            over *keys* would require FlashAttention's online softmax, and the
+            oracle deliberately does not use that -- if oracle and kernel
+            shared the same rescaling logic, a bug in it would appear in both
+            and they would agree while both were wrong.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
@@ -180,21 +192,31 @@ def moba_attention_naive(
     if selected is None:
         selected = moba_selection(q, k, cfg)         # [B, H, S, num_blocks]
 
-    # Expand block-level selection to token-level visibility. Indexing the
-    # block axis with a per-token block id broadcasts each block's decision
-    # across all of its keys.
     pos = torch.arange(s, device=q.device)
     block_of_token = pos // cfg.block_size            # [S]
-    visible = selected[..., block_of_token]           # [B, H, S, S]
 
-    # Causal masking. Strictly, only the current block needs it -- every other
-    # selected block lies wholly in the past. Applying it across the board is
-    # equivalent and removes a special case, which matters in an oracle whose
-    # job is to be obviously right rather than fast.
-    causal = pos.view(-1, 1) >= pos.view(1, -1)       # [S, S]
-    mask = visible & causal.view(1, 1, s, s)
+    step = s if query_chunk is None else min(query_chunk, s)
+    out = torch.empty_like(q)
 
-    logits = torch.einsum("bhid,bhjd->bhij", q, k) * scale
-    logits = logits.masked_fill(~mask, float("-inf"))
-    probs = torch.softmax(logits, dim=-1)
-    return torch.einsum("bhij,bhjd->bhid", probs, v)
+    for start in range(0, s, step):
+        stop = min(start + step, s)
+        rows = stop - start
+
+        # Expand block-level selection to token-level visibility. Indexing the
+        # block axis with a per-token block id broadcasts each block's
+        # decision across all of its keys.
+        visible = selected[:, :, start:stop][..., block_of_token]  # [B,H,rows,S]
+
+        # Causal masking. Strictly, only the current block needs it -- every
+        # other selected block lies wholly in the past. Applying it across the
+        # board is equivalent and removes a special case, which matters in an
+        # oracle whose job is to be obviously right rather than fast.
+        causal = pos[start:stop].view(-1, 1) >= pos.view(1, -1)    # [rows, S]
+        mask = visible & causal.view(1, 1, rows, s)
+
+        logits = torch.einsum("bhid,bhjd->bhij", q[:, :, start:stop], k) * scale
+        logits = logits.masked_fill(~mask, float("-inf"))
+        probs = torch.softmax(logits, dim=-1)
+        out[:, :, start:stop] = torch.einsum("bhij,bhjd->bhid", probs, v)
+
+    return out

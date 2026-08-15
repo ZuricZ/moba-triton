@@ -183,6 +183,65 @@ def test_output_rows_are_convex_combinations_of_values():
     assert (out >= lo - 1e-12).all() and (out <= hi + 1e-12).all()
 
 
+@pytest.mark.parametrize("chunk", [64, 128, 1000])
+def test_query_chunking_is_bitwise_identical_at_realistic_sizes(chunk):
+    """Chunking over queries is a memory optimization, not an algorithm change.
+
+    Softmax is per-row, so a block of queries evaluated against all keys has
+    every column it needs. Nothing whatsoever is accumulated across chunks.
+
+    At chunk sizes we would actually use, cuBLAS picks the same GEMM kernel it
+    would for the full matrix, so the result is bitwise identical. `1000`
+    exceeds S and checks the clamp.
+    """
+    q, k, v = make_qkv(1, 2, 128, 32)
+    cfg = MoBAConfig(block_size=16, top_k=2)
+
+    unchunked = moba_attention_naive(q, k, v, cfg)
+    chunked = moba_attention_naive(q, k, v, cfg, query_chunk=chunk)
+
+    assert torch.equal(chunked, unchunked), (
+        f"chunk={chunk} changed the result; max diff "
+        f"{(chunked - unchunked).abs().max().item():.3e}"
+    )
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 16])
+def test_tiny_query_chunks_agree_to_floating_point_noise(chunk):
+    """Pathologically small chunks differ in the last bits, and that is cuBLAS.
+
+    With M=1 a GEMM becomes a matrix-vector product and cuBLAS selects a
+    different kernel, with a different accumulation order. Floating-point
+    addition is not associative, so reassociating a dot product moves the last
+    bit or two. Verified independently: a bare einsum with no softmax and no
+    masking reproduces this at chunk=1 and 7.
+
+    The chunking logic itself is exact -- nothing crosses a chunk boundary --
+    so the residual is bounded by fp64 rounding, ~1e-14, which is twelve
+    orders of magnitude below the bf16 tolerance budget of ~1e-2.
+    """
+    q, k, v = make_qkv(1, 2, 128, 32)
+    cfg = MoBAConfig(block_size=16, top_k=2)
+
+    unchunked = moba_attention_naive(q, k, v, cfg)
+    chunked = moba_attention_naive(q, k, v, cfg, query_chunk=chunk)
+
+    diff = (chunked - unchunked).abs().max().item()
+    assert diff < 1e-12, f"chunk={chunk} diff {diff:.3e} exceeds fp64 noise"
+
+
+def test_query_chunking_identical_in_low_precision():
+    """Also holds in bf16, where any drift would be far easier to hide."""
+    q, k, v = make_qkv(1, 2, 256, 64)
+    cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
+    qb, kb, vb = (t.to(torch.bfloat16) for t in (q, k, v))
+
+    assert torch.equal(
+        moba_attention_naive(qb, kb, vb, cfg, query_chunk=64),
+        moba_attention_naive(qb, kb, vb, cfg),
+    )
+
+
 def test_no_nan_when_only_one_key_is_visible():
     """Guards the all-masked-row failure mode.
 
