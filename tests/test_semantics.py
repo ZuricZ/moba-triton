@@ -1,0 +1,196 @@
+"""Tier 1: exact identities. No tolerance argument is permitted here.
+
+Every assertion in this file holds exactly, in exact arithmetic. We run them
+in float64 so that floating-point noise is far below the 1e-10 thresholds
+used. A failure here is therefore unambiguously a logic bug, never a
+numerical artifact -- which is what makes this the strongest tier in the
+project.
+"""
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+from moba.config import MoBAConfig
+from moba.ref.naive import (
+    block_representatives,
+    moba_attention_naive,
+    select_blocks,
+)
+
+DEVICE = "cuda"
+
+
+def make_qkv(b, h, s, d, dtype=torch.float64, seed=0):
+    """Deterministic q, k, v so a failure reproduces exactly."""
+    g = torch.Generator(device=DEVICE).manual_seed(seed)
+    shape = (b, h, s, d)
+    return tuple(
+        torch.randn(shape, generator=g, device=DEVICE, dtype=dtype) for _ in range(3)
+    )
+
+
+# --------------------------------------------------------------------------
+# Step 2 of the algorithm: block representatives
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seq_len,block_size", [(128, 32), (129, 32), (64, 64)])
+def test_block_representatives_are_block_means(seq_len, block_size):
+    _, k, _ = make_qkv(1, 2, seq_len, 16)
+    cfg = MoBAConfig(block_size=block_size, top_k=1)
+    kbar = block_representatives(k, cfg)
+
+    assert kbar.shape == (1, 2, cfg.num_blocks(seq_len), 16)
+    torch.testing.assert_close(kbar[:, :, 0], k[:, :, :block_size].mean(dim=2))
+
+
+def test_short_final_block_is_not_diluted_by_padding():
+    """seq_len=129 with block_size=32 leaves a final block of one key.
+
+    Implementations that pad to a block multiple and take a plain mean would
+    divide that key by 32 instead of 1. This is the classic off-by-padding
+    bug, and it is invisible whenever seq_len happens to divide evenly.
+    """
+    _, k, _ = make_qkv(1, 1, 129, 16)
+    cfg = MoBAConfig(block_size=32, top_k=1)
+    kbar = block_representatives(k, cfg)
+
+    assert cfg.num_blocks(129) == 5
+    torch.testing.assert_close(kbar[:, :, -1], k[:, :, 128:].mean(dim=2))
+
+
+# --------------------------------------------------------------------------
+# Steps 4-6: causal candidacy, forced current block, top-k
+# --------------------------------------------------------------------------
+
+
+def test_current_block_always_selected():
+    q, k, _ = make_qkv(1, 1, 128, 16)
+    cfg = MoBAConfig(block_size=32, top_k=1)
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    pos = torch.arange(128, device=DEVICE)
+    assert sel[0, 0, pos, pos // 32].all()
+
+
+def test_future_blocks_never_selected():
+    q, k, _ = make_qkv(1, 1, 128, 16)
+    cfg = MoBAConfig(block_size=32, top_k=8)
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    pos = torch.arange(128, device=DEVICE)
+    blocks = torch.arange(cfg.num_blocks(128), device=DEVICE)
+    is_future = blocks.view(1, -1) > (pos // 32).view(-1, 1)
+    assert not sel[0, 0][is_future].any()
+
+
+def test_selection_count_respects_top_k():
+    """A late query has many candidates but may take only top_k, plus its own."""
+    q, k, _ = make_qkv(1, 1, 256, 16)
+    cfg = MoBAConfig(block_size=32, top_k=2)
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    # Query 255 sits in block 7; candidates are blocks 0..6.
+    assert sel[0, 0, 255].sum().item() == 3  # 2 chosen + own block
+
+
+def test_early_queries_select_all_available_candidates():
+    """A query in block 1 has only one past block; top_k=4 cannot invent more."""
+    q, k, _ = make_qkv(1, 1, 128, 16)
+    cfg = MoBAConfig(block_size=32, top_k=4)
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    assert sel[0, 0, 40].sum().item() == 2  # block 0 + own block 1
+    assert sel[0, 0, 0].sum().item() == 1  # block 0 only, it is its own
+
+
+def test_ties_resolve_to_lower_block_index():
+    """Identical keys everywhere make every gate score equal."""
+    b, h, s, d = 1, 1, 128, 16
+    g = torch.Generator(device=DEVICE).manual_seed(0)
+    q = torch.randn(b, h, s, d, generator=g, device=DEVICE, dtype=torch.float64)
+    k = torch.ones(b, h, s, d, device=DEVICE, dtype=torch.float64)
+    cfg = MoBAConfig(block_size=32, top_k=1)
+
+    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+
+    # Query 127 is in block 3; candidates {0,1,2} are perfectly tied.
+    assert bool(sel[0, 0, 127, 0]) is True
+    assert bool(sel[0, 0, 127, 1]) is False
+    assert bool(sel[0, 0, 127, 2]) is False
+
+
+# --------------------------------------------------------------------------
+# Step 7: full attention. The keystone identities.
+# --------------------------------------------------------------------------
+
+
+def test_reduces_to_dense_causal_attention_when_top_k_covers_all_blocks():
+    """THE keystone test.
+
+    When top_k is large enough that every past block is selectable, the gate
+    becomes a no-op and MoBA must equal ordinary dense causal attention. This
+    validates pooling, masking, scaling, softmax and the output projection all
+    at once, against an independent implementation (torch SDPA), with no
+    tolerance argument available to hide behind.
+    """
+    b, h, s, d = 1, 2, 128, 32
+    q, k, v = make_qkv(b, h, s, d)
+    cfg = MoBAConfig(block_size=16, top_k=s // 16)
+
+    got = moba_attention_naive(q, k, v, cfg)
+    want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+    torch.testing.assert_close(got, want, rtol=1e-10, atol=1e-10)
+
+
+def test_single_block_equals_plain_causal_attention():
+    """With one block total, there is nothing to select; only causality acts."""
+    b, h, s, d = 1, 1, 32, 16
+    q, k, v = make_qkv(b, h, s, d)
+    cfg = MoBAConfig(block_size=32, top_k=1)
+
+    got = moba_attention_naive(q, k, v, cfg)
+    want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+    torch.testing.assert_close(got, want, rtol=1e-10, atol=1e-10)
+
+
+def test_first_query_attends_only_to_itself():
+    """Position 0 sees exactly one key, so softmax is degenerate and out == v[0]."""
+    b, h, s, d = 1, 1, 64, 16
+    q, k, v = make_qkv(b, h, s, d)
+    cfg = MoBAConfig(block_size=16, top_k=2)
+
+    got = moba_attention_naive(q, k, v, cfg)
+    torch.testing.assert_close(got[0, 0, 0], v[0, 0, 0], rtol=1e-10, atol=1e-10)
+
+
+def test_output_rows_are_convex_combinations_of_values():
+    """Softmax weights are non-negative and sum to 1, so every output row must
+    lie within the elementwise min/max of the values it could attend to.
+
+    This catches sign errors and mask leaks that a shape check would miss.
+    """
+    b, h, s, d = 1, 1, 96, 8
+    q, k, v = make_qkv(b, h, s, d)
+    cfg = MoBAConfig(block_size=16, top_k=2)
+
+    out = moba_attention_naive(q, k, v, cfg)
+    lo = v.amin(dim=2, keepdim=True)
+    hi = v.amax(dim=2, keepdim=True)
+    assert (out >= lo - 1e-12).all() and (out <= hi + 1e-12).all()
+
+
+def test_no_nan_when_only_one_key_is_visible():
+    """Guards the all-masked-row failure mode.
+
+    If the current block were ever excluded, early queries would have a fully
+    masked row, softmax would produce NaN, and it would silently poison
+    everything downstream.
+    """
+    q, k, v = make_qkv(1, 1, 64, 16)
+    cfg = MoBAConfig(block_size=8, top_k=1)
+    out = moba_attention_naive(q, k, v, cfg)
+    assert torch.isfinite(out).all()

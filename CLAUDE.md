@@ -122,4 +122,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Tasks 1-2 done (env, MoBAConfig, device probing), 14 tests green. Task 3 (the oracle) next.
+> Status: Tasks 1-3 done (env, config, naive MoBA oracle), 28 tests green. Task 4 (backend registry) next.
