@@ -42,7 +42,9 @@ watching and understanding — you write the code, I learn from how and why.
   sm_86, 4095 MiB VRAM, 20 SMs, 99 KiB shared memory per block (101376 B),
   driver 566.07 / CUDA 12.7, WDDM
 - Toolchain: Python 3.13.15, torch 2.13.0+cu126, triton 3.7.1
-- Triton needs a host C compiler (`gcc`) to build its per-kernel launcher
+- Triton needs a host C compiler to build its per-kernel launcher shim.
+  gcc 11.4.0 is installed (`build-essential`). `import triton` succeeding does
+  NOT prove kernels can run — only a compiled launch does.
   shim. `import triton` succeeding does NOT prove kernels can run.
 - Dev environment: WSL2 + Linux Triton (not native-Windows triton-windows fork)
 - Hardware constraint: 4GB VRAM is tight — keep test configs small
@@ -121,4 +123,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Task 1 (skeleton + env) done except Triton's C compiler — needs `sudo apt install build-essential`. Task 2 next.
+> Status: Task 1 done — toolchain verified end to end, 6/6 smoke tests green. Task 2 (MoBAConfig + device probing) next.
