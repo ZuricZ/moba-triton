@@ -56,14 +56,23 @@ def test_backend_matches_oracle(shape, gate, device):
             continue
         out = backend.forward(ql, kl, vl, cfg)
 
+        # Shape, dtype and finiteness are contract violations for anyone.
         assert out.shape == (b, h, s, d), f"{backend.name} returned {out.shape}"
         assert out.dtype is cfg.dtype, f"{backend.name} returned {out.dtype}"
         assert torch.isfinite(out).all(), f"{backend.name} produced non-finite values"
 
+        # Accuracy is asserted only for implementations we own. Per design
+        # decision D1 our oracle is the spec, so a vendored reference
+        # disagreeing is evidence about *their* semantics, not a defect in
+        # ours. Those divergences are quantified in Tier 3 and resolved in
+        # docs/semantics-crosscheck.md, not raised as failures here.
+        if getattr(backend, "vendored", False):
+            continue
+
         assert_within_tolerance(out, truth, ref_err, name=backend.name)
         checked += 1
 
-    assert checked >= 1, "no MoBA backend was available to check"
+    assert checked >= 1, "no first-party MoBA backend was available to check"
 
 
 @pytest.mark.parametrize("shape,gate", sweep_cases(include_long=False))

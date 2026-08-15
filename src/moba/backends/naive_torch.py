@@ -16,6 +16,7 @@ class NaiveTorchBackend:
     """
 
     name = "naive_torch"
+    vendored = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         return True, ""

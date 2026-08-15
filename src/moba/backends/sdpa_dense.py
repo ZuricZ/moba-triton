@@ -26,6 +26,7 @@ class SdpaDenseBackend:
     """torch.nn.functional.scaled_dot_product_attention, causal, dense."""
 
     name = "sdpa_dense"
+    vendored = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

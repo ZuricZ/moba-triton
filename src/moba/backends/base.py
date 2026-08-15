@@ -20,9 +20,19 @@ from moba.config import MoBAConfig
 
 @runtime_checkable
 class Backend(Protocol):
-    """One MoBA implementation, uniformly callable."""
+    """One MoBA implementation, uniformly callable.
+
+    Attributes:
+        name: Registry key, unique.
+        vendored: True for third-party implementations we did not write.
+            These are compared against the oracle and their divergences are
+            *reported*, never asserted -- per design decision D1, a reference
+            disagreeing with us is a finding to investigate, not a test
+            failure. Ours is the spec; theirs is evidence.
+    """
 
     name: str
+    vendored: bool = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         """Reports whether this backend can run `cfg` on this machine.
