@@ -1,0 +1,38 @@
+# --- Secrets / local launcher (contains an API key — never commit) ---
+claude-ds.sh
+.env
+.env.*
+
+# --- Claude Code local state ---
+.claude/
+.claude.local.md
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Triton / CUDA build + cache artifacts ---
+.triton/
+*.ptx
+*.cubin
+*.ttir
+*.ttgir
+*.llir
+
+# --- Profiler output (Nsight Compute / Systems) ---
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# --- Benchmark scratch ---
+bench_out/
+*.csv
+*.png
