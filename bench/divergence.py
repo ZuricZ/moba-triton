@@ -1,27 +1,23 @@
-"""Measures routing divergence -- the quantity that decides the loop order.
+"""Measures how much routing diverges across a query tile.
 
-Two dual statistics, computed from real oracle selection masks rather than
-estimated:
+This quantifies the central claim in `docs/learning/01-loop-order-and-memory-traffic.md`:
+that a query-major kernel must load the *union* of blocks its tile selected,
+and that at small `block_size` the union dwarfs what any single query needs.
 
-*Query-major utilization.* A query tile must load the union of the blocks its
-queries selected, then mask away what each individual query did not want. This
-reports useful block-query pairs divided by computed ones. It is the fraction
-of a query-major kernel's tensor-core work that is not thrown away.
+The distinction that matters, and the reason this is not simply "average union
+size": a query-major kernel loads the union into SRAM and then scores **every
+query in the tile against every key in the union**, masking afterwards. Its
+work is therefore `BLOCK_M * union_keys`, not `union_keys`. Utilization is the
+useful fraction of that.
 
-*Consumers per KV block.* In the inverted kernel, a loaded block serves every
-query that selected it. This reports how many that is. It is the amortization
-factor of the KV-block-major design, and it sizes the logical query group.
-
-Neither number depends on any kernel existing -- both are properties of the
-selection pattern alone, so they can be measured now and used to choose tile
-shapes before a line of Triton is written.
-
-CAVEAT ON INPUT DATA: with random Gaussian q/k the gate scores are unstructured,
-so queries select near-independently. That is the *adversarial* end of the
-range. A trained model's neighbouring queries have correlated representations
-and would agree more, raising utilization. Read these as a lower bound on
-query-major utilization, not as the expected value in production.
+The output is a ceiling, not a prediction. It says what speedup a *perfect*
+query-major kernel could reach -- one with zero launch overhead, perfect
+occupancy, and free masking. A real one does worse. If the ceiling is already
+low, no amount of tuning rescues the loop order, which is precisely the
+question the inverted kernel exists to answer.
 """
+
+from dataclasses import dataclass
 
 import torch
 
@@ -29,124 +25,176 @@ from moba.config import MoBAConfig
 from moba.ref.naive import moba_selection
 
 
-def divergence_stats(
-    selected: torch.Tensor, block_m: int
-) -> dict[str, float]:
-    """Computes query-major utilization and inverted-kernel amortization.
+@dataclass(frozen=True)
+class DivergenceRow:
+    """Routing divergence for one (config, tile size) pair."""
+
+    seq_len: int
+    block_size: int
+    top_k: int
+    tile_size: int
+    num_blocks: int
+    mean_blocks_per_query: float
+    mean_union_per_tile: float
+    divergence_ratio: float
+    utilization: float
+    true_ceiling: float
+    query_major_ceiling: float
+    recoverable: float
+
+
+def _block_occupancy(seq_len: int, cfg: MoBAConfig, device) -> torch.Tensor:
+    """Number of real keys in each block; the last one may be short.
 
     Args:
-        selected: Boolean selection mask shaped [B, H, S, num_blocks].
-        block_m: Query tile height a query-major kernel would use.
+        seq_len: Sequence length.
+        cfg: Configuration supplying `block_size`.
+        device: Device for the result.
 
     Returns:
-        A dict with `utilization`, `mean_union`, `mean_per_query`,
-        `consumers_per_block` and `max_consumers`.
+        Float tensor shaped [num_blocks].
     """
-    b, h, s, n = selected.shape
-    tiles = selected.view(b, h, s // block_m, block_m, n)
-
-    # A tile must load every block any of its queries wanted.
-    union = tiles.any(dim=3)                       # [B, H, T, num_blocks]
-
-    computed = union.sum(dim=-1).to(torch.float64) * block_m
-    useful = tiles.sum(dim=(-1, -2)).to(torch.float64)
-
-    # Inverted view: how many queries select each block.
-    consumers = selected.sum(dim=2).to(torch.float64)   # [B, H, num_blocks]
-    live = consumers[consumers > 0]
-
-    return {
-        "utilization": (useful.sum() / computed.sum()).item(),
-        "mean_union": union.sum(dim=-1).to(torch.float64).mean().item(),
-        "mean_per_query": selected.sum(dim=-1).to(torch.float64).mean().item(),
-        "consumers_per_block": live.mean().item(),
-        "max_consumers": live.max().item(),
-    }
+    num_blocks = cfg.num_blocks(seq_len)
+    occ = torch.full((num_blocks,), float(cfg.block_size), device=device)
+    occ[-1] = seq_len - (num_blocks - 1) * cfg.block_size
+    return occ
 
 
-def run(
-    seq_lens: tuple[int, ...] = (1024, 2048, 4096),
-    block_sizes: tuple[int, ...] = (16, 32, 64, 128),
-    top_ks: tuple[int, ...] = (2, 4),
-    block_ms: tuple[int, ...] = (16, 32, 64, 128),
-    heads: int = 8,
-    head_dim: int = 64,
+def measure_divergence(
+    selected: torch.Tensor, cfg: MoBAConfig, tile_size: int
+) -> DivergenceRow:
+    """Computes divergence statistics from a selection mask.
+
+    Args:
+        selected: Boolean selection mask shaped [B, H, S, num_blocks], as
+            produced by `moba.ref.naive.moba_selection`.
+        cfg: Configuration the mask was produced with.
+        tile_size: Query tile size (`BLOCK_M`) a kernel would use. Must divide
+            the sequence length.
+
+    Returns:
+        A populated DivergenceRow.
+
+    Raises:
+        ValueError: If `tile_size` does not divide the sequence length.
+    """
+    b, h, s, num_blocks = selected.shape
+    if s % tile_size:
+        raise ValueError(f"tile_size {tile_size} must divide seq_len {s}")
+
+    device = selected.device
+    occ = _block_occupancy(s, cfg, device)                    # [N]
+    pos = torch.arange(s, device=device)
+    own_block = pos // cfg.block_size                         # [S]
+    blocks = torch.arange(num_blocks, device=device)
+    is_past = blocks.view(1, -1) < own_block.view(-1, 1)      # [S, N]
+
+    # --- Useful work: keys each query actually attends to. ------------------
+    # Its own block contributes the causally visible prefix; every selected
+    # past block contributes all of its keys.
+    n_past = (selected & is_past.view(1, 1, s, num_blocks)).sum(-1).float()
+    prefix = (pos - own_block * cfg.block_size + 1).float()   # [S]
+    useful_per_query = prefix.view(1, 1, s) + n_past * cfg.block_size
+
+    # --- Query-major work: every query scored against the whole union. ------
+    tiles = s // tile_size
+    per_tile = selected.view(b, h, tiles, tile_size, num_blocks)
+    union = per_tile.any(dim=3)                               # [B, H, T, N]
+    union_keys = (union.float() * occ).sum(-1)                # [B, H, T]
+    query_major_per_tile = union_keys * tile_size
+
+    # --- Dense causal work, the common denominator. -------------------------
+    dense_per_query = (pos + 1).float()
+
+    useful = useful_per_query.sum().item()
+    query_major = query_major_per_tile.sum().item()
+    dense = dense_per_query.sum().item() * b * h
+
+    blocks_per_query = selected.sum(-1).float().mean().item()
+    union_per_tile = union.sum(-1).float().mean().item()
+
+    return DivergenceRow(
+        seq_len=s,
+        block_size=cfg.block_size,
+        top_k=cfg.top_k,
+        tile_size=tile_size,
+        num_blocks=num_blocks,
+        mean_blocks_per_query=blocks_per_query,
+        mean_union_per_tile=union_per_tile,
+        divergence_ratio=union_per_tile / blocks_per_query,
+        utilization=useful / query_major,
+        true_ceiling=dense / useful,
+        query_major_ceiling=dense / query_major,
+        recoverable=(dense / useful) / (dense / query_major),
+    )
+
+
+def sweep(
+    shape: tuple[int, int, int, int],
+    gates: list[tuple[int, int]],
+    tile_sizes: list[int],
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
-) -> list[dict]:
-    """Sweeps configurations and returns one record per (config, block_m).
+) -> list[DivergenceRow]:
+    """Measures divergence across a gate and tile-size sweep.
+
+    Selection is recomputed once per gate and reused across tile sizes, since
+    tiling is a property of the kernel, not of the routing.
 
     Args:
-        seq_lens: Sequence lengths to measure.
-        block_sizes: MoBA block sizes.
-        top_ks: Gate budgets, inclusive convention.
-        block_ms: Query tile heights to evaluate for the query-major case.
-        heads: Number of attention heads.
-        head_dim: Head dimension.
-        dtype: Input dtype.
-        seed: RNG seed.
+        shape: (batch, heads, seq_len, head_dim).
+        gates: List of (block_size, top_k).
+        tile_sizes: Query tile sizes to evaluate.
+        dtype: Compute dtype for the gate.
+        seed: RNG seed, so runs are comparable.
 
     Returns:
-        A list of flat dicts suitable for tabulation.
+        One DivergenceRow per (gate, tile_size).
     """
-    rows = []
-    for s in seq_lens:
+    rows: list[DivergenceRow] = []
+    for block_size, top_k in gates:
+        cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=dtype)
         g = torch.Generator(device="cuda").manual_seed(seed)
-        q = torch.randn(1, heads, s, head_dim, generator=g,
-                        device="cuda", dtype=dtype)
-        k = torch.randn(1, heads, s, head_dim, generator=g,
-                        device="cuda", dtype=dtype)
-        for bk in block_sizes:
-            for tk in top_ks:
-                cfg = MoBAConfig(block_size=bk, top_k=tk, dtype=dtype)
-                sel = moba_selection(q, k, cfg)
-                for bm in block_ms:
-                    if bm > s:
-                        continue
-                    stats = divergence_stats(sel, bm)
-                    rows.append(
-                        {"seq_len": s, "block_size": bk, "top_k": tk,
-                         "block_m": bm, "num_blocks": sel.shape[-1], **stats}
-                    )
-                del sel
-        del q, k
+        q, k = (
+            torch.randn(shape, generator=g, device="cuda", dtype=dtype)
+            for _ in range(2)
+        )
+        selected = moba_selection(q, k, cfg)
+        for tile_size in tile_sizes:
+            rows.append(measure_divergence(selected, cfg, tile_size))
+        del q, k, selected
     return rows
 
 
-def to_markdown(rows: list[dict], top_k: int, block_m: int) -> str:
-    """Renders one slice of the sweep as a markdown table.
+def to_markdown(rows: list[DivergenceRow]) -> str:
+    """Renders divergence rows as a markdown table.
 
     Args:
-        rows: Records from `run`.
-        top_k: Gate budget to filter to.
-        block_m: Query tile height to filter to.
+        rows: Measured rows.
 
     Returns:
-        A markdown table string.
+        A markdown string.
     """
-    sel = [r for r in rows if r["top_k"] == top_k and r["block_m"] == block_m]
-    head = ("| seq_len | block_size | num_blocks | mean union | per query | "
-            "**utilization** | consumers/block | max |")
-    sep = "|" + "---|" * 8
-    body = [
-        f"| {r['seq_len']} | {r['block_size']} | {r['num_blocks']} | "
-        f"{r['mean_union']:.1f} | {r['mean_per_query']:.2f} | "
-        f"**{r['utilization']:.3f}** | {r['consumers_per_block']:.1f} | "
-        f"{r['max_consumers']:.0f} |"
-        for r in sel
-    ]
-    return "\n".join([head, sep, *body])
+    header = (
+        "| block_size | tile | blocks/query | union/tile | divergence | "
+        "utilization | true ceiling | query-major ceiling | recoverable |"
+    )
+    sep = "|---:" * 9 + "|"
+    lines = [header, sep]
+    for r in rows:
+        lines.append(
+            f"| {r.block_size} | {r.tile_size} | {r.mean_blocks_per_query:.2f} | "
+            f"{r.mean_union_per_tile:.2f} | {r.divergence_ratio:.2f}x | "
+            f"{r.utilization:.3f} | {r.true_ceiling:.2f}x | "
+            f"{r.query_major_ceiling:.2f}x | {r.recoverable:.2f}x |"
+        )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    import json
-    import sys
-
-    rows = run()
-    if "--json" in sys.argv:
-        print(json.dumps(rows))
-    else:
-        for tk in (2, 4):
-            for bm in (16, 64, 128):
-                print(f"\n### top_k={tk}, BLOCK_M={bm}\n")
-                print(to_markdown(rows, tk, bm))
+    rows = sweep(
+        shape=(1, 8, 1024, 64),
+        gates=[(128, 2), (64, 2), (32, 2), (16, 2)],
+        tile_sizes=[16, 32, 64, 128],
+    )
+    print(to_markdown(rows))
