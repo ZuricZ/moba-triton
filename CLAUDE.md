@@ -119,7 +119,19 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 - torch **must** come from the cu126 index — pinned in `pyproject.toml`.
   Default wheels are `+cu130` and fail CUDA init against this 12.7 driver.
 - Never run Python/Triton on the Windows side — no CUDA there.
+- **`uv pip install` ignores `UV_PROJECT_ENVIRONMENT`** — that variable only
+  governs `uv sync` and `uv run`. Since the venv is outside the repo, `uv pip`
+  needs `--python "$HOME/.venvs/moba/bin/python"` explicitly, or it errors with
+  "No virtual environment found".
+- The CUDA toolkit is installed at `/usr/local/cuda-12.6` but is **not on
+  `PATH`**, so `nvcc` looks absent when it isn't. Anything that compiles CUDA
+  needs `export CUDA_HOME=/usr/local/cuda-12.6; export PATH="$CUDA_HOME/bin:$PATH"`.
+- **git identity is set on Windows, not in WSL.** Run `git` from PowerShell;
+  committing from inside WSL fails with "Author identity unknown".
+- A wrapper shell exiting 0 does not mean the command inside it succeeded, and
+  a silent log does not mean no progress. Check the log contents and the
+  process table, not the exit code. (Same trap as `import triton` above.)
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: FOUNDATIONS COMPLETE (tasks 1-10), 160 tests green. FlashMoBA digest done: it inverts the loop to KV-block-major CSC. Next: kernel spec.
+> Status: FA-2 rebuilt and dissected (learning notes 01-02); divergence measured — query-major utilization 0.028 at S=4096/block=16, inverted amortization = top_k x block_size. Next: MoBA kernel spec (open: gather placement, load imbalance).
