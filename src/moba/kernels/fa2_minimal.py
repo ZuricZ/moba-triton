@@ -6,10 +6,23 @@ removed -- no autotuning, no backward pass, no fp8, no variable-length
 sequences, no GQA. Those belong in a production kernel and would only obscure
 the mechanism here.
 
-It is also the direct ancestor of the MoBA kernel: the inner loop below (load a
-K/V tile, score it, fold it into a running softmax) is the same inner loop MoBA
-needs. MoBA changes *which* tiles get visited and *which* queries are grouped,
-not what happens once a tile is resident.
+Its role in this project is twofold, and neither is "the base class the MoBA
+kernel extends" -- the MoBA kernel is KV-block-major, so its grid, loop bounds
+and output ownership all differ.
+
+1. **Reference for the inner loop.** Load a K/V tile, score it, fold it into a
+   running softmax, normalize once at the end. That sequence is unchanged in
+   any FlashAttention-family kernel, MoBA's included. Only *which* tiles get
+   visited and *which* queries are grouped change.
+2. **Candidate for the local pass.** Every MoBA query always attends its own
+   block, which is a contiguous causal band with no routing, no gather and no
+   divergence. That path is plain causal attention, and this kernel (or a close
+   variant) can serve it directly.
+
+It also stands as the project's only independent check that Triton produces
+correct attention on this machine -- that `tl.dot`, the fp32 accumulators and
+the online softmax behave as expected on sm_86. When the MoBA kernel later
+disagrees with the oracle, that whole class of suspect is already eliminated.
 
 Layout assumption: q, k, v are contiguous [B, H, S, D]. Requiring contiguity
 lets us index with a single flat offset instead of carrying four strides per
