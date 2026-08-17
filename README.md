@@ -1,10 +1,10 @@
-﻿# MoBA Triton Kernel
+# MoBA Triton Kernel
 
 A Triton implementation of **MoBA** (Mixture of Block Attention) built to stay
 efficient at *small* block sizes, where existing implementations collapse.
 
 This is a learning project. The documentation is written to be read, not just
-referenced â€” see [Documentation](#documentation).
+referenced — see [Documentation](#documentation).
 
 ---
 
@@ -15,15 +15,15 @@ raises sparsity sharply. Measured on an RTX 3050 Ti (sm_86), S=1024, `top_k=2`:
 
 | block_size | sparsity | speedup available | reference latency | attainment |
 |---:|---:|---:|---:|---:|
-| 128 | 0.344 | 2.90Ã— | 5.95 ms | 0.008 |
-| 64 | 0.180 | 5.54Ã— | 6.75 ms | 0.003 |
-| 32 | 0.093 | 10.79Ã— | 10.01 ms | 0.001 |
-| **16** | **0.047** | **21.13Ã—** | **15.35 ms** | **0.000** |
+| 128 | 0.344 | 2.90× | 5.95 ms | 0.008 |
+| 64 | 0.180 | 5.54× | 6.75 ms | 0.003 |
+| 32 | 0.093 | 10.79× | 10.01 ms | 0.001 |
+| **16** | **0.047** | **21.13×** | **15.35 ms** | **0.000** |
 
-As the available speedup rises 7Ã—, the implementation gets **2.6Ã— slower**.
+As the available speedup rises 7×, the implementation gets **2.6× slower**.
 Dense `torch` SDPA runs the same shape in 0.13 ms.
 
-**Attainment** â€” measured speedup Ã· available speedup â€” is the project's
+**Attainment** — measured speedup ÷ available speedup — is the project's
 headline metric. Raw speedup is gameable by choosing a sparser config;
 attainment is not. Details in [`docs/baseline-results.md`](docs/baseline-results.md).
 
@@ -43,22 +43,22 @@ away what each individual query did not want:
 | 4096 | **16** | **0.134** | **0.043** | **0.028** |
 
 At S=4096 with `block_size=16` and a conventional tile height of 128, a
-query-major kernel **discards 97.2% of its tensor-core work** â€” and it gets
+query-major kernel **discards 97.2% of its tensor-core work** — and it gets
 worse as context grows, which is the regime MoBA exists to serve.
 
 **The decision: invert the loop to KV-block-major.** Instead of a program
 owning a query tile and looping over blocks, a program owns one KV block and
 gathers exactly the queries that selected it. Every key loaded is then used by
-every query held â€” utilization is 100% by construction rather than by tuning.
-The group size has a closed form, `top_k Ã— block_size`, which is **independent
+every query held — utilization is 100% by construction rather than by tuning.
+The group size has a closed form, `top_k × block_size`, which is **independent
 of sequence length** (measured 31.9 against a predicted 32).
 
 The cost is that a query now receives partial results from several programs,
 which must be combined with an online-softmax merge in a separate pass.
 
 Derivations: [learning note 01](docs/learning/01-loop-order-and-memory-traffic.md)
-Â· measurements: [`docs/divergence-measurements.md`](docs/divergence-measurements.md)
-Â· prior art: [`docs/flashmoba-digest.md`](docs/flashmoba-digest.md)
+· measurements: [`docs/divergence-measurements.md`](docs/divergence-measurements.md)
+· prior art: [`docs/flashmoba-digest.md`](docs/flashmoba-digest.md)
 
 ---
 
@@ -74,8 +74,8 @@ Foundations and groundwork complete; the MoBA kernel itself is not yet written.
   flips
 - Benchmark suite reporting attainment against the sparsity ceiling
 - Minimal FlashAttention-2 forward kernel in Triton, verified against SDPA
-- **Next:** MoBA kernel spec â€” open questions are gather placement and
-  load imbalance (measured 6.2Ã— hot-column skew)
+- **Next:** MoBA kernel spec — open questions are gather placement and
+  load imbalance (measured 6.2× hot-column skew)
 
 Tests: 157 passed, 7 skipped, 18 slow deselected.
 
@@ -83,7 +83,7 @@ Tests: 157 passed, 7 skipped, 18 slow deselected.
 
 ```
 src/moba/
-  config.py          MoBAConfig â€” semantics flags, block arithmetic
+  config.py          MoBAConfig — semantics flags, block arithmetic
   device.py          GPU capability probing
   tolerance.py       correctness policy (exact routing, relative arithmetic)
   ref/naive.py       the oracle: executable definition of MoBA
@@ -118,8 +118,8 @@ Written to be read in order:
 
 | Document | What it covers |
 |---|---|
-| [learning/01 â€” loop order and memory traffic](docs/learning/01-loop-order-and-memory-traffic.md) | Why small blocks break FlashAttention, from first principles. No GPU knowledge assumed. |
-| [learning/02 â€” anatomy of a FlashAttention kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md) | Reading a real Triton kernel: grids, tiling, occupancy, warps, online softmax â€” then breaking it on purpose. |
+| [learning/01 — loop order and memory traffic](docs/learning/01-loop-order-and-memory-traffic.md) | Why small blocks break FlashAttention, from first principles. No GPU knowledge assumed. |
+| [learning/02 — anatomy of a FlashAttention kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md) | Reading a real Triton kernel: grids, tiling, occupancy, warps, online softmax — then breaking it on purpose. |
 | [flashmoba-digest](docs/flashmoba-digest.md) | What FlashMoBA's CUDA actually does, cited line by line. |
 | [divergence-measurements](docs/divergence-measurements.md) | Routing divergence measured from real selection masks. |
 | [baseline-results](docs/baseline-results.md) | The problem, quantified. |
@@ -127,10 +127,10 @@ Written to be read in order:
 
 ## References
 
-- **MoBA** â€” Lu et al., Moonshot AI â€” [arXiv:2502.13189](https://arxiv.org/abs/2502.13189)
-- **FlashMoBA** â€” Xiao, Guo, Mazaheri, Han (MIT Han Lab) â€” [arXiv:2511.11571](https://arxiv.org/abs/2511.11571)
-- **FSA** â€” [arXiv:2508.18224](https://arxiv.org/abs/2508.18224) â€” closest structural template
-- **FlashAttention** â€” [arXiv:2205.14135](https://arxiv.org/abs/2205.14135) Â· **FlashAttention-2** â€” [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
+- **MoBA** — Lu et al., Moonshot AI — [arXiv:2502.13189](https://arxiv.org/abs/2502.13189)
+- **FlashMoBA** — Xiao, Guo, Mazaheri, Han (MIT Han Lab) — [arXiv:2511.11571](https://arxiv.org/abs/2511.11571)
+- **FSA** — [arXiv:2508.18224](https://arxiv.org/abs/2508.18224) — closest structural template
+- **FlashAttention** — [arXiv:2205.14135](https://arxiv.org/abs/2205.14135) · **FlashAttention-2** — [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
 
 Reference implementations are vendored read-only under `references/`
 (gitignored) and are never modified.
