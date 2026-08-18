@@ -84,21 +84,36 @@ not the data, and output addresses derive from query indices.
 ~1.6 jobs/processor, and it makes each chunk re-load the KV block, spending the
 memory reuse D6 exists to obtain. See Deferred for the trigger.
 
-**D9 — Separate local and sparse passes.** The query's own block is handled by a
-dedicated block-diagonal kernel; only *past* blocks go through the gathered
-path. Results are merged in the combine pass.
+**D9 — One unified gathered pass. The own block is not special-cased.** Every
+selected block, including the query's own, goes through the same kernel.
+Causality, when enabled, is one predicated check per element.
 
-*Rationale:* the own block is the only one needing an internal causal mask, and
-it is contiguous, always selected, and free of routing divergence. Routing it
-through the gather machinery would pay index cost for structure known
-statically. Splitting it also removes causal masking from the sparse pass
-entirely — every block it sees lies wholly in the past. Matches MoBA Algorithm 1
-(`get_self_attn_block` versus `index_select_moba_attn_block`).
+*Rationale:* the only respect in which the own block differs is that it contains
+positions *after* the query, which must be masked. Every other selected block
+lies wholly in the past, so the same check — `key_pos <= query_pos` — is a
+no-op there and correct everywhere. One `tl.where`, uniform code, no branch.
 
-*Consequence to note:* the sparse pass's group size becomes
-`(top_k - 1) x block_size`, not `top_k x block_size`, since the own block left.
-At `top_k=2, block_size=16` that is **16** — exactly the tensor-core minimum.
-Tight but workable; see Global constraints.
+The alternative considered was MoBA Algorithm 1's structure: a dedicated
+block-diagonal kernel for the own block (`get_self_attn_block`) and the gathered
+path for the rest (`index_select_moba_attn_block`). Rejected for three reasons:
+
+1. **It is justified by a flag.** `causal` is configurable. Under
+   `causal=False` the own block differs from any other block in no way at all,
+   and the split leaves a second kernel whose distinguishing feature does
+   nothing. A structure that dissolves when a flag flips is not structure.
+2. **It saves no work.** The masked-away half of the diagonal tile is wasted
+   identically in both designs. Splitting moves that waste to another kernel
+   rather than removing it.
+3. **Gathering is not the cost.** D7 measured scatter at 1.03x, so there is no
+   saving in exempting contiguous queries from the gather path.
+
+*Consequence:* the group size stays `top_k x block_size` — **32** at
+`top_k=2, block_size=16`, double the tensor-core minimum, rather than the 16
+the split design would have produced. Merging removes the spec's tightest
+constraint as a side effect.
+
+*Cost accepted:* one predicated select per element even when most blocks need
+no masking, and `top_k` partial slots per query rather than `top_k - 1`.
 
 **D10 — Fixed-slot partial storage with a separate combine pass.** Each sparse
 program writes `(m, l, acc)` per query into a slot indexed by the query's
@@ -112,7 +127,7 @@ separate atomics reintroduces the race. Adding raw `acc` values is precisely the
 NaN, output range identical to correct.**
 
 Indexing partials by selection rank rather than CSC position lets the combine
-pass read a fixed `K = top_k - 1` slots per query at constant stride —
+pass read a fixed `K = top_k` slots per query at constant stride —
 contiguous and coalesced, no indirection — at the cost of padding rows for early
 queries with fewer past blocks. Those are masked by initializing `m` to `-inf`.
 
@@ -141,10 +156,11 @@ Additional to the foundations spec.
   row is at least one cache line. At D=32 bf16 (64 bytes) a gathered row pulls a
   full line to use half of it. D=64 and D=128 are the supported cases; smaller D
   must be validated, not assumed.
-- **Sparse-pass group size**
-  `GROUP = max(16, round_up_16((top_k - 1) * block_size))`. Derived analytically
-  from the measured consumer count, not from a threshold table as FlashMoBA's
-  `decide_lg_block_m` uses (digest §4.2).
+- **Group size** `GROUP = max(16, round_up_16(top_k * block_size))`. Derived
+  analytically from the measured consumer count, not from a threshold table as
+  FlashMoBA's `decide_lg_block_m` uses (digest §4.2). At
+  `top_k=2, block_size=16` this is 32 — twice the tensor-core minimum, which is
+  a direct consequence of D9's merge.
 - **Shared memory budget 99 KiB per program** on sm_86. From learning note 02,
   shared memory for a tiled kernel follows `2*D*BLOCK_M + 8*D*BLOCK_N` (bf16),
   the factor 8 being double-buffering of K and V. Budget explicitly; overflow
@@ -158,23 +174,21 @@ Additional to the foundations spec.
 
 ## Architecture
 
-Four kernels, three stages.
+Three kernels, three stages.
 
 ```
-Stage 1  gate + index build          (PyTorch, v1)
+Stage 1  gate + index build       (PyTorch, v1)
            -> col_nnz, col_offsets, row_indices, slot_of_pair, order
 
-Stage 2a local pass       (Triton)   block-diagonal causal attention
-           -> local_m, local_l, local_acc       [B,H,S], [B,H,S], [B,H,S,D]
+Stage 2  attention pass           (Triton)  gathered, KV-block-major
+           -> part_m, part_l, part_acc  [B,H,S,K], [B,H,S,K], [B,H,S,K,D]
 
-Stage 2b sparse pass      (Triton)   gathered, KV-block-major, no causal mask
-           -> part_m, part_l, part_acc     [B,H,S,K], [B,H,S,K], [B,H,S,K,D]
-
-Stage 3  combine          (Triton)   log-sum-exp merge of K+1 partials
-           -> out                                        [B,H,S,D]
+Stage 3  combine                  (Triton)  log-sum-exp merge of K partials
+           -> out                                     [B,H,S,D]
 ```
 
-`K = top_k - 1` is the number of past blocks a query may select.
+`K = top_k` is the number of blocks a query may select, the own block included
+(the inclusive convention adopted in the foundations spec).
 
 ### Data structures
 
@@ -207,27 +221,20 @@ indistinguishable from a race when debugging.
    occupancy so a short tail block is not shrunk toward zero.
 2. `scores = einsum(q, kbar)`, unscaled: `1/sqrt(D)` is a positive monotone
    transform and cannot reorder a ranking.
-3. Mask non-past blocks to `-inf`; stable argsort; take `K`.
-4. Counting sort into CSC: `bincount` -> `cumsum` -> scatter.
+3. Mask non-past blocks to `-inf`; stable argsort; take `K - 1` past blocks,
+   then add the query's own block, which is always selected and does not
+   compete (foundations spec, `top_k_includes_current`). Total per query is at
+   most `K = top_k`.
+4. Counting sort into CSC: `bincount` -> `cumsum` -> scatter. Slot numbers are
+   assigned in the query-major order produced by step 3, so `slot_of_pair` is
+   dense in `range(k_i)` for each query.
 5. `order = argsort(col_nnz, descending=True)`.
 
 Exposed as `moba.kernels.index.build_csc(q, k, cfg)` returning the table above,
 so it can be unit-tested against the oracle's boolean mask independently of any
 attention kernel.
 
-### Stage 2a — local pass
-
-One program per `BLOCK_M` queries. Loads only the keys and values of the blocks
-those queries belong to, applies the causal mask within the block, and emits
-`(m, l, acc)` un-normalized.
-
-With `BLOCK_M = block_size` the tile aligns exactly with one block and the mask
-is the standard causal triangle. Larger `BLOCK_M` spans several blocks and needs
-a block-diagonal mask; both are expressible with `tl.where`, and `BLOCK_M` is an
-autotune parameter. At `block_size=16` this is a thin band — small absolute
-work, but `S` rows of it, so it is not free.
-
-### Stage 2b — sparse pass
+### Stage 2 — attention pass
 
 The heart of the kernel.
 
@@ -237,13 +244,18 @@ block = order[pid_bh, pid_col]                   # longest-first dispatch (D8)
 
 lo, n = col_offsets[block], col_nnz[block]
 kv = load K[block], V[block]                     # once, into SRAM
+key_pos = block * block_size + arange(block_size)
 
 for chunk in range(0, n, GROUP):
     rows  = row_indices[lo + chunk : lo + chunk + GROUP]   # query ids
     slots = slot_of_pair[lo + chunk : ...]
     q     = load Q[rows]                         # gathered rows (D7)
 
-    qk  = dot(q, trans(kv.k)) * sm_scale         # no causal mask needed (D9)
+    qk = dot(q, trans(kv.k)) * sm_scale
+    if CAUSAL:                                   # compile-time, uniform
+        qk = where(key_pos[None, :] <= rows[:, None], qk, -inf)
+    qk = where(key_pos[None, :] < seq_len, qk, -inf)   # short tail block
+
     m   = max(qk, axis=1)
     p   = exp(qk - m)
     l   = sum(p, axis=1)
@@ -256,21 +268,28 @@ for chunk in range(0, n, GROUP):
 
 Notes that matter:
 
-- **No causal masking.** Every block here lies wholly in the past. The
-  per-element `tl.where` disappears.
+- **Causality is one predicated select, and it is a no-op for most blocks.**
+  For any block wholly in the past, `key_pos <= query_pos` holds everywhere, so
+  the `where` changes nothing. Only the query's own block is actually trimmed.
+  `CAUSAL` is a `tl.constexpr`, so the check compiles away entirely when the
+  flag is off (D9).
 - **No online softmax loop.** A program sees each of its queries against exactly
   one block, so the max and sum are computed in one shot. The online machinery
   moves entirely into stage 3. This is a genuine simplification relative to a
   dense FA-2 inner loop.
 - **Uniform branching.** Every query in the program selected this block, so
   "does this query need this block?" is uniform across the warp — the free cell
-  of the divergence table in learning note 02 §4.
+  of the divergence table in learning note 02 §4. The causal trim is
+  per-element rather than a branch, so it does not reintroduce divergence.
+- **A fully masked row is possible** only if a query's own block starts after
+  it, which cannot happen. Rows therefore always have at least one live entry
+  and `m` is never `-inf`, so `exp(qk - m)` is safe without a guard.
 - `n` is not generally a multiple of `GROUP`; the tail chunk is masked.
 
 ### Stage 3 — combine
 
-One program per `BLOCK_M` queries. Reads `K+1` partials per query — `K` sparse
-slots at fixed stride plus the local one — and merges:
+One program per `BLOCK_M` queries. Reads the query's `K` partial slots at fixed
+stride and merges them:
 
 ```
 m_g = max over slots of m_i                   # empty slots hold -inf
@@ -354,16 +373,17 @@ the inverted kernel *will*, because CSC construction, gathered reads and the
 combine pass are unpriced. Mitigation: stage-by-stage benchmarking so each
 overhead is attributable.
 
-**The combine pass may dominate.** It reads `K+1` partials and writes `S x D`
+**The combine pass may dominate.** It reads `K` partials and writes `S x D`
 outputs — traffic proportional to `top_k`. At large `top_k` this could exceed
 the attention itself. Mitigation: measure at `top_k` 2, 4, 8; if it dominates,
 the fix is to have one program handle several of a query's blocks, reducing the
 partial count.
 
-**`GROUP = 16` at the hardest configuration** sits exactly at the tensor-core
-minimum, with no margin. If `(top_k - 1) x block_size < 16`, padding waste
-begins. Mitigation: the constraint is stated, and grouping multiple KV blocks
-per program is the known escape.
+**Small `top_k x block_size` still bottoms out at the tensor-core minimum.**
+The merge in D9 buys headroom (32 rather than 16 at the hardest configuration)
+but does not remove the floor: any configuration with
+`top_k x block_size < 16` pads. Mitigation: the constraint is stated, and
+grouping multiple KV blocks per program is the known escape.
 
 **Gate cost may swamp everything at `block_size=16`** (D11). Mitigation:
 measured, not assumed; a Triton gate is already scoped in Deferred.

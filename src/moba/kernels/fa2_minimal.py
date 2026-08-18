@@ -14,10 +14,14 @@ and output ownership all differ.
    running softmax, normalize once at the end. That sequence is unchanged in
    any FlashAttention-family kernel, MoBA's included. Only *which* tiles get
    visited and *which* queries are grouped change.
-2. **Candidate for the local pass.** Every MoBA query always attends its own
-   block, which is a contiguous causal band with no routing, no gather and no
-   divergence. That path is plain causal attention, and this kernel (or a close
-   variant) can serve it directly.
+2. **A dense baseline we own.** The benchmark's dense roofline is torch SDPA,
+   which is a fused CUDA kernel; this is the Triton-side comparison, so a
+   MoBA/dense gap can be attributed to the algorithm rather than to the
+   language.
+
+   (An earlier draft listed this kernel as a candidate for a separate
+   "local pass" over each query's own block. Decision D9 in the kernel spec
+   merged that path into the unified gathered kernel, so no such pass exists.)
 
 It also stands as the project's only independent check that Triton produces
 correct attention on this machine -- that `tl.dot`, the fp32 accumulators and
