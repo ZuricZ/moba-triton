@@ -203,7 +203,7 @@ budgets). Allocate at the `S * K` upper bound so shapes are static, and let
 | `col_nnz` | `[B,H,N]` | int32 | queries selecting each block |
 | `col_offsets` | `[B,H,N+1]` | int32 | exclusive prefix sum of `col_nnz` |
 | `row_indices` | `[B,H,T]` | int32 | query indices, grouped by block, ascending within a block |
-| `slot_of_pair` | `[B,H,T]` | int8 | which of the query's K slots this pair owns |
+| `slot_of_pair` | `[B,H,T]` | int32 | which of the query's K slots this pair owns |
 | `order` | `[B,H,N]` | int32 | block ids sorted by `col_nnz` descending |
 
 Ascending `row_indices` within a column is deliberate: it costs nothing during
