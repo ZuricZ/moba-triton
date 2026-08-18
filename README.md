@@ -123,6 +123,7 @@ Written to be read in order:
 | [flashmoba-digest](docs/flashmoba-digest.md) | What FlashMoBA's CUDA actually does, cited line by line. |
 | [divergence-measurements](docs/divergence-measurements.md) | Routing divergence measured from real selection masks. |
 | [gather-cost-measurements](docs/gather-cost-measurements.md) | What gathering scattered rows actually costs. Settles where the permutation lives. |
+| [load-balance-measurements](docs/load-balance-measurements.md) | What KV-block skew costs after scheduling. Settles how hot blocks are handled. |
 | [baseline-results](docs/baseline-results.md) | The problem, quantified. |
 | [semantics-crosscheck](docs/semantics-crosscheck.md) | Rule-by-rule agreement with MoonshotAI's reference. |
 
