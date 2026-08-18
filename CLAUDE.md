@@ -134,4 +134,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: FA-2 rebuilt and dissected (learning notes 01-02); divergence measured — query-major utilization 0.028 at S=4096/block=16, inverted amortization = top_k x block_size. Next: MoBA kernel spec (open: gather placement, load imbalance).
+> Status: Kernel spec written (D6-D11), all decisions measurement-backed. Next: implementation plan, then the CSC index build.
