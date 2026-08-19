@@ -14,9 +14,22 @@ assumed rather than measured, it says so.
 
 ## Goal
 
-A Triton MoBA forward kernel that retains its advantage at **small block sizes**
-(`block_size` 16–32), where every implementation we can measure is currently
-*slower* than dense attention despite doing up to 21x less arithmetic.
+A Triton MoBA forward kernel that converts MoBA's arithmetic sparsity into
+actual speed, at the configurations real implementations use: `block_size`
+64–128, `top_k` 3–12, `head_dim` 128, long context.
+
+**Framing corrected 2026-08-19.** An earlier version of this goal named "small
+block sizes (16–32)" as the target. That was inherited from FlashMoBA's premise
+without checking their code. Their benchmarks use `block_size=128, top_k=8`
+throughout; `block_size=16` appears in neither reference. Sparsity comes from
+`num_blocks = S / block_size` being large, and the references obtain that from
+**long context** — their efficiency figure sweeps 8K to 512K at fixed
+`block_size=128` — not from shrinking blocks.
+
+The loop-order problem this kernel solves is unchanged by that correction: at
+`block_size=128, S=4096` a query-major kernel still discards 88% of its
+tensor-core work. Small blocks make it worse, but they are not what makes it
+real.
 
 ## Non-goals
 
@@ -38,11 +51,20 @@ blocks.
 
 *Rationale:* MoBA's selection is per query, so a query-major tile must load the
 union of blocks its queries wanted and mask away the rest. Measured utilization
-at S=4096, `block_size=16`, `BLOCK_M=128` is **0.028** — 97.2% of tensor-core
-work discarded — and it *decays* with sequence length, worsening in exactly the
-long-context regime MoBA exists to serve. No tile height escapes it: small tiles
-keep utilization up but abandon amortization; large tiles restore amortization
-and discard 97%.
+(`docs/divergence-measurements.md`) at `BLOCK_M=128`:
+
+| seq_len | block_size | utilization | work discarded |
+|---:|---:|---:|---:|
+| 4096 | **128** (realistic) | **0.121** | 88% |
+| 4096 | 16 | 0.028 | 97% |
+
+The 0.028 figure is the more dramatic one but comes from a block size no
+reference implementation uses; **0.121 at `block_size=128` is the number that
+justifies this decision**, and 88% discarded work is decisive on its own.
+Utilization also *decays* with sequence length, worsening in exactly the
+long-context regime MoBA exists to serve. No tile height escapes it: small
+tiles keep utilization up but abandon amortization; large tiles restore
+amortization and discard the result.
 
 Inverted, every key loaded is used by every query held. The consumer count has a
 closed form, `top_k x block_size`, **independent of S** (measured 31.9 against a
@@ -107,10 +129,11 @@ path for the rest (`index_select_moba_attn_block`). Rejected for three reasons:
 3. **Gathering is not the cost.** D7 measured scatter at 1.03x, so there is no
    saving in exempting contiguous queries from the gather path.
 
-*Consequence:* the group size stays `top_k x block_size` — **32** at
-`top_k=2, block_size=16`, double the tensor-core minimum, rather than the 16
-the split design would have produced. Merging removes the spec's tightest
-constraint as a side effect.
+*Consequence:* the group size stays proportional to `top_k x block_size`
+rather than `(top_k - 1) x block_size`. At realistic settings
+(`block_size=128, top_k=8`) both are comfortably above the tensor-core
+minimum, so the merge is not load-bearing for tile shape; it is load-bearing
+for having one code path instead of two.
 
 *Cost accepted:* one predicated select per element even when most blocks need
 no masking, and `top_k` partial slots per query rather than `top_k - 1`.
@@ -141,10 +164,11 @@ and a sort — a separate, easier optimization problem. Building it in PyTorch
 first gives a correct reference and a measurement of what it actually costs
 before effort is spent on it.
 
-*Risk, acknowledged:* `docs/baseline-results.md` shows gate cost grows as
-`block_size` shrinks (`num_blocks = S / block_size`), so it may dominate at
-`block_size=16`. That is a measurement to take, not a reason to pre-optimize.
-See Deferred.
+*Risk, acknowledged:* gate cost scales with `num_blocks = S / block_size`, so
+it grows with sequence length at fixed block size — and long context is exactly
+the regime this kernel targets. At S=32768, `block_size=128` the gate scores
+256 blocks per query. That is a measurement to take, not a reason to
+pre-optimize. See Deferred.
 
 ---
 
@@ -154,13 +178,30 @@ Additional to the foundations spec.
 
 - **`D x sizeof(dtype) >= 128 bytes`.** D7's measurement holds because a query
   row is at least one cache line. At D=32 bf16 (64 bytes) a gathered row pulls a
-  full line to use half of it. D=64 and D=128 are the supported cases; smaller D
-  must be validated, not assumed.
-- **Group size** `GROUP = max(16, round_up_16(top_k * block_size))`. Derived
-  analytically from the measured consumer count, not from a threshold table as
-  FlashMoBA's `decide_lg_block_m` uses (digest §4.2). At
-  `top_k=2, block_size=16` this is 32 — twice the tensor-core minimum, which is
-  a direct consequence of D9's merge.
+  full line to use half of it. **D=128 is primary** — both references use it —
+  with D=64 secondary; smaller D must be validated, not assumed.
+- **`block_size` is a multiple of 32, minimum 32.** A 16-wide reduction leaves
+  half of every 32-lane warp idle, and no reference implementation uses a block
+  smaller than 64. Checked against vendored source: FlashMoBA benchmarks use
+  128 (tests 64); MoonshotAI defaults to 512 and 4096.
+- **`top_k` realistic range is 3–12.** FlashMoBA benchmarks use 8, its tests 4;
+  MoonshotAI uses 3 and 12.
+- **Group size is chosen by shared-memory budget, not by a formula.**
+  `GROUP` starts at `min(128, round_up_16(top_k * block_size))` and halves
+  until `(2*block_size + 3*GROUP) * D * itemsize` fits the device's *opt-in*
+  shared memory. Two corrections are baked in here:
+  - An earlier draft set `GROUP = top_k * block_size` outright, sizing a tile
+    from a consumer count. `GROUP` is the inner-loop chunk height; K and V load
+    *outside* the loop, so a larger `GROUP` buys no amortization and only costs
+    shared memory. Uncapped it asked 112 KiB against 99 KiB and failed to
+    launch.
+  - The budget must come from `shared_memory_per_block_optin` (101376 on
+    sm_86), **not** `shared_memory_per_block` (49152). The latter is the static
+    default that kernels raise via `cudaFuncSetAttribute`, which Triton does.
+    Using it rejects configurations that launch fine.
+- **`block_size=256` is infeasible at D=128 on sm_86.** Its K and V tiles alone
+  need more than 99 KiB. `_choose_group` raises a clear error rather than
+  letting the launch fail cryptically.
 - **Shared memory budget 99 KiB per program** on sm_86. From learning note 02,
   shared memory for a tiled kernel follows `2*D*BLOCK_M + 8*D*BLOCK_N` (bf16),
   the factor 8 being double-buffering of K and V. Budget explicitly; overflow
@@ -385,21 +426,59 @@ but does not remove the floor: any configuration with
 `top_k x block_size < 16` pads. Mitigation: the constraint is stated, and
 grouping multiple KV blocks per program is the known escape.
 
-**Gate cost may swamp everything at `block_size=16`** (D11). Mitigation:
-measured, not assumed; a Triton gate is already scoped in Deferred.
+**Gate cost may swamp everything at long context** (D11). The gate's score
+matrix is `S x num_blocks`, which grows quadratically in S at fixed
+`block_size`. Mitigation: measured, not assumed; a Triton gate is already
+scoped in Deferred with a 20%-of-total trigger.
 
 ---
 
 ## Success criteria
 
-Measured on this machine, `block_size=16`, `top_k=2`, bf16, against dense SDPA:
+**Correctness and performance have different budgets, and conflating them was
+an error in the first draft of this spec.**
+
+The *oracle* materializes `[S, S]` and is what caps us near S=4096. The
+*kernel* never does — its partials are `[B,H,S,K,D]`, linear in S. So
+correctness is verified where the oracle can reach, and performance is measured
+where the design's premise applies.
+
+### Correctness — verified at S <= 4096 (oracle-bound)
+
+| criterion |
+|---|
+| Exact routing match against the oracle across the shape x gate sweep |
+| Arithmetic within the D5 relative tolerance |
+| All four invariants hold (unselected blocks, causality, tile-size, dispatch order) |
+| Bitwise determinism across repeated runs |
+
+### Performance — measured at S >= 16384 (kernel-bound)
+
+Against dense SDPA at `block_size=128`, `top_k=8`, D=128, bf16 — the
+configuration FlashMoBA benchmarks.
 
 | level | criterion |
 |---|---|
-| **Correctness** | exact routing match; arithmetic within the D5 relative tolerance; all four invariants hold |
-| **Threshold** | faster than dense SDPA at S >= 2048 — the bar no measured implementation currently clears |
-| **Target** | attainment >= 0.10 at S=4096 (currently 0.000) |
-| **Stretch** | attainment >= 0.30, roughly a 6x real speedup over dense |
+| **Threshold** | faster than dense SDPA at S >= 16384 |
+| **Target** | attainment >= 0.10 at S >= 32768 |
+| **Stretch** | attainment >= 0.30 |
 
-Attainment on 20 SMs with 4 GB is not the project's headline number; the *shape*
-of the curve across `block_size` is what transfers to an A100.
+**Why not S=2048.** The first draft set the threshold at S >= 2048 with
+`block_size=16`. Two things are wrong with that. First, `block_size=16` appears
+nowhere in either reference. Second, FlashMoBA's own published efficiency
+figure shows it roughly at *parity* with FlashAttention-2 at 8K, with its
+11.2x and 14.7x wins arriving at 256K and 512K. Asking our kernel to beat dense
+at 2048 asks it to do something the state of the art does not do at that
+length.
+
+Sparsity comes from `num_blocks = S / block_size` being large, and the
+references get that from long context, not from small blocks.
+
+Attainment on 20 SMs with 4 GB is not the project's headline number; the
+*shape* of the curve across S is what transfers to an A100.
+
+### Known limitation of this machine
+
+4 GB caps benchmarking well below 16384 at realistic head counts. The
+performance criteria are therefore expected to be evaluated on rented
+hardware; locally we establish correctness and the curve's shape.

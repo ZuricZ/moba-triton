@@ -126,19 +126,16 @@ def _moba_attn_fwd(
         )
 
 
-# Ceiling on the inner-loop chunk height.
-#
-# GROUP is how many queries are processed per iteration -- NOT how many
-# selected this block. The loop iterates as many times as needed either way,
-# and K/V are loaded once *outside* it, so a larger GROUP buys no extra
-# amortization; it only trims loop overhead. What it does cost is shared
-# memory, because the gathered q tile is [GROUP, D] and gets double-buffered.
-#
-# At block_size=128, top_k=2 the uncapped formula gives GROUP=256, which needs
-# 112 KiB against this GPU's 99 KiB and fails the launch outright. Capping is
-# the fix; the spec's `GROUP = top_k * block_size` conflated consumer count
-# with chunk height.
+# Absolute ceiling on the inner-loop chunk height, before the shared-memory
+# budget is applied. 128 is where register pressure starts to bite even when
+# shared memory allows more (measured 255 registers with 8 spills at D=64,
+# BLOCK_SIZE=128, GROUP=128).
 _MAX_GROUP = 128
+
+# Pipelining depth Triton allocates for the gathered q tile. Measured 2 or 3
+# depending on configuration; 3 is used so the estimate is an upper bound and
+# never predicts a launch that then fails.
+_PIPELINE_STAGES = 3
 
 
 def _round_up_16(x: int) -> int:
@@ -146,20 +143,95 @@ def _round_up_16(x: int) -> int:
     return max(16, ((x + 15) // 16) * 16)
 
 
-def _choose_group(cfg: MoBAConfig) -> int:
-    """Picks the inner-loop chunk height.
+def _shared_memory_budget(device: torch.device) -> int:
+    """Shared memory available to one program, in bytes.
 
-    Sized to the expected consumer count `top_k * block_size` so that small
-    blocks need exactly one iteration with nothing masked, then capped so the
-    q tile fits in shared memory.
+    Must be the *opt-in* maximum, not `shared_memory_per_block`. The latter is
+    the 48 KiB static default that every kernel gets without asking; a kernel
+    can raise its own limit via `cudaFuncSetAttribute`, which Triton does. On
+    sm_86 the two differ by more than a factor of two -- 49152 against 101376 --
+    so using the default rejects configurations that in fact launch fine.
+
+    Args:
+        device: CUDA device to query.
+
+    Returns:
+        Bytes of shared memory available per program.
+    """
+    props = torch.cuda.get_device_properties(device)
+    for attr in ("shared_memory_per_block_optin", "shared_memory_per_block"):
+        value = getattr(props, attr, None)
+        if value:
+            return int(value)
+    return 101376
+
+
+def _estimate_shared(block_size: int, group: int, d: int, itemsize: int) -> int:
+    """Estimates shared memory for one program, in bytes.
+
+    The K and V tiles are loaded once outside the inner loop, so they are
+    single-buffered at `BLOCK_SIZE x D` each. The gathered q tile is loaded
+    every iteration and Triton pipelines it, costing `_PIPELINE_STAGES`
+    copies of `GROUP x D`.
+
+    Fitted against measurements: at D=64, BLOCK_SIZE=128 the observed values
+    are 44.2 / 56.5 / 80.0 KiB for GROUP 32 / 64 / 128, against 44.2 / 56.2 /
+    80.2 predicted.
+
+    Args:
+        block_size: KV block size.
+        group: Inner-loop chunk height.
+        d: Head dimension.
+        itemsize: Bytes per element of the input dtype.
+
+    Returns:
+        Estimated bytes of shared memory.
+    """
+    return (2 * block_size + _PIPELINE_STAGES * group) * d * itemsize
+
+
+def _choose_group(cfg: MoBAConfig, d: int, itemsize: int, device) -> int:
+    """Picks the largest inner-loop chunk height that fits in shared memory.
+
+    GROUP is how many queries are processed per iteration -- NOT how many
+    selected this block. The loop iterates as many times as needed either way,
+    and K/V load once *outside* it, so a larger GROUP buys no extra
+    amortization; it only trims loop overhead. What it costs is shared memory,
+    because the gathered q tile is pipelined.
+
+    This is why the spec's `GROUP = top_k * block_size` was wrong: it sized a
+    tile from a consumer count. Uncapped it asked for 112 KiB at
+    `block_size=128, top_k=2` against a 99 KiB limit, and shared-memory
+    overflow fails the launch outright rather than degrading.
 
     Args:
         cfg: Configuration supplying `block_size` and `top_k`.
+        d: Head dimension.
+        itemsize: Bytes per element of the input dtype.
+        device: CUDA device, for the shared-memory budget.
 
     Returns:
-        A multiple of 16 in [16, _MAX_GROUP].
+        A power-of-two multiple of 16 that fits the budget.
+
+    Raises:
+        ValueError: If no chunk height down to 16 fits, which means the K and V
+            tiles alone exceed shared memory. `block_size` must be reduced.
     """
-    return min(_MAX_GROUP, _round_up_16(cfg.top_k * cfg.block_size))
+    budget = _shared_memory_budget(device)
+    want = min(_MAX_GROUP, _round_up_16(cfg.top_k * cfg.block_size))
+
+    group = want
+    while group >= 16:
+        if _estimate_shared(cfg.block_size, group, d, itemsize) <= budget:
+            return group
+        group //= 2
+
+    raise ValueError(
+        f"block_size {cfg.block_size} with head_dim {d} needs "
+        f"{_estimate_shared(cfg.block_size, 16, d, itemsize)} bytes of shared "
+        f"memory at the minimum chunk height, exceeding this GPU's {budget}. "
+        "Reduce block_size."
+    )
 
 
 def combine_partials(part_m, part_l, part_acc, out_dtype):
@@ -228,7 +300,7 @@ def moba_forward(
         index = build_csc(q, k, cfg)
 
     slots = index.max_slots
-    group = _choose_group(cfg)
+    group = _choose_group(cfg, d, q.element_size(), q.device)
 
     # part_m starts at -inf so a slot no program writes contributes nothing:
     # exp(-inf - m_global) is 0, which removes it without a branch.
