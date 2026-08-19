@@ -29,6 +29,11 @@ TENSOR_CORE_TILE = 16
 # the measured basis for decision D7 (`docs/gather-cost-measurements.md`).
 CACHE_LINE_BYTES = 128
 
+# Threads per warp -- the SIMT execution width. A tile is divided across
+# `32 * num_warps` threads, so this is what converts a tile shape into
+# registers per thread.
+WARP_SIZE = 32
+
 # Hard per-thread register limit on Ampere. Beyond this the compiler spills to
 # HBM-backed local memory, silently, with no launch error.
 MAX_REGISTERS_PER_THREAD = 255

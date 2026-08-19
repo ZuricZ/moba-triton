@@ -37,6 +37,7 @@ import triton.language as tl
 from moba.config import MoBAConfig
 from moba.device import (
     TENSOR_CORE_TILE,
+    WARP_SIZE,
     check_gathered_head_dim,
     round_up_to_tensor_core_tile,
     shared_memory_budget,
@@ -221,26 +222,198 @@ def choose_group(
     )
 
 
-def combine_partials(part_m, part_l, part_acc, out_dtype):
-    """Merges per-slot partial softmaxes. Temporary PyTorch reference.
+# Queries per combine program. This pass is purely memory-bound -- no tl.dot,
+# so nothing stages through shared memory and the whole tile lives in
+# registers. The tile only needs to be wide enough to keep loads coalesced and
+# deep enough to hide their latency; measured, every non-spilling shape runs at
+# the same speed.
+COMBINE_BLOCK_M = 64
 
-    Replaced by a Triton kernel in Task 3. Present so the attention kernel can
-    be tested before the merge exists.
+# Accumulator elements one thread may hold before the compiler spills. Measured
+# on sm_86: at 32 elements per thread the kernel uses at most 255 registers with
+# zero spills across every (head_dim, slot count) combination tested; at 64 it
+# spills up to 220 values and runs 58% slower (2073 us against 1311 us at
+# head_dim 128, 12 slots, S=4096). Spilling is silent -- unlike shared-memory
+# overflow it does not fail the launch -- so this bound is enforced rather than
+# discovered.
+COMBINE_ELEMENTS_PER_THREAD = 32
+
+# Triton's default is 4. Four is the floor because fewer warps leaves too
+# little to hide memory latency with. Eight is the ceiling because warps stop
+# helping past it: at block_m 128, head_dim 128 raising 8 to 16 halved
+# registers per thread but still spilled 106 values and ran slower (1998 us
+# against 1726). Warps divide the accumulator; they do not divide the
+# per-iteration working set of the unrolled slot loop. Past one doubling of
+# headroom the tile itself has to shrink.
+MIN_COMBINE_WARPS = 4
+MAX_COMBINE_WARPS = 8
+
+# The largest accumulator one program may hold, in elements.
+MAX_COMBINE_TILE_ELEMENTS = (
+    WARP_SIZE * COMBINE_ELEMENTS_PER_THREAD * MAX_COMBINE_WARPS
+)
+
+
+def choose_combine_tile(head_dim: int, block_m: int | None = None) -> tuple[int, int]:
+    """Picks a combine tile and warp count that do not spill registers.
+
+    More warps do not change how much data a program holds -- they change how
+    many threads hold it, so registers per thread fall while memory traffic is
+    untouched. That trade is free here only because this pass is memory-bound;
+    in the attention kernel the warp count also re-tiles `tl.dot`, so it is not
+    an independent knob there.
+
+    Args:
+        head_dim: Head dimension.
+        block_m: Queries per program. Derived from the register budget when
+            omitted; validated against it when given.
+
+    Returns:
+        A tuple of (block_m, num_warps).
+
+    Raises:
+        ValueError: If an explicit `block_m` cannot avoid spilling, or if no
+            tile down to `TENSOR_CORE_TILE` fits the budget.
+    """
+    budget = MAX_COMBINE_TILE_ELEMENTS
+    if block_m is not None:
+        if block_m * head_dim > budget:
+            raise ValueError(
+                f"block_m {block_m} at head_dim {head_dim} needs "
+                f"{block_m * head_dim} accumulator elements, above the "
+                f"{budget} that fit without spilling registers"
+            )
+    else:
+        block_m = COMBINE_BLOCK_M
+        while block_m > TENSOR_CORE_TILE and block_m * head_dim > budget:
+            block_m //= 2
+        if block_m * head_dim > budget:
+            raise ValueError(
+                f"head_dim {head_dim} cannot be combined without spilling "
+                f"even at block_m {block_m}"
+            )
+
+    per_thread = WARP_SIZE * COMBINE_ELEMENTS_PER_THREAD
+    warps = (block_m * head_dim + per_thread - 1) // per_thread
+    return block_m, max(MIN_COMBINE_WARPS, min(MAX_COMBINE_WARPS, warps))
+
+
+@triton.jit
+def _moba_combine(
+    PartM, PartL, PartAcc, Out,
+    S,
+    K_SLOTS: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
+):
+    """Merges each query's partial softmaxes into its final output.
+
+    This is FlashAttention-2's `alpha` correction applied *across programs*
+    rather than across loop iterations. Every partial was exponentiated against
+    its own local maximum, so the partials are on incompatible scales and
+    cannot simply be summed -- that omission is the failure that produces an
+    800x error with no crash and entirely plausible-looking output.
+
+    Two passes over the slots, not one. The online single-pass form carries a
+    running maximum and rescales the accumulator whenever it grows, costing two
+    D-wide operations per slot; two passes cost one, and re-read only a
+    BLOCK_M-length vector of maxima. FA-2 cannot make that trade because its
+    maxima do not exist until the scores are computed and a second pass would
+    mean repeating the QK matmul. Here the maxima are already in HBM.
+    """
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    live = offs_m < S
+    offs_d = tl.arange(0, D)
+
+    m_base = PartM + pid_bh * S * K_SLOTS + offs_m * K_SLOTS
+    l_base = PartL + pid_bh * S * K_SLOTS + offs_m * K_SLOTS
+    a_base = (PartAcc + pid_bh * S * K_SLOTS * D
+              + offs_m[:, None] * K_SLOTS * D + offs_d[None, :])
+
+    # K_SLOTS is a constexpr, so `static_range` unrolls both loops at compile
+    # time. It is used rather than loading a [BLOCK_M, K_SLOTS] tile because
+    # `tl.arange` requires a power-of-two length, while `max_slots` is whatever
+    # the index build produced -- 3, 5 and 12 are all ordinary values.
+    m_g = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    for slot in tl.static_range(K_SLOTS):
+        m_g = tl.maximum(
+            m_g, tl.load(m_base + slot, mask=live, other=float("-inf"))
+        )
+
+    l = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+    for slot in tl.static_range(K_SLOTS):
+        m_i = tl.load(m_base + slot, mask=live, other=float("-inf"))
+        l_i = tl.load(l_base + slot, mask=live, other=0.0)
+        a_i = tl.load(a_base + slot * D, mask=live[:, None], other=0.0)
+
+        # A slot no program wrote still holds its initial m = -inf, so its
+        # weight is exp(-inf - m_g) = 0 and it drops out arithmetically. That
+        # is why `moba_forward` fills part_m with -inf rather than zeros: the
+        # alternative is a per-slot branch, which would diverge inside a warp.
+        w = tl.exp(m_i - m_g)
+        l += l_i * w
+        acc += a_i * w[:, None]
+
+    # Not guarded against l == 0. Every query selects at least its own block,
+    # so a zero denominator means the index is wrong, and a NaN propagating to
+    # the output is the loud failure that wants to happen. Substituting a safe
+    # value here would hide an index bug behind a plausible number.
+    out = acc / l[:, None]
+
+    tl.store(Out + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
+             out.to(Out.dtype.element_ty), mask=live[:, None])
+
+
+def combine_partials(
+    part_m: torch.Tensor,
+    part_l: torch.Tensor,
+    part_acc: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_m: int | None = None,
+) -> torch.Tensor:
+    """Merges per-slot partial softmaxes into the final attention output.
 
     Args:
         part_m: Per-slot maxima, [B, H, S, K] fp32.
         part_l: Per-slot denominators, [B, H, S, K] fp32.
         part_acc: Per-slot un-normalized outputs, [B, H, S, K, D] fp32.
         out_dtype: Dtype of the returned tensor.
+        block_m: Queries per program. Derived from the register budget when
+            omitted, which is what callers should do.
 
     Returns:
         Attention output shaped [B, H, S, D].
+
+    Raises:
+        ValueError: If the three buffers disagree on shape, or if `block_m`
+            would spill registers.
     """
-    m_g = part_m.max(dim=-1, keepdim=True).values
-    w = torch.exp(part_m - m_g)
-    l = (part_l * w).sum(dim=-1)
-    acc = (part_acc * w.unsqueeze(-1)).sum(dim=-2)
-    return (acc / l.unsqueeze(-1)).to(out_dtype)
+    b, h, s, slots = part_m.shape
+    d = part_acc.shape[-1]
+    if part_l.shape != part_m.shape:
+        raise ValueError(
+            f"shape mismatch: part_l {tuple(part_l.shape)} against part_m "
+            f"{tuple(part_m.shape)}"
+        )
+    if part_acc.shape != (b, h, s, slots, d):
+        raise ValueError(
+            f"shape mismatch: part_acc {tuple(part_acc.shape)} against "
+            f"{(b, h, s, slots, d)}"
+        )
+
+    part_m, part_l, part_acc = (
+        t.contiguous() for t in (part_m, part_l, part_acc)
+    )
+    out = torch.empty((b, h, s, d), device=part_m.device, dtype=out_dtype)
+    block_m, warps = choose_combine_tile(d, block_m)
+
+    _moba_combine[(triton.cdiv(s, block_m), b * h)](
+        part_m, part_l, part_acc, out, s,
+        K_SLOTS=slots, D=d, BLOCK_M=block_m, num_warps=warps,
+    )
+    return out
 
 
 def moba_forward(

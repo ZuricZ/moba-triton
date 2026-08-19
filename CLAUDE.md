@@ -143,4 +143,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Kernel spec written (D6-D11), all decisions measurement-backed. Next: implementation plan, then the CSC index build.
+> Status: Forward path complete in Triton (index, KV-major attention, combine); 233 tests green. Next: register the backend, then per-stage timing.
