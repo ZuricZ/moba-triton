@@ -10,9 +10,17 @@ discarded (`docs/divergence-measurements.md`).
 Three things about this kernel differ from a dense FA-2 inner loop, all of them
 simplifications:
 
-1. **No online-softmax loop.** A program sees each of its queries against
-   exactly one block, so the max and the sum are computed in one shot. The
-   running-max machinery moves into `combine_partials`.
+1. **The online-softmax rescale is relocated, not removed.** In FA-2 one
+   program folds many KV tiles into one query, so the `exp(m_old - m_new)`
+   correction is loop-carried inside the kernel. Here a program sees each of
+   its queries against exactly *one* block, so there is no sequence of tiles
+   to fold and no loop-carried rescale in this kernel.
+
+   The query's full row still spans several blocks, computed by different
+   programs, and those partials still require the identical correction --
+   `exp(m_local - m_global)` -- before they can be summed. That is
+   `combine_partials`, and it is mandatory (D10). Same algebra, applied across
+   programs instead of across loop iterations.
 2. **No branch on selection.** Every query the program holds selected this
    block, so "does this query need this block?" is uniform across the warp.
 3. **Causality is one predicated select** that is a no-op for any block wholly
@@ -90,6 +98,12 @@ def _moba_attn_fwd(
             # does not reintroduce warp divergence.
             qk = tl.where(key_pos[None, :] <= rows[:, None], qk, float("-inf"))
 
+        # This is the online-softmax state, computed against this block only.
+        # `m` and `l` are LOCAL -- they know nothing of the other blocks this
+        # query selected. They are written out precisely so `combine_partials`
+        # can rescale them by exp(m_local - m_global) and sum them. Dividing
+        # acc by l here would discard the information that merge needs.
+        #
         # Every row has at least one live entry: a query only reaches a block
         # it selected, and it can only select its own block if that block
         # starts at or before it. So `m` is never -inf and exp() is safe.
