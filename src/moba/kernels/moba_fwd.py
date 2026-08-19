@@ -416,6 +416,135 @@ def combine_partials(
     return out
 
 
+def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+              cfg: MoBAConfig) -> None:
+    """Checks shapes and configuration before any launch.
+
+    Args:
+        q: Queries shaped [B, H, S, D].
+        k: Keys shaped [B, H, S, D].
+        v: Values shaped [B, H, S, D].
+        cfg: Configuration.
+
+    Raises:
+        ValueError: If shapes disagree, or head_dim or block_size is
+            unsupported.
+    """
+    if not (q.shape == k.shape == v.shape):
+        raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
+    ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
+    if not ok:
+        raise ValueError(reason)
+    if cfg.block_size < TENSOR_CORE_TILE:
+        raise ValueError(
+            f"block_size {cfg.block_size} below the tl.dot minimum of "
+            f"{TENSOR_CORE_TILE}"
+        )
+
+
+def empty_partials(
+    shape: tuple[int, int, int, int],
+    slots: int,
+    device,
+    partials_dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Allocates partial buffers without initializing them.
+
+    Separate from `attend_partials` so a caller can pay the allocation once
+    and reuse it. `attend_partials` resets whatever it is given, so uninitialized
+    memory here is safe.
+
+    Args:
+        shape: (batch, heads, seq_len, head_dim).
+        slots: Partial slots per query.
+        device: CUDA device.
+        partials_dtype: Storage dtype for the accumulator.
+
+    Returns:
+        A tuple of (part_m, part_l, part_acc), uninitialized.
+    """
+    b, h, s, d = shape
+    return (
+        torch.empty((b, h, s, slots), device=device, dtype=torch.float32),
+        torch.empty((b, h, s, slots), device=device, dtype=torch.float32),
+        torch.empty((b, h, s, slots, d), device=device, dtype=partials_dtype),
+    )
+
+
+def attend_partials(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cfg: MoBAConfig,
+    index: CSCIndex,
+    causal: bool = True,
+    partials_dtype: torch.dtype = torch.float32,
+    partials: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Runs the attention stage, returning un-merged per-slot partials.
+
+    Separate from `moba_forward` so the three stages -- index, attention,
+    combine -- can be timed independently. Composing them in `moba_forward`
+    rather than inlining costs nothing at runtime and makes the per-stage
+    benchmark measure the same code path production uses.
+
+    `partials_dtype` exists because `part_acc` is the largest single term in
+    the design's memory traffic: at S=4096, head_dim 128, top_k 12 it is 24 MB
+    written plus 24 MB read per batch-head, against 15 MB for all of Q, K and
+    V combined. Halving it to bfloat16 is therefore worth measuring rather than
+    assuming, on both speed and accuracy.
+
+    Args:
+        q: Queries shaped [B, H, S, D], contiguous.
+        k: Keys shaped [B, H, S, D], contiguous.
+        v: Values shaped [B, H, S, D], contiguous.
+        cfg: Configuration.
+        index: Precomputed CSC index.
+        causal: Whether to apply causal masking within the query's own block.
+        partials_dtype: Storage dtype for `part_acc`. The maxima and
+            denominators stay float32 regardless: they are a factor of D
+            smaller, so narrowing them saves nothing measurable while costing
+            the precision the whole merge pivots on. Ignored when `partials`
+            is supplied.
+        partials: Buffers to reuse, from a previous call or `empty_partials`.
+            Fresh allocation is not free -- on Windows WDDM a `cudaMalloc`
+            goes through the display driver and costs milliseconds -- so a
+            caller running the kernel repeatedly should allocate once and pass
+            the buffers back in. They are reset here regardless, because a slot
+            no program writes must read as -inf.
+
+    Returns:
+        A tuple of (part_m, part_l, part_acc).
+    """
+    b, h, s, d = q.shape
+    slots = index.max_slots
+    group = choose_group(cfg, d, q.element_size(), q.device)
+
+    if partials is None:
+        partials = empty_partials(q.shape, slots, q.device, partials_dtype)
+    part_m, part_l, part_acc = partials
+
+    # part_m is filled with -inf so a slot no program writes contributes
+    # nothing: exp(-inf - m_global) is 0, which removes it without a branch.
+    # part_acc is zeroed because an unwritten slot's weight multiplies whatever
+    # is there, and 0 * NaN is NaN -- uninitialized memory would leak through
+    # the one arithmetic hole the -inf trick does not cover.
+    part_m.fill_(float("-inf"))
+    part_l.zero_()
+    part_acc.zero_()
+
+    _moba_attn_fwd[(index.num_blocks, b * h)](
+        q, k, v,
+        index.row_indices, index.slot_of_pair,
+        index.col_offsets, index.col_nnz, index.order,
+        part_m, part_l, part_acc,
+        s, index.row_indices.shape[-1], d ** -0.5, index.num_blocks,
+        BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
+        K_SLOTS=slots, CAUSAL=causal,
+    )
+    return part_m, part_l, part_acc
+
+
 def moba_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -423,6 +552,7 @@ def moba_forward(
     cfg: MoBAConfig,
     index: CSCIndex | None = None,
     causal: bool = True,
+    partials_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Computes MoBA attention with the KV-block-major kernel.
 
@@ -435,6 +565,7 @@ def moba_forward(
             Passing one explicitly holds routing fixed while inputs vary,
             which is what the invariant tests need.
         causal: Whether to apply causal masking within the query's own block.
+        partials_dtype: Storage dtype for the per-slot accumulators.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
@@ -443,42 +574,12 @@ def moba_forward(
         ValueError: If shapes disagree, or head_dim or block_size is
             unsupported.
     """
-    if not (q.shape == k.shape == v.shape):
-        raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
-    b, h, s, d = q.shape
-    ok, reason = check_gathered_head_dim(d, q.element_size())
-    if not ok:
-        raise ValueError(reason)
-    if cfg.block_size < TENSOR_CORE_TILE:
-        raise ValueError(
-            f"block_size {cfg.block_size} below the tl.dot minimum of "
-            f"{TENSOR_CORE_TILE}"
-        )
-
+    _validate(q, k, v, cfg)
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     if index is None:
         index = build_csc(q, k, cfg)
 
-    slots = index.max_slots
-    group = choose_group(cfg, d, q.element_size(), q.device)
-
-    # part_m starts at -inf so a slot no program writes contributes nothing:
-    # exp(-inf - m_global) is 0, which removes it without a branch.
-    part_m = torch.full((b, h, s, slots), float("-inf"),
-                        device=q.device, dtype=torch.float32)
-    part_l = torch.zeros((b, h, s, slots), device=q.device,
-                         dtype=torch.float32)
-    part_acc = torch.zeros((b, h, s, slots, d), device=q.device,
-                           dtype=torch.float32)
-
-    _moba_attn_fwd[(index.num_blocks, b * h)](
-        q, k, v,
-        index.row_indices, index.slot_of_pair,
-        index.col_offsets, index.col_nnz, index.order,
-        part_m, part_l, part_acc,
-        s, index.row_indices.shape[-1], d ** -0.5, index.num_blocks,
-        BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-        K_SLOTS=slots, CAUSAL=causal,
+    part_m, part_l, part_acc = attend_partials(
+        q, k, v, cfg, index, causal=causal, partials_dtype=partials_dtype
     )
-
     return combine_partials(part_m, part_l, part_acc, q.dtype)

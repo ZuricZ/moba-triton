@@ -143,4 +143,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward path complete in Triton (index, KV-major attention, combine); 233 tests green. Next: register the backend, then per-stage timing.
+> Status: Forward path complete and registered as `moba_triton`; 243 tests green. Stage timing says the PyTorch gate is 63-89% of the pass (D11 trigger fired). Next: fuse the gate.
