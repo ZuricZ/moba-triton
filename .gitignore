@@ -42,3 +42,4 @@ env/
 bench_out/
 *.csv
 *.png
+.vscode/
