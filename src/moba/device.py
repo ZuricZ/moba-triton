@@ -13,6 +13,107 @@ import torch
 # together rule out the kernel design this project is built around.
 MIN_CAPABILITY = (8, 0)
 
+# --- Hardware facts -------------------------------------------------------
+#
+# These are properties of the GPU, not tuning choices. They live here so that
+# a kernel, a benchmark and a test cannot disagree about them -- which they
+# did: bench/load_balance.py hardcoded a tile height the kernel had stopped
+# using, so the simulation was predicting a different kernel.
+
+# Smallest matrix dimension `tl.dot` accepts. Ampere's MMA atom is 16x8x16, so
+# an operand narrower than this cannot fill the tensor core at all.
+TENSOR_CORE_TILE = 16
+
+# Memory arrives in cache lines. This is the unit that makes a gathered row
+# cost the same as a contiguous one, provided the row is at least this wide --
+# the measured basis for decision D7 (`docs/gather-cost-measurements.md`).
+CACHE_LINE_BYTES = 128
+
+# Hard per-thread register limit on Ampere. Beyond this the compiler spills to
+# HBM-backed local memory, silently, with no launch error.
+MAX_REGISTERS_PER_THREAD = 255
+
+# Used only when the device query fails. Matches sm_86's opt-in maximum.
+FALLBACK_SHARED_MEMORY_BYTES = 101376
+
+BYTES_PER_MIB = 1024 * 1024
+MICROSECONDS_PER_MILLISECOND = 1000
+
+
+def shared_memory_budget(device=None) -> int:
+    """Shared memory available to one program, in bytes.
+
+    Must be the *opt-in* maximum, not `shared_memory_per_block`. The latter is
+    the 48 KiB static default every kernel gets without asking; a kernel raises
+    its own limit via `cudaFuncSetAttribute`, which Triton does. On sm_86 the
+    two differ by more than a factor of two -- 49152 against 101376 -- so using
+    the default rejects configurations that in fact launch fine.
+
+    Args:
+        device: CUDA device to query; the current device when omitted.
+
+    Returns:
+        Bytes of shared memory available per program.
+    """
+    props = torch.cuda.get_device_properties(device)
+    for attr in ("shared_memory_per_block_optin", "shared_memory_per_block"):
+        value = getattr(props, attr, None)
+        if value:
+            return int(value)
+    return FALLBACK_SHARED_MEMORY_BYTES
+
+
+def multiprocessor_count(device=None) -> int:
+    """Number of SMs on the device.
+
+    Args:
+        device: CUDA device to query; the current device when omitted.
+
+    Returns:
+        SM count.
+    """
+    return int(torch.cuda.get_device_properties(device).multi_processor_count)
+
+
+def round_up_to_tensor_core_tile(x: int) -> int:
+    """Rounds up to a multiple of `TENSOR_CORE_TILE`, with it as the floor.
+
+    Args:
+        x: Any non-negative size.
+
+    Returns:
+        The smallest multiple of TENSOR_CORE_TILE that is >= max(x, TILE).
+    """
+    tile = TENSOR_CORE_TILE
+    return max(tile, ((x + tile - 1) // tile) * tile)
+
+
+def check_gathered_head_dim(head_dim: int, itemsize: int) -> tuple[bool, str]:
+    """Reports whether a head dimension makes row gathering efficient.
+
+    A gathered row costs one cache-line fetch regardless of where it sits, so
+    gathering is nearly free *provided a row fills a line*. Below that, a
+    gathered row pulls a whole line and uses part of it, and the measured 1.03x
+    penalty no longer applies.
+
+    Args:
+        head_dim: Head dimension.
+        itemsize: Bytes per element of the input dtype.
+
+    Returns:
+        A tuple of (ok, reason). `reason` is empty when ok.
+    """
+    if head_dim & (head_dim - 1):
+        return False, f"head_dim {head_dim} must be a power of two"
+    row_bytes = head_dim * itemsize
+    if row_bytes < CACHE_LINE_BYTES:
+        return False, (
+            f"head_dim {head_dim} gives a {row_bytes}-byte row, below the "
+            f"{CACHE_LINE_BYTES}-byte cache line; gathered rows would waste "
+            "the remainder of every line fetched"
+        )
+    return True, ""
+
 
 def supports_dtype(
     dtype: torch.dtype, capability: tuple[int, int]
@@ -76,7 +177,7 @@ class DeviceInfo:
         return cls(
             name=props.name,
             capability=(props.major, props.minor),
-            total_memory_mb=props.total_memory // (1024 * 1024),
+            total_memory_mb=props.total_memory // BYTES_PER_MIB,
             torch_version=torch.__version__,
             triton_version=triton_version,
             driver=torch.version.cuda or "unknown",

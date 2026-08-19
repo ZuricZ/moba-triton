@@ -19,9 +19,17 @@ import triton.testing
 
 from moba.backends import available_backends, skipped_backends
 from moba.config import MoBAConfig
-from moba.device import DeviceInfo
+from moba.device import BYTES_PER_MIB, DeviceInfo
 
 DENSE_BASELINE = "sdpa_dense"
+
+# Longest error text kept in a results row. Long enough for a CUDA message to
+# stay diagnosable, short enough that one failure cannot swamp a CSV.
+MAX_NOTE_CHARS = 160
+
+# Sentinel top_k meaning "select every block", used to price the dense
+# baseline's own FLOPs. Any value >= num_blocks works; this is unmistakable.
+SELECT_ALL_TOP_K = 10**9
 
 
 @dataclass(frozen=True)
@@ -148,7 +156,7 @@ def estimate_memory_mb(
     per_element = 2 * itemsize + 2
     scores = batch * heads * rows * seq_len * per_element
     tensors = 4 * batch * heads * seq_len * head_dim * itemsize  # q, k, v, out
-    return (scores + tensors) / (1024**2)
+    return (scores + tensors) / BYTES_PER_MIB
 
 
 def _blank_row(
@@ -184,7 +192,7 @@ def _measure(backend, q, k, v, cfg) -> tuple[float, float]:
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     ms = triton.testing.do_bench(lambda: backend.forward(q, k, v, cfg))
-    return ms, torch.cuda.max_memory_allocated() / (1024**2)
+    return ms, torch.cuda.max_memory_allocated() / BYTES_PER_MIB
 
 
 def run_suite(
@@ -254,7 +262,7 @@ def run_suite(
                 try:
                     dense_ms, peak = _measure(backend, q, k, v, cfg)
                 except (RuntimeError, NotImplementedError) as exc:
-                    rows.append(blank(backend.name, "error", str(exc)[:160]))
+                    rows.append(blank(backend.name, "error", str(exc)[:MAX_NOTE_CHARS]))
                     break
                 rows.append(
                     BenchRow(
@@ -267,7 +275,7 @@ def run_suite(
                         # the dense count, not the sparse one.
                         tflops=effective_tflops(
                             batch, heads, seq_len, head_dim,
-                            MoBAConfig(block_size=block_size, top_k=10**9,
+                            MoBAConfig(block_size=block_size, top_k=SELECT_ALL_TOP_K,
                                        dtype=dtype),
                             dense_ms,
                         ),
@@ -284,7 +292,7 @@ def run_suite(
                 try:
                     ms, peak = _measure(backend, q, k, v, cfg)
                 except (RuntimeError, NotImplementedError, torch.OutOfMemoryError) as exc:
-                    rows.append(blank(backend.name, "error", str(exc)[:160]))
+                    rows.append(blank(backend.name, "error", str(exc)[:MAX_NOTE_CHARS]))
                     continue
                 speedup = math.nan if dense_ms is None else dense_ms / ms
                 rows.append(

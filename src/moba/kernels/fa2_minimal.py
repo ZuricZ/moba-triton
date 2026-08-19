@@ -37,6 +37,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moba.device import TENSOR_CORE_TILE
+
 
 @triton.jit
 def _fa2_fwd(
@@ -176,8 +178,15 @@ def fa2_forward(
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
 
     b, h, s, d = q.shape
-    if d not in (16, 32, 64, 128):
-        raise ValueError(f"head_dim {d} unsupported; use a power of two >= 16")
+    # Dense attention reads Q contiguously, so it is not subject to the
+    # cache-line floor that `check_gathered_head_dim` imposes on the gathered
+    # MoBA kernel. The only requirement here is that tl.dot can fill its
+    # operands.
+    if d & (d - 1) or d < TENSOR_CORE_TILE:
+        raise ValueError(
+            f"head_dim {d} unsupported; must be a power of two >= "
+            f"{TENSOR_CORE_TILE}"
+        )
 
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     out = torch.empty_like(q)

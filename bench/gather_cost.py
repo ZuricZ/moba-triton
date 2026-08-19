@@ -31,6 +31,12 @@ import triton
 import triton.language as tl
 import triton.testing
 
+from moba.device import (
+    BYTES_PER_MIB,
+    MICROSECONDS_PER_MILLISECOND,
+    TENSOR_CORE_TILE,
+)
+
 
 @triton.jit
 def _read_rows(
@@ -87,7 +93,7 @@ def time_mode(q, idx, out, n_rows, d, block_m, use_idx) -> float:
 
 def run(
     n_rows: int = 8 * 4096,
-    block_m: int = 32,
+    block_m: int = 2 * TENSOR_CORE_TILE,
     head_dims: tuple[int, ...] = (32, 64, 128),
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
@@ -121,10 +127,10 @@ def run(
         rows.append({
             "head_dim": d,
             "row_bytes": d * q.element_size(),
-            "working_set_mb": n_rows * d * q.element_size() / 1024**2,
-            "contiguous_us": t_contig * 1000,
-            "identity_us": t_ident * 1000,
-            "permuted_us": t_perm * 1000,
+            "working_set_mb": n_rows * d * q.element_size() / BYTES_PER_MIB,
+            "contiguous_us": t_contig * MICROSECONDS_PER_MILLISECOND,
+            "identity_us": t_ident * MICROSECONDS_PER_MILLISECOND,
+            "permuted_us": t_perm * MICROSECONDS_PER_MILLISECOND,
             "scatter_cost": t_perm / t_contig,
             "index_cost": t_ident / t_contig,
         })

@@ -35,9 +35,14 @@ import math
 import torch
 
 from moba.config import MoBAConfig
+from moba.device import multiprocessor_count
+from moba.kernels.moba_fwd import choose_group
 from moba.ref.naive import moba_selection
 
-GROUP = 32      # queries per tile; equals top_k * block_size at the hard config
+# Resident programs per SM. Occupancy is configuration-dependent; 2 is what
+# learning note 02 measured for a comparable tile at head_dim 64. Passed to
+# `run` so it can be varied rather than assumed.
+DEFAULT_PROGRAMS_PER_SM = 2
 
 
 def makespan(jobs: list[int], n_proc: int) -> float:
@@ -63,7 +68,7 @@ def analyse(
     top_k: int,
     n_proc: int,
     heads: int = 8,
-    head_dim: int = 64,
+    head_dim: int = 128,
     seed: int = 0,
 ) -> dict:
     """Measures the scheduling penalty for one configuration.
@@ -91,7 +96,12 @@ def analyse(
     consumers = sel.sum(dim=2).flatten().tolist()   # one entry per (head, block)
     del q, k, sel
 
-    jobs = [math.ceil(c / GROUP) for c in consumers if c > 0]
+    # The tile height must come from the kernel, not a constant. An earlier
+    # version hardcoded 32 here; once `choose_group` began deriving it from the
+    # shared-memory budget, this simulation was silently predicting a kernel
+    # that no longer existed.
+    group = choose_group(cfg, head_dim, torch.finfo(torch.bfloat16).bits // 8)
+    jobs = [math.ceil(c / group) for c in consumers if c > 0]
     total = sum(jobs)
     ideal = total / n_proc
 
@@ -104,6 +114,7 @@ def analyse(
         "block_size": block_size,
         "top_k": top_k,
         "n_proc": n_proc,
+        "group": group,
         "programs": len(jobs),
         "mean_tiles": total / len(jobs),
         "max_tiles": max(jobs),
@@ -118,24 +129,30 @@ def analyse(
 
 def run(
     cases: list[tuple[int, int, int]] | None = None,
-    n_proc: int = 40,
+    n_proc: int | None = None,
+    programs_per_sm: int = DEFAULT_PROGRAMS_PER_SM,
 ) -> list[dict]:
     """Sweeps configurations.
 
     Args:
         cases: List of (seq_len, block_size, top_k). Defaults to a sweep
             spanning the target regime and the low-program-count regime.
-        n_proc: Concurrent processors. Default 40 = 20 SMs x 2 resident
-            programs, the occupancy measured in learning note 02.
+        n_proc: Concurrent processors. Probed from the device when omitted,
+            as `multiprocessor_count() * programs_per_sm`.
+        programs_per_sm: Resident programs per SM.
 
     Returns:
         One record per case.
     """
     if cases is None:
+        # Matches the realistic gate range established against the vendored
+        # references: block_size 32-128, top_k 4-12. See tests/conftest.py.
         cases = [
-            (4096, 16, 2), (4096, 32, 2), (4096, 128, 2), (4096, 128, 4),
-            (1024, 128, 2), (1024, 128, 4),
+            (4096, 32, 4), (4096, 32, 8), (4096, 64, 8),
+            (4096, 128, 8), (4096, 128, 12), (1024, 32, 4),
         ]
+    if n_proc is None:
+        n_proc = multiprocessor_count() * programs_per_sm
     return [analyse(s, bk, tk, n_proc) for s, bk, tk in cases]
 
 
@@ -163,7 +180,7 @@ def to_markdown(rows: list[dict]) -> str:
 
 if __name__ == "__main__":
     rows = run()
-    print(f"Work unit = one tile of {GROUP} queries. "
+    print(f"Work unit = one tile of `choose_group` queries. "
           f"{rows[0]['n_proc']} concurrent slots.")
     print("Columns are makespan / ideal. 1.00x = perfect balance.\n")
     print(to_markdown(rows))

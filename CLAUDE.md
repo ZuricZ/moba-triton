@@ -1,9 +1,18 @@
 # MoBA Triton Kernel — Learning Project
 
 ## Goal
-Build a Triton kernel for MoBA (Mixture of Block Attention) handling small
-block sizes efficiently, targeting FlashMoBA's CUDA numbers. I'm learning by
-watching and understanding — you write the code, I learn from how and why.
+Build a Triton kernel for MoBA (Mixture of Block Attention) that turns its
+arithmetic sparsity into real speedup at long context, targeting FlashMoBA's
+CUDA numbers. I'm learning by watching and understanding — you write the code,
+I learn from how and why.
+
+Note (2026-08-19): this previously read "handling small block sizes
+efficiently". Checked against the vendored references: FlashMoBA benchmarks
+`block_size=128, top_k=8` and sweeps seq_len 8K–512K; MoonshotAI defaults to
+chunk 512/4096 with top_k 3/12. `block_size=16` appears in neither. Sparsity
+comes from `num_blocks = S / block_size` being large, which the references get
+from long context, not from shrinking blocks. The loop-order problem is
+unaffected — query-major still discards 88% of its work at `block_size=128`.
 
 ## What to assume I know
 - Assume fluency: PyTorch, attention math (QKV, softmax, causal masking,

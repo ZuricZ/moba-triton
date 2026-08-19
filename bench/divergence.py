@@ -66,11 +66,11 @@ def divergence_stats(
 
 def run(
     seq_lens: tuple[int, ...] = (1024, 2048, 4096),
-    block_sizes: tuple[int, ...] = (16, 32, 64, 128),
-    top_ks: tuple[int, ...] = (2, 4),
+    block_sizes: tuple[int, ...] = (32, 64, 128),
+    top_ks: tuple[int, ...] = (4, 8),
     block_ms: tuple[int, ...] = (16, 32, 64, 128),
     heads: int = 8,
-    head_dim: int = 64,
+    head_dim: int = 128,
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
 ) -> list[dict]:
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     if "--json" in sys.argv:
         print(json.dumps(rows))
     else:
-        for tk in (2, 4):
+        for tk in (4, 8):
             for bm in (16, 64, 128):
                 print(f"\n### top_k={tk}, BLOCK_M={bm}\n")
                 print(to_markdown(rows, tk, bm))

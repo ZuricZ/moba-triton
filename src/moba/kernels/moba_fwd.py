@@ -35,6 +35,12 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
+from moba.device import (
+    TENSOR_CORE_TILE,
+    check_gathered_head_dim,
+    round_up_to_tensor_core_tile,
+    shared_memory_budget,
+)
 from moba.kernels.index import CSCIndex, build_csc
 
 
@@ -127,110 +133,91 @@ def _moba_attn_fwd(
 
 
 # Absolute ceiling on the inner-loop chunk height, before the shared-memory
-# budget is applied. 128 is where register pressure starts to bite even when
-# shared memory allows more (measured 255 registers with 8 spills at D=64,
-# BLOCK_SIZE=128, GROUP=128).
-_MAX_GROUP = 128
+# budget is applied. Beyond this, register pressure bites even when shared
+# memory allows more: measured 255 registers with 8 spills at D=64,
+# BLOCK_SIZE=128, GROUP=128 (`docs/learning/02`).
+MAX_GROUP = 128
 
 # Pipelining depth Triton allocates for the gathered q tile. Measured 2 or 3
 # depending on configuration; 3 is used so the estimate is an upper bound and
 # never predicts a launch that then fails.
-_PIPELINE_STAGES = 3
+PIPELINE_STAGES = 3
 
 
-def _round_up_16(x: int) -> int:
-    """Rounds up to a multiple of 16, with 16 as the floor."""
-    return max(16, ((x + 15) // 16) * 16)
+def estimate_shared_memory(
+    block_size: int, group: int, head_dim: int, itemsize: int
+) -> int:
+    """Estimates shared memory for one attention program, in bytes.
 
+    The K and V tiles load once outside the inner loop, so they are
+    single-buffered at `block_size x head_dim` each. The gathered q tile loads
+    every iteration and Triton pipelines it, costing `PIPELINE_STAGES` copies
+    of `group x head_dim`.
 
-def _shared_memory_budget(device: torch.device) -> int:
-    """Shared memory available to one program, in bytes.
-
-    Must be the *opt-in* maximum, not `shared_memory_per_block`. The latter is
-    the 48 KiB static default that every kernel gets without asking; a kernel
-    can raise its own limit via `cudaFuncSetAttribute`, which Triton does. On
-    sm_86 the two differ by more than a factor of two -- 49152 against 101376 --
-    so using the default rejects configurations that in fact launch fine.
-
-    Args:
-        device: CUDA device to query.
-
-    Returns:
-        Bytes of shared memory available per program.
-    """
-    props = torch.cuda.get_device_properties(device)
-    for attr in ("shared_memory_per_block_optin", "shared_memory_per_block"):
-        value = getattr(props, attr, None)
-        if value:
-            return int(value)
-    return 101376
-
-
-def _estimate_shared(block_size: int, group: int, d: int, itemsize: int) -> int:
-    """Estimates shared memory for one program, in bytes.
-
-    The K and V tiles are loaded once outside the inner loop, so they are
-    single-buffered at `BLOCK_SIZE x D` each. The gathered q tile is loaded
-    every iteration and Triton pipelines it, costing `_PIPELINE_STAGES`
-    copies of `GROUP x D`.
-
-    Fitted against measurements: at D=64, BLOCK_SIZE=128 the observed values
-    are 44.2 / 56.5 / 80.0 KiB for GROUP 32 / 64 / 128, against 44.2 / 56.2 /
-    80.2 predicted.
+    Fitted against measurements: at head_dim 64, block_size 128 the observed
+    values are 44.2 / 56.5 / 80.0 KiB for group 32 / 64 / 128, against
+    44.2 / 56.2 / 80.2 predicted.
 
     Args:
         block_size: KV block size.
         group: Inner-loop chunk height.
-        d: Head dimension.
+        head_dim: Head dimension.
         itemsize: Bytes per element of the input dtype.
 
     Returns:
         Estimated bytes of shared memory.
     """
-    return (2 * block_size + _PIPELINE_STAGES * group) * d * itemsize
+    return (2 * block_size + PIPELINE_STAGES * group) * head_dim * itemsize
 
 
-def _choose_group(cfg: MoBAConfig, d: int, itemsize: int, device) -> int:
+def choose_group(
+    cfg: MoBAConfig, head_dim: int, itemsize: int, device=None
+) -> int:
     """Picks the largest inner-loop chunk height that fits in shared memory.
 
-    GROUP is how many queries are processed per iteration -- NOT how many
+    `group` is how many queries are processed per iteration -- NOT how many
     selected this block. The loop iterates as many times as needed either way,
-    and K/V load once *outside* it, so a larger GROUP buys no extra
+    and K/V load once *outside* it, so a larger group buys no extra
     amortization; it only trims loop overhead. What it costs is shared memory,
     because the gathered q tile is pipelined.
 
-    This is why the spec's `GROUP = top_k * block_size` was wrong: it sized a
-    tile from a consumer count. Uncapped it asked for 112 KiB at
-    `block_size=128, top_k=2` against a 99 KiB limit, and shared-memory
-    overflow fails the launch outright rather than degrading.
+    This is why an earlier `GROUP = top_k * block_size` was wrong: it sized a
+    tile from a consumer count. Uncapped it asked for 112 KiB against a 99 KiB
+    limit, and shared-memory overflow fails the launch outright rather than
+    degrading.
+
+    Public rather than private because `bench/load_balance.py` must simulate
+    the tile height the kernel actually uses. It previously hardcoded 32 and
+    silently went stale.
 
     Args:
         cfg: Configuration supplying `block_size` and `top_k`.
-        d: Head dimension.
+        head_dim: Head dimension.
         itemsize: Bytes per element of the input dtype.
         device: CUDA device, for the shared-memory budget.
 
     Returns:
-        A power-of-two multiple of 16 that fits the budget.
+        A multiple of `TENSOR_CORE_TILE` that fits the budget.
 
     Raises:
-        ValueError: If no chunk height down to 16 fits, which means the K and V
-            tiles alone exceed shared memory. `block_size` must be reduced.
+        ValueError: If no chunk height down to `TENSOR_CORE_TILE` fits, which
+            means the K and V tiles alone exceed shared memory.
     """
-    budget = _shared_memory_budget(device)
-    want = min(_MAX_GROUP, _round_up_16(cfg.top_k * cfg.block_size))
+    budget = shared_memory_budget(device)
+    group = min(MAX_GROUP, round_up_to_tensor_core_tile(cfg.top_k * cfg.block_size))
 
-    group = want
-    while group >= 16:
-        if _estimate_shared(cfg.block_size, group, d, itemsize) <= budget:
+    while group >= TENSOR_CORE_TILE:
+        if estimate_shared_memory(cfg.block_size, group, head_dim, itemsize) <= budget:
             return group
         group //= 2
 
+    needed = estimate_shared_memory(
+        cfg.block_size, TENSOR_CORE_TILE, head_dim, itemsize
+    )
     raise ValueError(
-        f"block_size {cfg.block_size} with head_dim {d} needs "
-        f"{_estimate_shared(cfg.block_size, 16, d, itemsize)} bytes of shared "
-        f"memory at the minimum chunk height, exceeding this GPU's {budget}. "
-        "Reduce block_size."
+        f"block_size {cfg.block_size} with head_dim {head_dim} needs {needed} "
+        f"bytes of shared memory at the minimum chunk height, exceeding this "
+        f"GPU's {budget}. Reduce block_size."
     )
 
 
@@ -286,13 +273,13 @@ def moba_forward(
     if not (q.shape == k.shape == v.shape):
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
     b, h, s, d = q.shape
-    if d not in (64, 128):
+    ok, reason = check_gathered_head_dim(d, q.element_size())
+    if not ok:
+        raise ValueError(reason)
+    if cfg.block_size < TENSOR_CORE_TILE:
         raise ValueError(
-            f"head_dim {d} unsupported; D*itemsize must be >= 128 bytes"
-        )
-    if cfg.block_size < 16:
-        raise ValueError(
-            f"block_size {cfg.block_size} below the tl.dot minimum of 16"
+            f"block_size {cfg.block_size} below the tl.dot minimum of "
+            f"{TENSOR_CORE_TILE}"
         )
 
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
@@ -300,7 +287,7 @@ def moba_forward(
         index = build_csc(q, k, cfg)
 
     slots = index.max_slots
-    group = _choose_group(cfg, d, q.element_size(), q.device)
+    group = choose_group(cfg, d, q.element_size(), q.device)
 
     # part_m starts at -inf so a slot no program writes contributes nothing:
     # exp(-inf - m_global) is 0, which removes it without a branch.
