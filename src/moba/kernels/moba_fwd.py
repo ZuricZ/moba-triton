@@ -222,12 +222,29 @@ def choose_group(
     )
 
 
-# Queries per combine program. This pass is purely memory-bound -- no tl.dot,
-# so nothing stages through shared memory and the whole tile lives in
-# registers. The tile only needs to be wide enough to keep loads coalesced and
-# deep enough to hide their latency; measured, every non-spilling shape runs at
-# the same speed.
-COMBINE_BLOCK_M = 64
+# Queries per combine program.
+#
+# This pass runs at the memory bus's speed and nothing else. At head_dim 128
+# with 12 slots and S=8192 it moves ~221 MB in 1313 us, which is 168 GB/s --
+# against 163 GB/s measured for a bare `torch.zeros` on the same card. There is
+# no arrangement of tiles or warps that beats the wire the data travels on, and
+# the measurement says so: every tile from 1 to 64 lands within 1% of the same
+# time (1309-1328 us). Only moving *fewer* bytes helps, which is what
+# `partials_dtype` does.
+#
+# So the tile size is a robustness choice, not a speed one, and small wins.
+# A 64-query tile holds a 32 KB accumulator entirely in registers and sits on
+# the 255-register ceiling, kept off it only by computing the right warp count;
+# an 8-query tile uses 168 and cannot spill. This mirrors FSA's `reduce_kernel`,
+# which runs one query per program for the same reason. The tile shape we
+# started with was inherited from FlashAttention-2, where a wide query tile is
+# forced by `tl.dot` needing a matrix to fill a tensor core. There is no
+# `tl.dot` here, so nothing forced it.
+#
+# Eight rather than one: equally fast, still 4096 programs at S=8192 -- ample
+# for 20 SMs -- and it avoids the degenerate single-element vector shapes that
+# Triton has handled inconsistently across versions.
+COMBINE_BLOCK_M = 8
 
 # Accumulator elements one thread may hold before the compiler spills. Measured
 # on sm_86: at 32 elements per thread the kernel uses at most 255 registers with
@@ -236,6 +253,10 @@ COMBINE_BLOCK_M = 64
 # head_dim 128, 12 slots, S=4096). Spilling is silent -- unlike shared-memory
 # overflow it does not fail the launch -- so this bound is enforced rather than
 # discovered.
+#
+# Retained as a safety net even though the default tile no longer comes close
+# to the limit: head_dim 64 at tile 16 still spilled 4 values on one warp, so
+# the rule catches cases the default does not cover.
 COMBINE_ELEMENTS_PER_THREAD = 32
 
 # Triton's default is 4. Four is the floor because fewer warps leaves too
