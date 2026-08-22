@@ -145,4 +145,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward pass done. 1.52x over dense SDPA at S=8192, 36x over Moonshot; 317 tests green. Gate now streams its top-k -- no context ceiling, 2.46x at S=32768. Next: the attention kernel, 8.1 TFLOP/s against dense 12.7, where 61% of the traffic is the scattered fp32 partial writes.
+> Status: Forward pass done. 2.18x over dense SDPA at S=8192 (attainment 0.481) and 1.51x at S=4096 (0.626); 329 tests green. Attention runs at 9.2 TFLOP/s of a 12.7 roof, now compute-bound (intensity 111 F/B against a ridge of 78). Next: the backward pass, which does not exist.
