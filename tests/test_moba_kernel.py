@@ -16,13 +16,22 @@ import pytest
 import torch
 import triton
 
-from conftest import QUERY_CHUNK, make_qkv, sweep_cases
+from conftest import GATE_SWEEP, QUERY_CHUNK, make_qkv, sweep_cases
 from moba.config import MoBAConfig
+from moba.device import shared_memory_budget
 from moba.kernels.index import build_csc, csc_to_mask
+from moba.kernels.index_fused import build_csc_fused
+from triton.runtime.errors import OutOfResources
+
 from moba.kernels.moba_fwd import (
+    _GROUP_CACHE,
+    _moba_attn_fwd,
     _moba_combine,
     choose_combine_tile,
+    attend_partials,
+    group_candidates,
     combine_partials,
+    empty_partials,
     moba_forward,
 )
 from moba.ref.naive import moba_selection
@@ -298,3 +307,61 @@ def test_combine_ignores_garbage_in_slots_no_program_wrote(device):
     expected = _reference_combine(part_m, part_l, part_acc)
     err = (actual.double() - expected).abs().max().item()
     assert err < 1e-5, f"garbage changed the result by {err:.3e}"
+
+
+@pytest.mark.parametrize("gate", GATE_SWEEP)
+@pytest.mark.parametrize("head_dim", [64, 128])
+def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
+    device, gate, head_dim
+):
+    """The compiler settles the chunk height, so check what it settled on.
+
+    An earlier version of this test compared `estimate_shared_memory` against
+    the kernel's reported `metadata.shared`, and immediately showed why that
+    comparison is the wrong one to make: Triton pipelines the gathered q tile
+    2 deep at head_dim 128 and 4 deep at head_dim 64, so no constant depth is
+    both safe and tight. Modelling it conservatively is what cost 12% by
+    rejecting GROUP=64.
+
+    So this asserts the property that matters instead. The height that ran fits
+    the budget, and the next height up genuinely does not -- meaning nothing
+    faster was left on the table.
+    """
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    q, k, v = make_qkv((1, 1, 1024, head_dim), dtype=torch.bfloat16,
+                       device=device)
+    index = build_csc_fused(q, k, cfg)
+    budget = shared_memory_budget(q.device)
+
+    attend_partials(q, k, v, cfg, index)
+    key = (block_size, head_dim, q.element_size(), index.max_slots, True,
+           torch.cuda.get_device_capability(q.device))
+    used = _GROUP_CACHE[key]
+
+    kernel = _compile_attn(q, k, v, cfg, index, used)
+    assert kernel.metadata.shared <= budget, (
+        f"chunk height {used} allocates {kernel.metadata.shared} bytes, over "
+        f"the {budget} budget"
+    )
+
+    bigger = [g for g in group_candidates(cfg, head_dim, q.element_size(),
+                                          q.device) if g > used]
+    for g in bigger:
+        with pytest.raises(OutOfResources):
+            _compile_attn(q, k, v, cfg, index, g)
+
+
+def _compile_attn(q, k, v, cfg, index, group):
+    """Launches the attention kernel at a given chunk height."""
+    b, h, s, d = q.shape
+    part_m, part_l, part_acc = empty_partials(
+        q.shape, index.max_slots, q.device, q.dtype)
+    part_m.fill_(float("-inf"))
+    return _moba_attn_fwd[(index.num_blocks, b * h)](
+        q, k, v, index.row_indices, index.slot_of_pair, index.col_offsets,
+        index.col_nnz, index.order, part_m, part_l, part_acc,
+        s, index.row_indices.shape[-1], d ** -0.5 * 1.4426950408889634,
+        index.num_blocks, BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
+        K_SLOTS=index.max_slots, CAUSAL=True,
+    )

@@ -34,6 +34,7 @@ programs and must be merged afterwards (D10).
 import torch
 import triton
 import triton.language as tl
+from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
 from moba.device import (
@@ -151,10 +152,27 @@ def _moba_attn_fwd(
 # BLOCK_SIZE=128, GROUP=128 (`docs/learning/02`).
 MAX_GROUP = 128
 
-# Pipelining depth Triton allocates for the gathered q tile. Measured 2 or 3
-# depending on configuration; 3 is used so the estimate is an upper bound and
-# never predicts a launch that then fails.
-PIPELINE_STAGES = 3
+# Pipelining depth Triton allocates for the gathered q tile.
+#
+# This is the *optimistic* depth, and it is deliberately not an upper bound.
+# The depth is not a constant: measured on this card it is 2 at head_dim 128
+# and 4 at head_dim 64, so any single number is either wrong or wasteful.
+#
+# The history is worth keeping, because the same mistake has now been made
+# twice in this codebase. This was 3, "so the estimate is an upper bound and
+# never predicts a launch that then fails". The launch it wrongly predicted
+# would fail was GROUP=64 at head_dim 128, which Triton compiles to 98,816
+# bytes against a 101,376 budget and which runs 12% faster than the GROUP=32
+# the over-estimate forced. `check_gate_fits` did the same thing to the gate.
+# A conservative guess about the compiler is still a guess, and both guesses
+# cost speed silently.
+#
+# So the estimate no longer decides anything on its own. It proposes the
+# largest chunk height that *might* fit, and `attend_partials` asks the
+# compiler, stepping down if the launch is rejected. Shared-memory overflow is
+# raised at compile time, before any argument is touched, so a rejected attempt
+# has no effect to undo.
+PIPELINE_STAGES = 2
 
 
 def estimate_shared_memory(
@@ -167,9 +185,9 @@ def estimate_shared_memory(
     every iteration and Triton pipelines it, costing `PIPELINE_STAGES` copies
     of `group x head_dim`.
 
-    Fitted against measurements: at head_dim 64, block_size 128 the observed
-    values are 44.2 / 56.5 / 80.0 KiB for group 32 / 64 / 128, against
-    44.2 / 56.2 / 80.2 predicted.
+    This is a *lower* bound on what Triton allocates, not an upper one, so it
+    proposes rather than decides; see `PIPELINE_STAGES` and
+    `attend_partials`.
 
     Args:
         block_size: KV block size.
@@ -210,28 +228,61 @@ def choose_group(
         device: CUDA device, for the shared-memory budget.
 
     Returns:
-        A multiple of `TENSOR_CORE_TILE` that fits the budget.
+        The largest multiple of `TENSOR_CORE_TILE` that may fit. Whether it
+        actually compiles is settled by `attend_partials`, not here.
 
     Raises:
         ValueError: If no chunk height down to `TENSOR_CORE_TILE` fits, which
             means the K and V tiles alone exceed shared memory.
     """
-    budget = shared_memory_budget(device)
-    group = min(MAX_GROUP, round_up_to_tensor_core_tile(cfg.top_k * cfg.block_size))
+    return group_candidates(cfg, head_dim, itemsize, device)[0]
 
+
+def group_candidates(
+    cfg: MoBAConfig, head_dim: int, itemsize: int, device=None
+) -> list[int]:
+    """Returns chunk heights to try, largest first.
+
+    `estimate_shared_memory` is a lower bound on what Triton allocates, so the
+    first entry may not actually compile. `attend_partials` walks this list and
+    lets the compiler reject what does not fit, which is the only authority on
+    the question -- see `PIPELINE_STAGES` for what modelling it cost.
+
+    Args:
+        cfg: Configuration supplying `block_size` and `top_k`.
+        head_dim: Head dimension.
+        itemsize: Bytes per element of the input dtype.
+        device: CUDA device, for the shared-memory budget.
+
+    Returns:
+        Multiples of `TENSOR_CORE_TILE` in descending order, non-empty.
+
+    Raises:
+        ValueError: If not even `TENSOR_CORE_TILE` can fit, which means the K
+            and V tiles alone exceed shared memory.
+    """
+    budget = shared_memory_budget(device)
+    group = min(MAX_GROUP,
+                round_up_to_tensor_core_tile(cfg.top_k * cfg.block_size))
+
+    out = []
     while group >= TENSOR_CORE_TILE:
-        if estimate_shared_memory(cfg.block_size, group, head_dim, itemsize) <= budget:
-            return group
+        if estimate_shared_memory(
+            cfg.block_size, group, head_dim, itemsize
+        ) <= budget:
+            out.append(group)
         group //= 2
 
-    needed = estimate_shared_memory(
-        cfg.block_size, TENSOR_CORE_TILE, head_dim, itemsize
-    )
-    raise ValueError(
-        f"block_size {cfg.block_size} with head_dim {head_dim} needs {needed} "
-        f"bytes of shared memory at the minimum chunk height, exceeding this "
-        f"GPU's {budget}. Reduce block_size."
-    )
+    if not out:
+        needed = estimate_shared_memory(
+            cfg.block_size, TENSOR_CORE_TILE, head_dim, itemsize
+        )
+        raise ValueError(
+            f"block_size {cfg.block_size} with head_dim {head_dim} needs "
+            f"{needed} bytes of shared memory at the minimum chunk height, "
+            f"exceeding this GPU's {budget}. Reduce block_size."
+        )
+    return out
 
 
 # Queries per combine program.
@@ -516,6 +567,12 @@ def empty_partials(
     )
 
 
+# Chunk heights the compiler has already accepted, keyed by everything
+# that can change the allocation. Populated by `attend_partials` on the
+# first successful launch of each configuration.
+_GROUP_CACHE: dict[tuple, int] = {}
+
+
 def attend_partials(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -575,7 +632,6 @@ def attend_partials(
     """
     b, h, s, d = q.shape
     slots = index.max_slots
-    group = choose_group(cfg, d, q.element_size(), q.device)
 
     if partials_dtype is None:
         partials_dtype = q.dtype
@@ -594,17 +650,40 @@ def attend_partials(
     # nothing measurable.
     part_m.fill_(float("-inf"))
 
-    _moba_attn_fwd[(index.num_blocks, b * h)](
-        q, k, v,
-        index.row_indices, index.slot_of_pair,
-        index.col_offsets, index.col_nnz, index.order,
-        part_m, part_l, part_acc,
-        s, index.row_indices.shape[-1], d ** -0.5 * 1.4426950408889634,
-        index.num_blocks,
-        BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-        K_SLOTS=slots, CAUSAL=causal,
+    # Largest chunk height first, letting the compiler reject what will not
+    # fit. `estimate_shared_memory` is a lower bound, so the head of this list
+    # is a proposal; Triton raises OutOfResources at compile time, before any
+    # argument is read, so a rejected attempt leaves nothing to undo. The
+    # winner is cached, making this a one-time cost per configuration.
+    key = (cfg.block_size, d, q.element_size(), slots, causal,
+           torch.cuda.get_device_capability(q.device))
+    cached = _GROUP_CACHE.get(key)
+    candidates = ([cached] if cached is not None
+                  else group_candidates(cfg, d, q.element_size(), q.device))
+
+    for group in candidates:
+        try:
+            _moba_attn_fwd[(index.num_blocks, b * h)](
+                q, k, v,
+                index.row_indices, index.slot_of_pair,
+                index.col_offsets, index.col_nnz, index.order,
+                part_m, part_l, part_acc,
+                s, index.row_indices.shape[-1],
+                d ** -0.5 * 1.4426950408889634,
+                index.num_blocks,
+                BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
+                K_SLOTS=slots, CAUSAL=causal,
+            )
+        except OutOfResources:
+            continue
+        _GROUP_CACHE[key] = group
+        return part_m, part_l, part_acc
+
+    raise ValueError(
+        f"no chunk height in {candidates} compiles for block_size "
+        f"{cfg.block_size} at head_dim {d}; every one exceeded this GPU's "
+        f"shared memory"
     )
-    return part_m, part_l, part_acc
 
 
 def moba_forward(
