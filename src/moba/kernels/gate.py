@@ -5,9 +5,9 @@ HBM, reads it back to mask it, writes it again, sorts it, and writes a dense
 boolean mask. Profiling put ~40% of the gate's GPU time in `aten::copy_` and
 device-to-device memcpy -- moving intermediates, not computing anything.
 
-This kernel keeps a query tile's scores in registers, ranks them there, and
-emits only the answer: for each query, the block ids it selected, ascending.
-The score matrix never exists in memory.
+This kernel never lets that matrix exist. It streams the block representatives
+past a resident query tile in chunks, keeps a running top-k on chip, and emits
+only the answer: for each query, the block ids it selected, ascending.
 
 This is the same trick as FlashAttention itself. FA never writes the `[S, S]`
 score matrix because it only ever needs a running summary of it -- the running
@@ -17,16 +17,33 @@ chip is scaffolding you never pay to move.
 
 Pattern borrowed from FlashMoBA's "Flash TopK" (its stage 2, in CUDA, which
 reports 22x over the unfused gate) and from fla-org's NSA
-`parallel_nsa_kernel_topk`, which does the same in Triton. Both stream a
-centroid matrix past a resident query tile and keep the running top-k on chip.
+`parallel_nsa_kernel_topk`, which does the same in Triton.
 
-What is different here: NSA merges each streamed chunk into a sorted running
-list with a bitonic network, because its candidate count is large. MoBA's
-candidate count is `num_blocks = S / block_size` -- 32 at S=4096, 128 at
-S=16384. Small enough to hold the whole score row in registers and rank it in
-place by repeated maximum extraction, which is both cheaper at this size and
-far easier to make deterministic. The ceiling that buys is set by the
-representative tile, and `check_gate_fits` enforces it.
+WHAT IS DIFFERENT FROM NSA. NSA merges each streamed chunk into a *sorted*
+running list with a bitonic network. Sortedness is not needed here: the only
+thing the merge ever asks of the running list is its minimum -- the bar a new
+score must clear to get in. Finding a minimum over `top_k` entries is one
+reduction; keeping them sorted costs `log^2` compare-exchange stages per chunk.
+NSA pays that because its candidate list is long. MoBA's is `top_k`, typically
+8, where the sort would be pure overhead -- and Triton exposes no warp shuffle,
+so a bitonic network here would have to be built out of reshapes.
+
+WHY STREAMING AT ALL, given that an earlier version held every representative
+at once and compiled without spilling even at 512 blocks. Because the cost of
+the one-shot version was never spills; it was that its working tile was
+`[BLOCK_M, num_blocks]`, so the tile grew with the sequence, the warp count had
+to grow with the tile to avoid spilling, and occupancy fell as the warp count
+rose. Measured at head_dim 128: num_blocks 128 ran 4 warps at 154 registers per
+thread, fitting 3 programs per SM; num_blocks 256 ran 8 warps at 155, fitting
+one. Per-thread register use barely moved -- the *program* got wider, and an
+SM's 65536 registers are a budget shared by everything resident on it.
+Streaming pins the tile width to `GATE_BLOCK_N` and the warp count with it, so
+occupancy no longer depends on sequence length.
+
+The loop that streaming introduces also admits an optimization the one-shot
+form cannot express at all: its trip count is a runtime value, so a query tile
+stops at the last block any of its queries can causally see instead of scoring
+every block and masking the future away afterwards. See `_moba_gate_fwd`.
 """
 
 import torch
@@ -34,26 +51,31 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
-from moba.device import (
-    TENSOR_CORE_TILE,
-    WARP_SIZE,
-    round_up_to_tensor_core_tile,
-    shared_memory_budget,
-)
+from moba.device import TENSOR_CORE_TILE
 
-# Queries per gate program. Small for the same reason the combine tile is
-# small: the score row `[BLOCK_M, N_BLOCKS]` lives in registers, so the tile
-# height multiplies the register cost of every extraction round.
-GATE_BLOCK_M = 16
+# Queries per gate program. 32 rather than the 16 the one-shot gate used:
+# halving the program count halves how many times the representatives are
+# re-read, and the one-shot gate could not afford the wider tile because its
+# tile was already `num_blocks` wide. Measured 1.3-1.9x over BLOCK_M=16 at every
+# sequence length swept.
+GATE_BLOCK_M = 32
 
-# Score elements one thread may hold before the compiler spills, mirroring
-# `COMBINE_ELEMENTS_PER_THREAD`. The gate holds two full-width tiles at once
-# (the working scores and the selection mask), so this is half the combine
-# budget.
-GATE_ELEMENTS_PER_THREAD = 16
+# Representatives scored per streaming step, and the width of the only working
+# tile in the kernel -- the whole point of the streaming form is that this does
+# not grow with the sequence. Must be at least `TENSOR_CORE_TILE`, since the
+# chunk is an operand of `tl.dot`.
+#
+# This is a real trade-off rather than a free parameter. Useful work per chunk
+# is `TAKE * BLOCK_N`; the merge bookkeeping is `TAKE * 2 * K_POW2` regardless
+# of chunk width. So overhead is `2 * K_POW2 / BLOCK_N` -- wide chunks amortize
+# it -- while the causal horizon below is only tracked to `BLOCK_N` granularity,
+# so wide chunks overshoot it. Swept at 16/32/64 over seq_len 4K-64K: 32 wins
+# everywhere except 64K, where it ties 64.
+GATE_BLOCK_N = 32
 
-MIN_GATE_WARPS = 4
-MAX_GATE_WARPS = 8
+# Fixed, because the tile shape is now fixed. The one-shot gate had to derive
+# this from `num_blocks`, and that derivation was what collapsed occupancy.
+GATE_WARPS = 4
 
 
 @triton.jit
@@ -61,8 +83,8 @@ def _moba_gate_fwd(
     Q, Kbar, BlockIdx,
     S, sm_scale,
     BLOCK_SIZE: tl.constexpr, BLOCK_M: tl.constexpr, D: tl.constexpr,
-    N_BLOCKS: tl.constexpr, N_POW2: tl.constexpr,
-    TAKE: tl.constexpr, TOP_K: tl.constexpr,
+    BLOCK_N: tl.constexpr, N_BLOCKS: tl.constexpr, K_POW2: tl.constexpr,
+    CAPACITY: tl.constexpr, TAKE: tl.constexpr, TOP_K: tl.constexpr,
     ALWAYS_CURRENT: tl.constexpr,
 ):
     """One program per (query tile, batch-head). Emits selected block ids.
@@ -77,125 +99,153 @@ def _moba_gate_fwd(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     live = offs_m < S
     offs_d = tl.arange(0, D)
-    cols = tl.arange(0, N_POW2)
+    slots = tl.arange(0, K_POW2)
 
     q = tl.load(Q + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
                 mask=live[:, None], other=0.0)
-    kbar = tl.load(
-        Kbar + pid_bh * N_BLOCKS * D + cols[:, None] * D + offs_d[None, :],
-        mask=(cols < N_BLOCKS)[:, None], other=0.0,
-    )
 
-    # `tl.dot` accumulates in float32. The PyTorch gate multiplies bf16 by
-    # bf16, and cuBLAS also accumulates in float32 but rounds its *output* back
-    # to bf16. Rounding here reproduces that exactly, which matters because the
-    # routing test compares selections for equality and a near-tie decided
-    # differently is a mismatch, not an approximation.
-    scores = tl.dot(q, tl.trans(kbar)) * sm_scale
-    scores = scores.to(kbar.dtype).to(tl.float32)
-
-    # A block is a candidate only if it lies wholly in the query's past. The
-    # query's own block is handled separately below: it needs an internal
-    # causal mask, so it is never ranked against the others.
     own_block = offs_m // BLOCK_SIZE
-    is_past = (cols[None, :] < own_block[:, None]) & (cols < N_BLOCKS)[None, :]
-    work = tl.where(is_past, scores, float("-inf"))
 
-    # --- Rank by repeated maximum extraction. --------------------------------
-    # TAKE rounds, each finding the best remaining candidate and retiring it.
-    # An alternative was a bitonic sort of the whole row, as NSA uses; at
-    # num_blocks this small, TAKE passes is less work than log^2(N) stages, and
-    # the tie-break below is explicit rather than a property of the network.
-    chosen = cols[None, :] < 0        # all false, [BLOCK_M, N_POW2]
-    for _ in tl.static_range(TAKE):
-        best = tl.max(work, axis=1)
+    # --- The running top-k, held in registers for the whole kernel. ----------
+    # `best_val` holds the k best scores seen so far and `best_idx` where each
+    # came from. Empty slots sit at -inf, which makes them the natural first
+    # things to be replaced and removes the need for a separate "is the list
+    # full yet" flag.
+    best_val = tl.full([BLOCK_M, K_POW2], float("-inf"), tl.float32)
+    best_idx = tl.full([BLOCK_M, K_POW2], N_BLOCKS, tl.int32)
 
-        # Lowest index wins a tie. This is `tie_break_low_index`, and it is a
-        # determinism requirement rather than an accuracy one: an unstable
-        # tie-break makes the kernel select different blocks on different runs,
-        # which is almost indistinguishable from a race when debugging. Taking
-        # the minimum column index among the maxima states the rule outright
-        # instead of trusting `argmax` to resolve ties in any order.
-        at_best = work == best[:, None]
-        pick = tl.min(tl.where(at_best, cols[None, :], N_POW2), axis=1)
-
-        # A round finds nothing when the query has fewer past blocks than the
-        # budget. top_k is a ceiling, not a quota.
-        found = best > float("-inf")
-        hit = (cols[None, :] == pick[:, None]) & found[:, None]
-        chosen = chosen | hit
-        work = tl.where(hit, float("-inf"), work)
+    # `K_POW2` is rounded up to a power of two because `tl.arange` demands it,
+    # so at top_k 12 there are 16 slots for 12 entries. The surplus has to be
+    # retired or it becomes extra capacity: a -inf slot reads as "empty, fill
+    # me", and across two chunks the list would admit 16 blocks where 12 were
+    # allowed. +inf retires them -- never the minimum, so never an eviction
+    # victim, and their sentinel block index makes them emit as padding.
+    #
+    # This needs at least two chunks to go wrong, so it is invisible whenever
+    # num_blocks <= BLOCK_N.
+    best_val = tl.where(slots[None, :] >= CAPACITY, float("inf"), best_val)
 
     if ALWAYS_CURRENT:
-        chosen = chosen | ((cols[None, :] == own_block[:, None])
-                           & (cols < N_BLOCKS)[None, :])
+        # Seeded rather than appended at the end. An entry at +inf can never be
+        # beaten, so it is guaranteed to survive to the emit step, and the merge
+        # loop below needs no special case for it. `K_POW2` is sized to leave
+        # room for this seed on top of the `TAKE` past blocks.
+        seed = slots[None, :] == 0
+        best_val = tl.where(seed, float("inf"), best_val)
+        best_idx = tl.where(seed, own_block[:, None].to(tl.int32), best_idx)
+
+    # --- Stop at the causal horizon of this tile. ----------------------------
+    # A block is a candidate only if it lies wholly in a query's past, so the
+    # highest block any query here can see is `max(own_block) - 1`. The one-shot
+    # gate scored every block and masked the future away afterwards, so a query
+    # tile early in the sequence did exactly as much work as one at the end.
+    # Averaged over the sequence this halves the gate's arithmetic, the matmul
+    # included, and it is expressible only because the trip count is a runtime
+    # value rather than a tile width.
+    horizon = tl.max(tl.where(live, own_block, 0))
+    n_chunks = tl.cdiv(tl.minimum(horizon, N_BLOCKS), BLOCK_N)
+
+    for c in range(0, n_chunks):
+        cols = c * BLOCK_N + tl.arange(0, BLOCK_N)
+        in_range = cols < N_BLOCKS
+
+        kbar = tl.load(
+            Kbar + pid_bh * N_BLOCKS * D + cols[:, None] * D + offs_d[None, :],
+            mask=in_range[:, None], other=0.0,
+        )
+
+        # `tl.dot` accumulates in float32. The PyTorch gate multiplies bf16 by
+        # bf16, and cuBLAS also accumulates in float32 but rounds its *output*
+        # back to bf16. Rounding here reproduces that exactly, which matters
+        # because the routing test compares selections for equality and a
+        # near-tie decided differently is a mismatch, not an approximation.
+        s = tl.dot(q, tl.trans(kbar)) * sm_scale
+        s = s.to(kbar.dtype).to(tl.float32)
+
+        # The query's own block is excluded here even when ALWAYS_CURRENT is
+        # set: it needs an internal causal mask at attention time, so it is
+        # never ranked against the others.
+        is_past = (cols[None, :] < own_block[:, None]) & in_range[None, :]
+        s = tl.where(is_past, s, float("-inf"))
+
+        # --- Merge this chunk into the running list. -------------------------
+        # TAKE rounds, each offering the chunk's best remaining candidate to the
+        # list. The list's minimum is the entry bar; a candidate that clears it
+        # overwrites that minimum's slot.
+        for _ in tl.static_range(TAKE):
+            bv = tl.max(s, axis=1)
+
+            # Lowest block index wins a tie. This is `tie_break_low_index`, a
+            # determinism requirement rather than an accuracy one: an unstable
+            # tie-break selects different blocks on different runs, which is
+            # nearly indistinguishable from a race when debugging.
+            bi = tl.min(tl.where(s == bv[:, None], cols[None, :], N_BLOCKS),
+                        axis=1)
+
+            # The eviction victim: the weakest entry in the list. When several
+            # entries tie for weakest, the one from the *highest* block index
+            # goes, so the lowest-indexed of the tied blocks survives -- the
+            # same `tie_break_low_index` rule that governs admission.
+            #
+            # Getting this wrong is subtle and was the one bug this rewrite
+            # introduced. Choosing the victim by slot position instead evicts
+            # whichever tied entry happened to be written to a lower slot,
+            # which is arbitrary; measured at block_size 32 it disagreed with
+            # the oracle on 764 of 8.4M decisions, every one an exact tie. The
+            # one-shot gate could not hit this at all, because it only ever set
+            # bits in a `chosen` mask and never took one back out. Eviction is
+            # a concept streaming introduces, so the tie rule has to reach it.
+            floor = tl.min(best_val, axis=1)
+            weakest = best_val == floor[:, None]
+            victim = tl.max(tl.where(weakest, best_idx, -1), axis=1)
+            # Empty slots all carry the same sentinel index, so `victim` can
+            # match several of them; narrowing to the lowest such slot keeps
+            # exactly one write target.
+            floor_slot = tl.min(
+                tl.where(weakest & (best_idx == victim[:, None]),
+                         slots[None, :], K_POW2),
+                axis=1,
+            )
+
+            # Strictly greater, not >=. Chunks are visited in ascending block
+            # order, so a score that merely ties the current k-th best loses to
+            # the lower-indexed block already holding that value -- the same
+            # tie-break rule as above, obtained here for free from the visit
+            # order. Strictness also makes a round that finds nothing admit
+            # nothing, which is what a query with fewer past blocks than the
+            # budget needs: top_k is a ceiling, not a quota.
+            enter = bv > floor
+            target = (slots[None, :] == floor_slot[:, None]) & enter[:, None]
+            best_val = tl.where(target, bv[:, None], best_val)
+            best_idx = tl.where(target, bi[:, None].to(tl.int32), best_idx)
+
+            # Retire the admitted candidate so the next round finds the one
+            # below it. If nothing was admitted, nothing else in this chunk can
+            # be either -- every remaining score is below the one that just
+            # failed -- so the leftover rounds are harmless no-ops.
+            s = tl.where((cols[None, :] == bi[:, None]) & enter[:, None],
+                         float("-inf"), s)
 
     # --- Emit ascending. -----------------------------------------------------
     # Slot j is the rank of a block among the query's selections ordered by
     # ascending block index -- the same rule the PyTorch index used, so the
     # combine pass's fixed-slot addressing is unchanged. Repeatedly taking the
-    # lowest remaining selection produces exactly that order.
-    remaining = chosen
+    # lowest remaining selection produces exactly that order. Unlike the
+    # one-shot gate this scans K_POW2 entries rather than num_blocks, so the
+    # emit step no longer grows with the sequence either.
+    remaining = tl.where(best_val > float("-inf"), best_idx, N_BLOCKS)
     for j in tl.static_range(TOP_K):
-        nxt = tl.min(tl.where(remaining, cols[None, :], N_POW2), axis=1)
+        nxt = tl.min(remaining, axis=1)
         valid = nxt < N_BLOCKS
         tl.store(
             BlockIdx + pid_bh * S * TOP_K + offs_m * TOP_K + j,
             tl.where(valid, nxt, -1).to(tl.int32),
             mask=live,
         )
-        remaining = remaining & ~(cols[None, :] == nxt[:, None])
-
-
-def choose_gate_warps(block_m: int, n_pow2: int) -> int:
-    """Picks a warp count that keeps the gate's score tile out of spills.
-
-    Args:
-        block_m: Queries per program.
-        n_pow2: Score-row width, rounded to a power of two.
-
-    Returns:
-        A warp count between `MIN_GATE_WARPS` and `MAX_GATE_WARPS`.
-    """
-    per_thread = WARP_SIZE * GATE_ELEMENTS_PER_THREAD
-    needed = (block_m * n_pow2 + per_thread - 1) // per_thread
-    return max(MIN_GATE_WARPS, min(MAX_GATE_WARPS, needed))
-
-
-def check_gate_fits(num_blocks: int, head_dim: int, itemsize: int,
-                    device=None) -> tuple[bool, str]:
-    """Reports whether the block representatives fit in one program's SRAM.
-
-    This kernel loads every block representative at once, which is what lets it
-    rank a query's whole score row in registers without a streaming merge. The
-    cost is a ceiling on `num_blocks`: at head_dim 128 in bfloat16, 128 blocks
-    need 32 KiB and fit, 512 need 128 KiB and do not. Since
-    `num_blocks = seq_len / block_size`, that ceiling is a sequence length --
-    roughly 16K at block_size 128 on sm_86.
-
-    Beyond it the representatives must be streamed in chunks with a running
-    top-k merged per chunk, as NSA does. That is a different kernel, not a
-    tuning change, so this returns a reason rather than silently degrading.
-
-    Args:
-        num_blocks: Number of MoBA blocks.
-        head_dim: Head dimension.
-        itemsize: Bytes per element of the gate dtype.
-        device: CUDA device, for the shared-memory budget.
-
-    Returns:
-        A tuple of (ok, reason). `reason` is empty when ok.
-    """
-    budget = shared_memory_budget(device)
-    needed = round_up_to_tensor_core_tile(num_blocks) * head_dim * itemsize
-    if needed > budget:
-        return False, (
-            f"{num_blocks} blocks at head_dim {head_dim} need {needed} bytes "
-            f"of shared memory for the representative tile, above this GPU's "
-            f"{budget}. This kernel holds all representatives at once; longer "
-            "sequences need a streaming top-k."
-        )
-    return True, ""
+        # Safe to clear every slot equal to `nxt`: a block can be admitted only
+        # once, and the seeded current block is never a past candidate, so no
+        # index ever appears twice.
+        remaining = tl.where(remaining == nxt[:, None], N_BLOCKS, remaining)
 
 
 def gate_select(
@@ -214,7 +264,7 @@ def gate_select(
         each query and padded with -1.
 
     Raises:
-        ValueError: If the shapes disagree or the representatives do not fit.
+        ValueError: If the shapes disagree.
     """
     b, h, s, d = q.shape
     if kbar.shape[:2] != (b, h) or kbar.shape[-1] != d:
@@ -223,13 +273,16 @@ def gate_select(
             f"{tuple(q.shape)}"
         )
     n = kbar.shape[2]
-    ok, reason = check_gate_fits(n, d, q.element_size(), q.device)
-    if not ok:
-        raise ValueError(reason)
 
     q, kbar = q.contiguous(), kbar.contiguous()
-    n_pow2 = max(TENSOR_CORE_TILE, triton.next_power_of_2(n))
     block_m = max(TENSOR_CORE_TILE, GATE_BLOCK_M)
+    take = cfg.past_blocks_selected(n)
+
+    # Room for `take` past blocks plus the seeded current one. Rounded to a
+    # power of two because `tl.arange` requires it.
+    seed = 1 if cfg.always_select_current else 0
+    capacity = take + seed
+    k_pow2 = triton.next_power_of_2(max(1, capacity))
 
     out = torch.empty((b, h, s, cfg.top_k), device=q.device, dtype=torch.int32)
 
@@ -241,10 +294,11 @@ def gate_select(
         # it would be arithmetic that changes no decision.
         1.0,
         BLOCK_SIZE=cfg.block_size, BLOCK_M=block_m, D=d,
-        N_BLOCKS=n, N_POW2=n_pow2,
-        TAKE=cfg.past_blocks_selected(n), TOP_K=cfg.top_k,
+        BLOCK_N=max(TENSOR_CORE_TILE, GATE_BLOCK_N),
+        N_BLOCKS=n, K_POW2=k_pow2, CAPACITY=capacity,
+        TAKE=take, TOP_K=cfg.top_k,
         ALWAYS_CURRENT=cfg.always_select_current,
-        num_warps=choose_gate_warps(block_m, n_pow2),
+        num_warps=GATE_WARPS,
     )
     return out
 

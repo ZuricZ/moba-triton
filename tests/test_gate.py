@@ -17,7 +17,7 @@ import torch
 
 from conftest import GATE_SWEEP, SHAPE_SWEEP, make_qkv
 from moba.config import MoBAConfig
-from moba.kernels.gate import check_gate_fits, gate_select
+from moba.kernels.gate import GATE_BLOCK_N, gate_select
 from moba.ref.naive import block_representatives, select_blocks
 
 
@@ -136,17 +136,58 @@ def test_gate_matches_the_oracle_when_the_budget_exceeds_the_blocks(device):
     assert int(idx.max()) < kbar.shape[2], "emitted a block id out of range"
 
 
-def test_gate_refuses_a_representative_tile_that_will_not_fit(device):
-    """The ceiling is reported, not silently degraded.
+def test_gate_handles_more_blocks_than_a_single_tile_could_hold(device):
+    """The streaming form has no ceiling on num_blocks, so this must just work.
 
-    This kernel holds every block representative in SRAM at once, which is what
-    lets it rank a whole score row in registers. Past that point the
-    representatives must be streamed with a per-chunk merge -- a different
-    kernel, not a tuning change -- so the limit raises rather than falling back.
+    The earlier one-shot gate scored every representative in one tile, and was
+    guarded by a check that rejected 512 blocks as needing 128 KiB of shared
+    memory. The guard was wrong twice over: the compiler reported 20 KiB, and
+    what actually degraded was occupancy, not capacity. This configuration --
+    512 blocks, four times what the guard permitted -- is here so that a
+    reintroduced ceiling fails loudly instead of at some untested length.
+
+    It earns its keep for a second reason. Exact bf16 score ties get common
+    at this many blocks, and ties are where the tie-break rule is actually
+    exercised; this configuration caught an eviction-order bug that every
+    shape at seq_len 2048 or below missed.
     """
-    ok, reason = check_gate_fits(num_blocks=8192, head_dim=128, itemsize=2)
-    assert not ok
-    assert "streaming top-k" in reason
+    cfg = MoBAConfig(block_size=32, top_k=8, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 1, 16384, 128), dtype=torch.bfloat16, device=device)
+    kbar = block_representatives(k, cfg)
+    assert kbar.shape[2] == 512, "expected 512 blocks for this configuration"
 
-    ok, _ = check_gate_fits(num_blocks=64, head_dim=128, itemsize=2)
-    assert ok
+    expected = select_blocks(q, kbar, cfg)
+    actual = indices_to_mask(gate_select(q, kbar, cfg), kbar.shape[2])
+
+    assert torch.equal(expected, actual), (
+        f"{int((expected ^ actual).sum())} routing disagreements at 512 blocks"
+    )
+
+
+def test_gate_respects_the_budget_when_capacity_is_not_a_power_of_two(device):
+    """A running list with surplus slots must not use them as extra capacity.
+
+    `K_POW2` is rounded up for `tl.arange`, so top_k 12 gives 16 slots holding
+    12 entries. If the surplus is left looking empty the merge fills it, and
+    the query ends up attending to more blocks than its budget allows.
+
+    Two conditions are needed to see it, and no other test here has both: a
+    top_k whose capacity is not a power of two, and num_blocks above
+    `GATE_BLOCK_N` so more than one chunk is merged. Only a backend test at
+    seq_len 8192 caught it originally.
+    """
+    cfg = MoBAConfig(block_size=128, top_k=12, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 1, 8192, 128), dtype=torch.bfloat16, device=device)
+    kbar = block_representatives(k, cfg)
+    assert kbar.shape[2] > GATE_BLOCK_N, "needs more than one streamed chunk"
+
+    idx = gate_select(q, kbar, cfg)
+    selected = (idx >= 0).sum(-1)
+
+    assert int(selected.max()) <= cfg.top_k, (
+        f"a query selected {int(selected.max())} blocks, over the budget of "
+        f"{cfg.top_k}"
+    )
+    assert torch.equal(select_blocks(q, kbar, cfg),
+                       indices_to_mask(idx, kbar.shape[2]))
+

@@ -145,4 +145,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward pass done and measured -- 1.52x over dense SDPA at S=8192, attainment 0.34 (target was 0.10), 36x over Moonshot; 316 tests green. Next: the attention kernel, which runs at 4.3 TFLOP/s against dense's 12.7.
+> Status: Forward pass done. 1.52x over dense SDPA at S=8192, 36x over Moonshot; 317 tests green. Gate now streams its top-k -- no context ceiling, 2.46x at S=32768. Next: the attention kernel, 8.1 TFLOP/s against dense 12.7, where 61% of the traffic is the scattered fp32 partial writes.
