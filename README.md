@@ -37,21 +37,28 @@ amortized across a whole query tile. MoBA breaks that precondition. A
 query-major kernel must load the *union* of blocks its tile selected, then mask
 away what each individual query did not want:
 
-| seq_len | block_size | BLOCK_M=16 | BLOCK_M=64 | BLOCK_M=128 |
-|---:|---:|---:|---:|---:|
-| 1024 | 128 | 0.429 | 0.417 | 0.417 |
-| 4096 | **16** | **0.134** | **0.043** | **0.028** |
+Utilization is governed by `num_blocks = seq_len / block_size` — how many
+choices each query has. At the reference configuration `block_size=128,
+top_k=8`:
 
-At S=4096 with `block_size=16` and a conventional tile height of 128, a
-query-major kernel **discards 97.2% of its tensor-core work** — and it gets
-worse as context grows, which is the regime MoBA exists to serve.
+| seq_len | num_blocks | BLOCK_M=16 | BLOCK_M=64 | BLOCK_M=128 | discarded |
+|---:|---:|---:|---:|---:|---:|
+| 4096 | 32 | 0.434 | 0.432 | 0.432 | 57% |
+| 8192 | 64 | 0.249 | 0.233 | 0.229 | 77% |
+| **16384** | **128** | 0.160 | **0.121** | **0.118** | **88%** |
+
+At S=16384 — the low end of FlashMoBA's 8K–512K sweep — a query-major kernel
+**discards 88% of its tensor-core work**, and it gets worse as context grows,
+which is the regime MoBA exists to serve.
 
 **The decision: invert the loop to KV-block-major.** Instead of a program
 owning a query tile and looping over blocks, a program owns one KV block and
 gathers exactly the queries that selected it. Every key loaded is then used by
 every query held — utilization is 100% by construction rather than by tuning.
 The group size has a closed form, `top_k × block_size`, which is **independent
-of sequence length** (measured 31.9 against a predicted 32).
+of sequence length** (measured 912 against a predicted 1024 at `block_size=128,
+top_k=8`; the shortfall is early queries with fewer past blocks than the budget
+allows).
 
 The cost is that a query now receives partial results from several programs,
 which must be combined with an online-softmax merge in a separate pass.

@@ -12,7 +12,9 @@ efficiently". Checked against the vendored references: FlashMoBA benchmarks
 chunk 512/4096 with top_k 3/12. `block_size=16` appears in neither. Sparsity
 comes from `num_blocks = S / block_size` being large, which the references get
 from long context, not from shrinking blocks. The loop-order problem is
-unaffected — query-major still discards 88% of its work at `block_size=128`.
+unaffected, but the figure moved: utilization depends on `num_blocks`, so
+query-major discards 88% at `block_size=128` only from **S=16384** up. At the
+S=4096 this card can run it discards 57%. See `docs/divergence-measurements.md`.
 
 ## What to assume I know
 - Assume fluency: PyTorch, attention math (QKV, softmax, causal masking,

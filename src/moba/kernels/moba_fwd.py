@@ -4,8 +4,9 @@ One program owns one KV block, loads it into SRAM once, and streams every query
 that selected it past that single load. This is decision D6: the loop order is
 inverted relative to FlashAttention-2 because MoBA's per-query routing destroys
 the amortization a query-major tile depends on. Measured query-major
-utilization at S=4096, block_size=16 is 0.028 -- 97% of tensor-core work
-discarded (`docs/divergence-measurements.md`).
+utilization at the reference configuration (block_size 128, top_k 8) is 0.121
+once num_blocks reaches 128 -- 88% of tensor-core work discarded, which at that
+block size means S=16384 and up (`docs/divergence-measurements.md`).
 
 Three things about this kernel differ from a dense FA-2 inner loop, all of them
 simplifications:
@@ -115,8 +116,18 @@ def _moba_attn_fwd(
         # Every row has at least one live entry: a query only reaches a block
         # it selected, and it can only select its own block if that block
         # starts at or before it. So `m` is never -inf and exp() is safe.
+        # Base 2, not base e. The SFU has a native 2^x instruction and none
+        # for e^x, so `tl.exp` compiles to `exp2(x * 1.4427)` -- one extra
+        # multiply on every element of a [GROUP, BLOCK_SIZE] tile. `sm_scale`
+        # already carries that constant (see `moba_forward`), so the multiply
+        # is folded into work the kernel was doing anyway and disappears.
+        # Measured 7% off this kernel at S=4096 and S=8192.
+        #
+        # `p`, `l` and `acc` are unchanged in value: exp2(log2(e) * x) is
+        # exp(x) exactly. Only `m` changes units, and `combine_partials`
+        # consumes it with the matching `exp2`.
         m = tl.max(qk, axis=1)
-        p = tl.exp(qk - m[:, None])
+        p = tl.exp2(qk - m[:, None])
         l = tl.sum(p, axis=1)
         acc = tl.dot(p.to(v.dtype), v)
 
@@ -371,12 +382,21 @@ def _moba_combine(
         a_i = tl.load(a_base + slot * D, mask=live[:, None], other=0.0)
 
         # A slot no program wrote still holds its initial m = -inf, so its
-        # weight is exp(-inf - m_g) = 0 and it drops out arithmetically. That
-        # is why `moba_forward` fills part_m with -inf rather than zeros: the
-        # alternative is a per-slot branch, which would diverge inside a warp.
-        w = tl.exp(m_i - m_g)
-        l += l_i * w
-        acc += a_i * w[:, None]
+        # weight is exp(-inf - m_g) = 0. That kills its contribution
+        # arithmetically -- except against uninitialized memory, where 0 * NaN
+        # is NaN. Selecting on the marker closes that hole, which is what lets
+        # the caller skip zeroing the accumulator entirely: `tl.where` picks a
+        # branch rather than evaluating both, so a NaN in the discarded operand
+        # cannot leak. That saves writing the largest buffer in the design
+        # twice -- 128 MB at S=8192, ~790 us of pure bandwidth.
+        #
+        # `part_m` is still filled, because it is the marker. It is a factor of
+        # D smaller (0.5 MB against 128 MB), so filling it is not worth
+        # avoiding.
+        written = m_i > float("-inf")
+        w = tl.exp2(m_i - m_g)
+        l += tl.where(written, l_i * w, 0.0)
+        acc += tl.where(written[:, None], a_i * w[:, None], 0.0)
 
     # Not guarded against l == 0. Every query selects at least its own block,
     # so a zero denominator means the index is wrong, and a NaN propagating to
@@ -398,7 +418,8 @@ def combine_partials(
     """Merges per-slot partial softmaxes into the final attention output.
 
     Args:
-        part_m: Per-slot maxima, [B, H, S, K] fp32.
+        part_m: Per-slot maxima in log2 units, [B, H, S, K] fp32, as
+            `attend_partials` writes them.
         part_l: Per-slot denominators, [B, H, S, K] fp32.
         part_acc: Per-slot un-normalized outputs, [B, H, S, K, D] fp32.
         out_dtype: Dtype of the returned tensor.
@@ -536,7 +557,9 @@ def attend_partials(
             no program writes must read as -inf.
 
     Returns:
-        A tuple of (part_m, part_l, part_acc).
+        A tuple of (part_m, part_l, part_acc). `part_m` is in log2
+        units; `combine_partials` expects that and no other consumer
+        exists.
     """
     b, h, s, d = q.shape
     slots = index.max_slots
@@ -546,21 +569,24 @@ def attend_partials(
         partials = empty_partials(q.shape, slots, q.device, partials_dtype)
     part_m, part_l, part_acc = partials
 
-    # part_m is filled with -inf so a slot no program writes contributes
-    # nothing: exp(-inf - m_global) is 0, which removes it without a branch.
-    # part_acc is zeroed because an unwritten slot's weight multiplies whatever
-    # is there, and 0 * NaN is NaN -- uninitialized memory would leak through
-    # the one arithmetic hole the -inf trick does not cover.
+    # Only the marker is initialized. A slot no program writes keeps m = -inf,
+    # which is how `combine_partials` knows to skip it; `part_l` and `part_acc`
+    # are never read for such a slot, so their contents do not matter.
+    #
+    # This is worth the coupling. `part_acc` is the largest buffer in the
+    # design -- 128 MB at S=8192, head_dim 128 -- and zeroing it means writing
+    # it once before the kernel writes it again, at ~790 us of pure memory
+    # bandwidth. `part_m` is a factor of D smaller, so filling it costs
+    # nothing measurable.
     part_m.fill_(float("-inf"))
-    part_l.zero_()
-    part_acc.zero_()
 
     _moba_attn_fwd[(index.num_blocks, b * h)](
         q, k, v,
         index.row_indices, index.slot_of_pair,
         index.col_offsets, index.col_nnz, index.order,
         part_m, part_l, part_acc,
-        s, index.row_indices.shape[-1], d ** -0.5, index.num_blocks,
+        s, index.row_indices.shape[-1], d ** -0.5 * 1.4426950408889634,
+        index.num_blocks,
         BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
         K_SLOTS=slots, CAUSAL=causal,
     )

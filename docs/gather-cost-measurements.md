@@ -59,9 +59,9 @@ group size `top_k x block_size` at the project's hardest configuration.
 
 | head_dim | row bytes | working set | contiguous | identity | permuted | index cost | **scatter cost** |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 32 | 64 | 2 MB | 22.6 us | 23.3 us | 24.3 us | 1.03x | **1.07x** |
-| 64 | 128 | 4 MB | 36.2 us | 36.8 us | 37.1 us | 1.02x | **1.03x** |
-| 128 | 256 | 8 MB | 62.2 us | 63.2 us | 63.2 us | 1.02x | **1.02x** |
+| 32 | 64 | 2 MB | 22.8 us | 23.5 us | 23.8 us | 1.03x | **1.04x** |
+| 64 | 128 | 4 MB | 36.5 us | 37.2 us | 37.6 us | 1.02x | **1.03x** |
+| 128 | 256 | 8 MB | 62.5 us | 63.1 us | 63.6 us | 1.01x | **1.02x** |
 
 **Scattering costs 2–3% at the head dimensions real models use.** Loading the
 index array itself costs another 2%.

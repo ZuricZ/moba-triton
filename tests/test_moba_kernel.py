@@ -105,8 +105,16 @@ def test_rejects_block_size_below_tensor_core_minimum(device):
 def _reference_combine(part_m, part_l, part_acc):
     """The textbook merge, in float64, used as ground truth.
 
+    Uses `exp2`, not `exp`, because the kernel carries its maxima in log2
+    units: the attention kernel folds log2(e) into its scale factor so it can
+    use the hardware's native 2^x instruction, which measured 7% faster. The
+    merged result is identical either way -- softmax does not care which base
+    its logits are expressed in -- but a reference in the wrong base disagrees
+    with the kernel by exp((ln 2 - 1) * (m_i - m_g)), which looks like a merge
+    bug and is not one.
+
     Args:
-        part_m: Per-slot maxima, [B, H, S, K].
+        part_m: Per-slot maxima in log2 units, [B, H, S, K].
         part_l: Per-slot denominators, [B, H, S, K].
         part_acc: Per-slot un-normalized outputs, [B, H, S, K, D].
 
@@ -114,7 +122,7 @@ def _reference_combine(part_m, part_l, part_acc):
         Merged output shaped [B, H, S, D], float64.
     """
     m, l, acc = (t.double() for t in (part_m, part_l, part_acc))
-    w = torch.exp(m - m.max(dim=-1, keepdim=True).values)
+    w = torch.exp2(m - m.max(dim=-1, keepdim=True).values)
     return (acc * w.unsqueeze(-1)).sum(-2) / (l * w).sum(-1).unsqueeze(-1)
 
 
@@ -260,3 +268,33 @@ def test_combine_rejects_a_tile_that_would_spill(device):
 
     with pytest.raises(ValueError, match="without spilling registers"):
         combine_partials(part_m, part_l, part_acc, torch.float32, block_m=128)
+
+
+def test_combine_ignores_garbage_in_slots_no_program_wrote(device):
+    """Unwritten accumulator slots may hold anything, including NaN.
+
+    `attend_partials` deliberately does not zero `part_acc` -- it is the
+    largest buffer in the design, 128 MB at S=8192, and zeroing it means
+    writing it once before the kernel writes it again. Only the per-slot
+    maximum is initialized, and the combine pass selects on that marker.
+
+    The hole this closes is specific: multiplying by a zero weight kills a
+    finite leftover value, but `0 * NaN` is NaN, so arithmetic alone is not
+    enough. `tl.where` picks a branch instead of evaluating both, which is why
+    it works. Filling the untouched slots with NaN here is not a pathological
+    case -- it is what uninitialized device memory is allowed to contain.
+    """
+    part_m, part_l, part_acc = _random_partials(device, k=4)
+    part_l[..., -1] = float("nan")
+    part_acc[..., -1, :] = float("nan")
+
+    actual = combine_partials(part_m, part_l, part_acc, torch.float32)
+
+    assert torch.isfinite(actual).all(), "NaN leaked from an unwritten slot"
+
+    # The answer must equal the one obtained with those slots properly zeroed.
+    part_l[..., -1] = 0.0
+    part_acc[..., -1, :] = 0.0
+    expected = _reference_combine(part_m, part_l, part_acc)
+    err = (actual.double() - expected).abs().max().item()
+    assert err < 1e-5, f"garbage changed the result by {err:.3e}"

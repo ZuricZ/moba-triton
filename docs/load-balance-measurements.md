@@ -1,6 +1,6 @@
 # Load imbalance, measured after scheduling
 
-**Date:** 2026-08-18
+**Date:** 2026-08-22 (re-measured at realistic configurations)
 **Device:** RTX 3050 Ti Laptop, sm_86, 20 SMs | bf16 | 8 heads, head_dim 64
 **Source:** `bench/load_balance.py` (`uv run python -m bench.load_balance`)
 **Settles:** design question B — how hot KV blocks are handled
@@ -26,12 +26,19 @@ once, then processes consumers in tiles of 32 queries, so work is counted in
 tiles:
 
 ```
-tiles(block) = ceil(consumers / GROUP),  GROUP = 32
+tiles(block) = ceil(consumers / GROUP),  GROUP from choose_group()
 ```
 
 Tiling is not a modelling artifact — it is what the kernel does for
 tensor-core reasons — and it damps skew for free, since `ceil` compresses the
-distribution. Skew in tiles (4.9x) is lower than skew in consumers (6.2x).
+distribution. Skew in tiles (2.3–3.7x) is lower than skew in consumers
+(2.4–4x, `docs/divergence-measurements.md`).
+
+`GROUP` is read from `choose_group()` rather than hardcoded. An earlier version
+of this file fixed it at 32 with a comment asserting it equalled
+`top_k * block_size`; once the kernel began deriving it from the shared-memory
+budget, this simulation was silently predicting a kernel that no longer
+existed.
 
 Scheduling is greedy list scheduling, which is what "dispatch to the next free
 processor" means. Four dispatch orders are compared:
@@ -52,32 +59,32 @@ Makespan divided by the perfectly balanced ideal. `1.00x` is perfect.
 
 | config | programs | jobs/proc | skew | ascending | **random** | **descending** | chunked |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| S=4096 blk=16 k=2 | 2048 | 51.2 | 4.9x | 1.07x | **1.03x** | **1.00x** | 1.00x |
-| S=4096 blk=32 k=2 | 1024 | 25.6 | 3.1x | 1.06x | **1.04x** | **1.01x** | 1.01x |
-| S=4096 blk=128 k=2 | 256 | 6.4 | 2.7x | 1.25x | **1.27x** | **1.05x** | 1.01x |
-| S=4096 blk=128 k=4 | 256 | 6.4 | 2.9x | 1.27x | **1.28x** | **1.03x** | 1.01x |
-| S=1024 blk=128 k=2 | 64 | 1.6 | 2.0x | 1.73x | **1.73x** | **1.26x** | 1.02x |
-| S=1024 blk=128 k=4 | 64 | 1.6 | 1.9x | 1.63x | **1.68x** | **1.21x** | 1.03x |
+| S=4096 blk=32 k=4 | 1024 | 25.6 | 3.7x | 1.07x | **1.07x** | **1.01x** | 1.01x |
+| S=4096 blk=32 k=8 | 1024 | 25.6 | 3.7x | 1.09x | **1.08x** | **1.00x** | 1.00x |
+| S=4096 blk=64 k=8 | 512 | 12.8 | 3.1x | 1.13x | **1.11x** | **1.01x** | 1.01x |
+| S=4096 blk=128 k=8 | 256 | 6.4 | 2.6x | 1.20x | **1.21x** | **1.02x** | 1.00x |
+| S=4096 blk=128 k=12 | 256 | 6.4 | 2.3x | 1.18x | **1.18x** | **1.01x** | 1.00x |
+| S=1024 blk=32 k=4 | 256 | 6.4 | 2.5x | 1.25x | **1.19x** | **1.06x** | 1.06x |
 
 ## Finding 1 — skew barely predicts cost; jobs per processor does
 
-Read the `skew` and `random` columns together. **4.9x skew costs 3%. 2.0x skew
-costs 73%.** The relationship is inverted, because severity is governed by
+Read the `skew` and `random` columns together. **3.7x skew costs 7%. 2.6x skew
+costs 21%.** The relationship is inverted, because severity is governed by
 `jobs/proc`, not by how uneven the jobs are.
 
-With 51 jobs per slot, unevenness averages out on its own — a processor that
-draws a long job draws short ones afterwards. With 1.6 jobs per slot there is
-no averaging left to do, and one unlucky draw sets the runtime.
+With 25.6 jobs per slot, unevenness averages out on its own — a processor that
+draws a long job draws short ones afterwards. With 6.4 jobs per slot there is
+much less averaging left to do, and one unlucky draw moves the runtime.
 
-> This is why the alarming 6.2x figure turned out to be harmless in the regime
-> the project targets, and why a mild 2.0x is severe in a regime it does not.
+> This is why the alarming skew figures turned out to be harmless in the regime
+> the project targets, and why milder skew is worse in a regime it does not.
 
 ## Finding 2 — in the target regime there is nothing to fix
 
-At `block_size` 16 and 32 with long context — small blocks, the entire point of
-this project — random dispatch costs **3–4%**. The grid is
-`num_blocks x batch x heads`, which at S=4096, `block_size=16`, H=8 gives 2048
-programs against 40 slots.
+At small `block_size` with long context, random dispatch costs **7–8%**. The
+grid is `num_blocks x batch x heads`, which at S=4096, `block_size=32`, H=8
+gives 1024 programs against 40 slots — 25.6 jobs each, enough for the law of
+averages to do the work.
 
 Sorting removes even that, taking it to 1.00–1.01x.
 
@@ -85,10 +92,14 @@ Sorting removes even that, taking it to 1.00–1.01x.
 
 Longest-first dispatch:
 
-- 256 programs: **1.27x → 1.05x**
-- 64 programs: **1.73x → 1.26x**
+- 512 programs (blk=64, k=8): **1.11x → 1.01x**
+- 256 programs (blk=128, k=8): **1.21x → 1.02x**
+- 256 programs at S=1024: **1.19x → 1.06x**
 
-Chunking does better in the 64-program case (1.02x), and only there.
+Chunking matches longest-first everywhere in this sweep and beats it nowhere,
+which is a change from the earlier `block_size=128, top_k=2` configuration
+where it helped at 64 programs. Fewer, larger blocks made the tail matter more;
+the realistic `top_k` makes columns more uniform and removes the need.
 
 ## Decision
 
