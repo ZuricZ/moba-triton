@@ -501,7 +501,9 @@ def empty_partials(
         shape: (batch, heads, seq_len, head_dim).
         slots: Partial slots per query.
         device: CUDA device.
-        partials_dtype: Storage dtype for the accumulator.
+        partials_dtype: Storage dtype for the accumulator. Callers that want
+            the default should pass `q.dtype`; this function has no query to
+            read it from, so it does not guess.
 
     Returns:
         A tuple of (part_m, part_l, part_acc), uninitialized.
@@ -521,7 +523,7 @@ def attend_partials(
     cfg: MoBAConfig,
     index: CSCIndex,
     causal: bool = True,
-    partials_dtype: torch.dtype = torch.float32,
+    partials_dtype: torch.dtype | None = None,
     partials: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Runs the attention stage, returning un-merged per-slot partials.
@@ -531,11 +533,23 @@ def attend_partials(
     rather than inlining costs nothing at runtime and makes the per-stage
     benchmark measure the same code path production uses.
 
-    `partials_dtype` exists because `part_acc` is the largest single term in
-    the design's memory traffic: at S=4096, head_dim 128, top_k 12 it is 24 MB
-    written plus 24 MB read per batch-head, against 15 MB for all of Q, K and
-    V combined. Halving it to bfloat16 is therefore worth measuring rather than
-    assuming, on both speed and accuracy.
+    `part_acc` is the largest single term in the design's memory traffic and,
+    since the gate stopped dominating, the largest single term in the whole
+    forward pass. Profiled at S=8192: 63.4 MB of the attention kernel's 104 MB,
+    against 31.7 MB for the gathered queries and 8.4 MB for all the K and V
+    loads the KV-major inversion exists to amortize. The inversion worked well
+    enough that its own bookkeeping became the bottleneck.
+
+    So the default is the compute dtype, not float32. Storing partials at the
+    same width as the inputs halves that 63.4 MB and is worth ~22% end to end.
+    What it costs is judged by `moba.tolerance`, not by a threshold picked to
+    pass: the policy asks whether our error stays within 2x of what the same
+    algorithm in the same dtype already costs, so narrowing storage to the
+    input's own precision has to earn its place against that bound.
+
+    The maxima and denominators stay float32 regardless. They are a factor of
+    D smaller, so narrowing them saves nothing measurable while costing the
+    precision the whole merge pivots on.
 
     Args:
         q: Queries shaped [B, H, S, D], contiguous.
@@ -544,11 +558,9 @@ def attend_partials(
         cfg: Configuration.
         index: Precomputed CSC index.
         causal: Whether to apply causal masking within the query's own block.
-        partials_dtype: Storage dtype for `part_acc`. The maxima and
-            denominators stay float32 regardless: they are a factor of D
-            smaller, so narrowing them saves nothing measurable while costing
-            the precision the whole merge pivots on. Ignored when `partials`
-            is supplied.
+        partials_dtype: Storage dtype for `part_acc`. Defaults to `q.dtype`;
+            pass `torch.float32` to keep the wider intermediate. Ignored when
+            `partials` is supplied.
         partials: Buffers to reuse, from a previous call or `empty_partials`.
             Fresh allocation is not free -- on Windows WDDM a `cudaMalloc`
             goes through the display driver and costs milliseconds -- so a
@@ -565,6 +577,8 @@ def attend_partials(
     slots = index.max_slots
     group = choose_group(cfg, d, q.element_size(), q.device)
 
+    if partials_dtype is None:
+        partials_dtype = q.dtype
     if partials is None:
         partials = empty_partials(q.shape, slots, q.device, partials_dtype)
     part_m, part_l, part_acc = partials
@@ -600,7 +614,7 @@ def moba_forward(
     cfg: MoBAConfig,
     index: CSCIndex | None = None,
     causal: bool = True,
-    partials_dtype: torch.dtype = torch.float32,
+    partials_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention with the KV-block-major kernel.
 
@@ -614,7 +628,9 @@ def moba_forward(
             routing fixed while inputs vary, which is what the invariant tests
             need.
         causal: Whether to apply causal masking within the query's own block.
-        partials_dtype: Storage dtype for the per-slot accumulators.
+        partials_dtype: Storage dtype for the per-slot accumulators. Defaults
+            to `q.dtype`, which halves the largest memory term in the pass;
+            see `attend_partials`.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
