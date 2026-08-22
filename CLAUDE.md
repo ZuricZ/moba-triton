@@ -145,4 +145,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Whole forward path in Triton -- gate (mean-pool, top-k, CSC build), attention, combine; zero host syncs; 315 tests green. Next: refresh the stale measurement docs, then the backward pass.
+> Status: Forward pass done and measured -- 1.52x over dense SDPA at S=8192, attainment 0.34 (target was 0.10), 36x over Moonshot; 316 tests green. Next: the attention kernel, which runs at 4.3 TFLOP/s against dense's 12.7.

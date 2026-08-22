@@ -113,3 +113,82 @@ bar and hitting it would prove little. The target is **attainment**: at
 effectively none of it. A kernel that reaches even 0.3 attainment there would
 be roughly a 6x real speedup over dense attention, at a block size where every
 implementation we can measure is currently *slower* than dense.
+
+---
+
+# Kernel v1 — the finished forward pass against the same baselines
+
+**Date:** 2026-08-22
+**Device:** RTX 3050 Ti Laptop, sm_86, 4095 MiB, 20 SMs, WSL2 on WDDM
+**Raw data:** `results/kernel_v1.csv`
+**Config:** `block_size=128, top_k=8`, head_dim 128, bf16 — the configuration
+both reference implementations benchmark.
+
+Everything above this line is the *problem statement*: baselines measured
+before any kernel existed. This section is the first measurement of the
+finished forward pass — fused gate, KV-block-major attention, Triton combine —
+against those same baselines.
+
+## Result
+
+| S | moba_triton | sdpa_dense | **vs dense** | naive_torch | moonshot | attainment |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 0.55 ms | 0.20 ms | 0.37x | 2.68 ms | 4.17 ms | 0.365 |
+| 2048 | 0.90 ms | 0.36 ms | 0.39x | 6.45 ms | 13.50 ms | 0.283 |
+| 4096 | 1.73 ms | 1.28 ms | 0.74x | 18.00 ms | 33.74 ms | 0.307 |
+| **8192** | **1.78 ms** | 2.70 ms | **1.52x** | 33.37 ms | 63.93 ms | **0.336** |
+
+At `top_k=12` the picture is the same with less sparsity to exploit: 1.05x over
+dense at S=8192, attainment 0.343.
+
+`flash_moba` and `triton_moba` could not run here. FlashMoBA's extension targets
+sm_80/90/100/120 and this card is sm_86; Triton-MoBA requires `flash_attn`.
+The head-to-head against the actual performance target still needs rented
+hardware.
+
+## Reading it
+
+**Against the spec's success criteria.** The target was *attainment >= 0.10 at
+S=4096*; measured **0.307**, three times over. The threshold criterion
+("faster than dense SDPA at S >= 2048") is not met until S ~ 6000, but that
+criterion was written for `block_size=16`, the configuration corrected away
+from on 2026-08-19. At `block_size=128` there is simply not enough sparsity at
+S=2048 to beat dense — sparsity there is 0.719, meaning MoBA still touches 72%
+of the pairs dense attention does.
+
+**Where the crossover is.** Between S=4096 and S=8192, and it moves earlier as
+context grows because sparsity does: 1.000 -> 0.719 -> 0.414 -> 0.221 as S goes
+1024 -> 8192. This is the expected shape. MoBA is a long-context mechanism and
+loses to dense at short context by construction, not by implementation defect.
+
+**The decomposition that matters.** Two ratios say different things:
+
+| | dense SDPA | moba_triton |
+|---|---:|---:|
+| throughput | 12.7 TFLOP/s | 4.3 TFLOP/s |
+| FLOPs at S=8192 | 4.5x ours | 1x |
+| latency | 2.70 ms | 1.78 ms |
+
+**Per FLOP executed we are three times less efficient than dense**, which is
+what a Triton kernel doing scattered gathers should expect against
+cuBLAS-quality dense code. We win anyway because at S=8192 sparsity means doing
+4.5x fewer FLOPs. Winning by doing less work while executing it worse.
+
+That decomposition locates the next optimization precisely. Attainment is
+capped by the 4.3 against 12.7 TFLOP/s gap, so closing it is worth up to
+another 3x, and it lies entirely in the attention kernel — the only stage that
+has had no optimization work. For contrast, the gate is now 10-13% of the pass
+and the combine stage is running at the memory bus's speed
+(`docs/stage-timing-measurements.md`).
+
+## Against the reference implementations
+
+| | S=8192 | vs moba_triton |
+|---|---:|---:|
+| moonshot (the original PyTorch path) | 63.93 ms | **36.0x** |
+| naive_torch (our oracle) | 33.37 ms | **18.8x** |
+
+Both are deliberately naive, so this is a floor rather than an achievement. It
+is recorded because the problem statement above measured them as *slower than
+dense at every configuration*, and the kernel is the first implementation in
+this repo that is not.
