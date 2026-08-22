@@ -259,16 +259,23 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     part_acc = torch.zeros((1, 2, s, slots, head_dim), device=device)
     out = torch.empty((1, 2, s, head_dim), device=device)
 
-    kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
-        part_m, part_l, part_acc, out, s,
-        K_SLOTS=slots, D=head_dim, BLOCK_M=block_m, num_warps=warps,
-    )
+    lse = torch.empty((1, 2, s), device=device)
 
-    assert kernel.n_spills == 0, (
-        f"combine spills {kernel.n_spills} values at head_dim {head_dim}, "
-        f"{slots} slots (block_m {block_m}, {warps} warps, "
-        f"{kernel.n_regs} registers)"
-    )
+    # Both arms: writing the log-sum-exp costs an extra live value per query,
+    # and the backward pass always asks for it, so the arm the training path
+    # uses has to be the one that is checked.
+    for write_lse in (False, True):
+        kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
+            part_m, part_l, part_acc, out, lse, s,
+            K_SLOTS=slots, D=head_dim, BLOCK_M=block_m,
+            WRITE_LSE=write_lse, num_warps=warps,
+        )
+
+        assert kernel.n_spills == 0, (
+            f"combine spills {kernel.n_spills} values at head_dim "
+            f"{head_dim}, {slots} slots, write_lse={write_lse} (block_m "
+            f"{block_m}, {warps} warps, {kernel.n_regs} registers)"
+        )
 
 
 def test_combine_rejects_a_tile_that_would_spill(device):

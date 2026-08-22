@@ -163,6 +163,13 @@ def _moba_attn_fwd(
         )
 
 
+# log2(e). The softmax runs in base 2 because the SFU has a native 2^x
+# instruction and none for e^x, so `tl.exp` would compile to `exp2(x * 1.4427)`
+# -- one extra multiply on every element of the score tile. Folding the
+# constant into the scale that already multiplies those scores makes it free.
+LOG2_E = 1.4426950408889634
+
+
 # Absolute ceiling on the inner-loop chunk height, before the shared-memory
 # budget is applied. Beyond this, register pressure bites even when shared
 # memory allows more: measured 255 registers with 8 spills at D=64,
@@ -401,9 +408,10 @@ def choose_combine_tile(head_dim: int, block_m: int | None = None) -> tuple[int,
 
 @triton.jit
 def _moba_combine(
-    PartM, PartL, PartAcc, Out,
+    PartM, PartL, PartAcc, Out, Lse,
     S,
     K_SLOTS: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
+    WRITE_LSE: tl.constexpr,
 ):
     """Merges each query's partial softmaxes into its final output.
 
@@ -475,6 +483,18 @@ def _moba_combine(
     tl.store(Out + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
              out.to(Out.dtype.element_ty), mask=live[:, None])
 
+    if WRITE_LSE:
+        # The backward pass recomputes P without storing it, and to do that it
+        # needs each query's *global* normalizer -- the same `softmax_lse` that
+        # Moonshot saves and hands to flash-attn's backward. It exists here and
+        # nowhere else: the attention kernel knows only per-block maxima, and
+        # this is the one place they are reduced across a query's blocks.
+        #
+        # Kept in log2 units, matching `m_g`, so the backward's `exp2(qk - lse)`
+        # needs no conversion. Recovering natural units is a multiply by
+        # ln 2 that no consumer currently wants.
+        tl.store(Lse + pid_bh * S + offs_m, m_g + tl.log2(l), mask=live)
+
 
 def combine_partials(
     part_m: torch.Tensor,
@@ -482,7 +502,8 @@ def combine_partials(
     part_acc: torch.Tensor,
     out_dtype: torch.dtype,
     block_m: int | None = None,
-) -> torch.Tensor:
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Merges per-slot partial softmaxes into the final attention output.
 
     Args:
@@ -493,9 +514,14 @@ def combine_partials(
         out_dtype: Dtype of the returned tensor.
         block_m: Queries per program. Derived from the register budget when
             omitted, which is what callers should do.
+        return_lse: Also return each query's global log-sum-exp, in log2 units.
+            The backward pass needs it to recompute the softmax without having
+            stored it, and this is the only place a query's per-block maxima
+            are reduced together.
 
     Returns:
-        Attention output shaped [B, H, S, D].
+        Attention output shaped [B, H, S, D], or a tuple of it and the
+        log-sum-exp shaped [B, H, S] when `return_lse` is set.
 
     Raises:
         ValueError: If the three buffers disagree on shape, or if `block_m`
@@ -518,13 +544,16 @@ def combine_partials(
         t.contiguous() for t in (part_m, part_l, part_acc)
     )
     out = torch.empty((b, h, s, d), device=part_m.device, dtype=out_dtype)
+    lse = (torch.empty((b, h, s), device=part_m.device, dtype=torch.float32)
+           if return_lse else out)
     block_m, warps = choose_combine_tile(d, block_m)
 
     _moba_combine[(triton.cdiv(s, block_m), b * h)](
-        part_m, part_l, part_acc, out, s,
-        K_SLOTS=slots, D=d, BLOCK_M=block_m, num_warps=warps,
+        part_m, part_l, part_acc, out, lse, s,
+        K_SLOTS=slots, D=d, BLOCK_M=block_m, WRITE_LSE=return_lse,
+        num_warps=warps,
     )
-    return out
+    return (out, lse) if return_lse else out
 
 
 def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -686,7 +715,7 @@ def attend_partials(
                 index.col_offsets, index.col_nnz, index.order,
                 part_m, part_l, part_acc,
                 s, index.row_indices.shape[-1],
-                d ** -0.5 * 1.4426950408889634,
+                d ** -0.5 * LOG2_E,
                 index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
                 K_SLOTS=slots, CAUSAL=causal,
