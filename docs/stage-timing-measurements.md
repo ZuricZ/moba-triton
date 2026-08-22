@@ -1,88 +1,138 @@
-# Stage timing — where the forward pass actually spends its time
+# Stage timing — where the forward pass spends its time
 
-**Date:** 2026-08-19
-**Device:** NVIDIA GeForce RTX 3050 Ti Laptop, sm_86, 4095 MiB, 20 SMs, WDDM
+**Date:** 2026-08-22
+**Device:** NVIDIA GeForce RTX 3050 Ti Laptop, sm_86, 4095 MiB, 20 SMs, WSL2 on WDDM
 **Stack:** Python 3.13.15, torch 2.13.0+cu126, triton 3.7.1, bf16 inputs
 **Reproduce:** `uv run python -m bench.stages`
 
-The design decisions D6–D10 were each justified by a measurement of the
-*selection pattern* — utilization, consumers per block, gather cost, load
-imbalance. None of them measured the assembled kernel. This does.
+Decisions D6–D10 were each justified by measuring the *selection pattern* —
+utilization, consumers per block, gather cost, load imbalance. None measured
+the assembled kernel. This does.
 
-The headline is not about the kernel at all.
+Its first result overturned the project's assumption about where the time went,
+and led to rewriting the gate. Both the before and after are recorded here,
+because the "before" is what justified the work.
 
-## Results
+## Result
 
 `block_size=128, top_k=8, head_dim=128, batch 1, heads 4`. "kernel" is
-attention plus combine; the gate is reported separately because it is still
-PyTorch by decision D11.
+attention plus combine.
 
-| S | part_acc | size | gate | attn | combine | kernel | gate share | combine share of kernel | rel err vs fp32 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1024 | float32 | 16 MB | 3863 us | 344 us | 116 us | 460 us | 89% | 25% | 0.0e+00 |
-| 1024 | bfloat16 | 8 MB | 3638 us | 287 us | 66 us | 354 us | 91% | 19% | 4.0e-03 |
-| 2048 | float32 | 32 MB | 3801 us | 735 us | 223 us | 957 us | 80% | 23% | 0.0e+00 |
-| 2048 | bfloat16 | 16 MB | 3766 us | 615 us | 123 us | 738 us | 84% | 17% | 4.6e-03 |
-| 4096 | float32 | 64 MB | 4250 us | 1514 us | 437 us | 1952 us | 69% | 22% | 0.0e+00 |
-| 4096 | bfloat16 | 32 MB | 8187 us | 1246 us | 237 us | 1483 us | 85% | 16% | 2.5e-03 |
-| 8192 | float32 | 128 MB | 6704 us | 3063 us | 863 us | 3925 us | 63% | 22% | 0.0e+00 |
-| 8192 | bfloat16 | 64 MB | 9418 us | 2539 us | 465 us | 3004 us | 76% | 15% | 5.4e-03 |
+| S | part_acc | size | gate | attn | combine | kernel | gate share | combine share of kernel |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | float32 | 16 MB | 182 us | 345 us | 119 us | 465 us | 28% | 26% |
+| 1024 | bfloat16 | 8 MB | 178 us | 287 us | 66 us | 353 us | 34% | 19% |
+| 2048 | float32 | 32 MB | 195 us | 743 us | 230 us | 973 us | 17% | 24% |
+| 2048 | bfloat16 | 16 MB | 193 us | 623 us | 123 us | 746 us | 21% | 16% |
+| 4096 | float32 | 64 MB | 232 us | 1526 us | 453 us | 1979 us | 10% | 23% |
+| 4096 | bfloat16 | 32 MB | 235 us | 1270 us | 237 us | 1507 us | 13% | 16% |
+| 8192 | float32 | 128 MB | 468 us | 3116 us | 904 us | 4020 us | 10% | 22% |
+| 8192 | bfloat16 | 64 MB | 469 us | 2572 us | 466 us | 3039 us | 13% | 15% |
 
-**Read the float32 rows for the gate.** The gate never touches `part_acc`, so
-its cost must be identical across the two arms. Where it is not — the bfloat16
-rows at S=4096 and 8192 — that is measurement noise, not signal. This is a
-control, not a coincidence: it was included so noise would be visible rather
-than quietly averaged in.
+**The two `part_acc` arms are a control, not a duplicate.** The gate never
+touches those buffers, so its cost must be identical across them — 468 against
+469 us at S=8192, 232 against 235 at S=4096. Where the arms disagree, the
+measurement is broken and not the code. That check caught two separate
+benchmark bugs, both described below.
 
-## The D11 trigger has fired
+## What the first run found, and what changed
 
-The gate is **63–89% of the forward pass**, and it was never in the design's
-critical path on paper. D11 deferred the gate to PyTorch on the explicit
-argument that it should be measured before being optimized. That measurement
-now exists and the answer is unambiguous: **the gate is the bottleneck, and the
-kernel is not.**
+The original measurement put the **gate at 63–89% of the forward pass**. D11
+had deferred the gate to PyTorch on the explicit condition that it be measured
+before being optimized; that measurement fired the trigger.
 
-The scaling says what kind of cost it is:
+The diagnosis came from the scaling rather than the share:
 
-| stage | S=1024 | S=2048 | S=4096 | S=8192 | growth per doubling |
-|---|---:|---:|---:|---:|---|
-| gate | 3863 | 3801 | 4250 | 6704 | ~flat, then ~1.6x |
-| attn | 344 | 735 | 1514 | 3063 | 2.0x |
-| combine | 116 | 223 | 437 | 863 | 2.0x |
+| stage | S=1024 | S=2048 | S=4096 | growth per doubling |
+|---|---:|---:|---:|---|
+| gate (PyTorch) | 3863 | 3801 | 4250 | ~flat |
+| attn | 344 | 735 | 1514 | 2.0x |
+| combine | 116 | 223 | 437 | 2.0x |
 
-The two kernel stages double exactly when S doubles — linear in the work they
-do, which is `S * top_k` block-query pairs. The gate is flat to S=4096 and only
-then starts to grow. A cost that does not scale with the problem is not
-compute; it is **fixed overhead**, and under WDDM that means kernel launch
-latency across the roughly twenty separate PyTorch operations inside
-`build_csc` and `moba_selection`.
+The two kernel stages double exactly when S doubles — linear in the
+`S * top_k` block-query pairs they process. The gate barely moved. **A cost
+that does not grow with the problem is not doing the work**, so the gate was
+carrying a large fixed component.
 
-Two consequences:
+Profiling then identified it, and corrected two guesses along the way (see
+"Corrections" below). Per gate call the GPU was busy ~10 ms and the CPU ~12.5 ms
+under the profiler, so neither side was idle — the work was real. But its
+composition was:
 
-1. The 63–89% figure is not a fixed property. It shrinks as S grows, because
-   the numerator is flat and the denominator is linear. At the spec's target of
-   S >= 16384 the gate share would be materially smaller.
-2. Because it is launch overhead rather than arithmetic, the fix is **fusion**,
-   not a faster algorithm. Fewer, larger kernels.
-
-Component timings inside the gate at S=4096 (each stable to within 1.2x across
-repeats, unlike the composed calls):
-
-| | time |
+| | share of gate GPU time |
 |---|---:|
-| `block_representatives` (mean-pool K) | 341 us |
-| `select_blocks` — of which the stable argsort is ~530 us | 579 us |
-| `einsum` gate scores | 42 us |
-| `nonzero()` in `build_csc` | 707 us |
-| `cumsum` for `slot_grid` | 192 us |
+| `aten::copy_` (21 calls per gate) | 31% |
+| `Memcpy DtoD` | 9% |
+| `aten::sort` | 15% |
+| `aten::sum` | 12% |
+| `aten::sub` | 12% |
+| `aten::cumsum` | 7% |
+| `aten::index` | 6% |
 
-No single operation dominates. That is itself the diagnosis: the cost is spread
-across many small launches, which is exactly the shape of a fusion problem.
+**~40% was moving intermediates, not computing.** No single operation
+dominated, which is the signature of unfused eager PyTorch: roughly 35
+operations in a chain, each writing a full-size array to memory and reading it
+back for the next.
 
-Note also that `select_blocks` uses a full stable `argsort` where a `top_k`
-would do, because stability is required for deterministic tie-breaking. On this
-device stable argsort costs 532 us against 324 us for `topk(8)` at N=32 — a
-real but secondary difference, and the determinism is worth more than 200 us.
+## The rewrite
+
+Three fused Triton kernels, following FlashMoBA's three-stage pipeline
+(`arxiv.org/abs/2511.11571`) and fla-org's NSA `parallel_nsa_kernel_topk` for
+the Triton form of stage 2.
+
+| stage | what it does | PyTorch | Triton | |
+|---|---|---:|---:|---:|
+| 1 · mean-pool | one representative per block | 443 us | 42 us | 10.5x |
+| 2 · rank | score + top-k, in registers | 551 us | 98 us | 5.6x |
+| 3 · transpose | count → prefix sum → atomic scatter | ~2400 us | 103 us | ~23x |
+
+End to end, at `block_size=128, top_k=8, heads 4, head_dim 128`:
+
+| S | PyTorch gate | fused gate | |
+|---:|---:|---:|---:|
+| 1024 | 4102 us | 184 us | 22.2x |
+| 2048 | 3301 us | 173 us | 19.1x |
+| 4096 | 3461 us | 232 us | 14.9x |
+| 8192 | 5293 us | 464 us | 11.4x |
+
+**The speedup shrinking with S is the point, not a disappointment.** The old
+gate's cost was mostly constant, so removing it helps most where there is least
+other work. The honest statement is not "22x faster gate" but "a fixed cost of
+roughly 3.3 ms was deleted".
+
+Routing is unchanged: selections match the PyTorch gate exactly across the full
+shape × gate sweep, and `col_nnz` and `col_offsets` match element for element.
+
+### Host synchronization, which was the largest single item
+
+A device-to-host round trip on this box costs **~230 us**, against **~6 us** for
+the same arithmetic kept on device. A 37x penalty for letting the CPU look at a
+result, and it is flat regardless of how much data is involved — you pay for
+the trip, not the cargo.
+
+The PyTorch gate performed two. `nonzero()` forces one because its output size
+is data-dependent, so PyTorch must copy a count back before it can size an
+allocation; mean-pooling forced the other by writing the tail block's occupancy
+from the host. **The fused gate performs zero**, asserted by
+`test_fused_index_never_synchronizes_with_the_host` — a reintroduced sync fails
+no correctness test, so it needs a test of its own.
+
+The fused stage 3 needs no count because the gate emits a *list* of selected
+block ids rather than a dense mask, and the total is bounded above by
+`S * top_k`, known before anything runs.
+
+### One guarantee dropped
+
+The PyTorch builder emitted each column's query indices ascending, free from
+the memory order it read the dense mask in. The fused builder has queries claim
+slots with an atomic counter, so a column's entries come out in race order.
+
+Safe on both counts, and both were already measured. Results are unchanged
+because the attention kernel addresses its output by `row * K_SLOTS + slot` —
+neither term depends on position within a column. Speed is unchanged because
+`docs/gather-cost-measurements.md` measured a *fully* randomized gather at
+1.03x, a query row being one cache line wherever it sits. FlashMoBA accepts the
+same shuffling for the same reason.
 
 ## Storing `part_acc` in bfloat16
 
@@ -90,22 +140,20 @@ real but secondary difference, and the determinism is worth more than 200 us.
 S=4096, head_dim 128, top_k 12 it is 24 MB written and 24 MB read per
 batch-head, against 15 MB for all of Q, K and V combined.
 
-Halving it behaves exactly as the traffic model predicts:
+Halving it behaves as the traffic model predicts:
 
 | stage | fp32 | bf16 | change |
 |---|---:|---:|---|
-| combine (S=4096) | 437 us | 237 us | **-46%** |
-| combine (S=8192) | 863 us | 465 us | **-46%** |
-| attn (S=4096) | 1514 us | 1246 us | -18% |
-| attn (S=8192) | 3063 us | 2539 us | -17% |
-| kernel total (S=8192) | 3925 us | 3004 us | **-23%** |
+| combine (S=4096) | 453 us | 237 us | **-48%** |
+| combine (S=8192) | 904 us | 466 us | **-48%** |
+| attn (S=8192) | 3116 us | 2572 us | -17% |
+| kernel total (S=8192) | 4020 us | 3039 us | **-24%** |
 
-Combine halves, because it is purely memory-bound and its traffic is almost
-entirely `part_acc`. Attention improves less because `part_acc` is only its
-write traffic; the gathered Q reads are unchanged.
+Combine halves because it is purely memory-bound and its traffic is almost
+entirely `part_acc`. Attention gains less because `part_acc` is only its write
+traffic; the gathered Q reads are unchanged.
 
-Accuracy against the fp64 oracle under the D5 tolerance policy, all
-configurations passing:
+Accuracy against the fp64 oracle under the D5 policy, all passing:
 
 | shape | fp32 partials | bf16 partials | budget |
 |---|---:|---:|---:|
@@ -114,49 +162,93 @@ configurations passing:
 | (1,2,4096,128) | 9.397e-03 | 1.189e-02 | 1.537e-02 |
 
 **Verdict: available, not default.** `moba_forward(..., partials_dtype=...)`
-exposes it and it is correct, but float32 remains the default for two reasons.
-First, 23% of the kernel is only about 7% end-to-end while the gate dominates,
-so the gate is the change worth making first. Second, it consumes roughly a
-quarter of the remaining error budget in a forward pass that a backward pass
-would later compound. Revisit once the gate is fused and the number matters.
+exposes it. It spends roughly a quarter of the remaining error budget in a
+forward pass that a backward pass would compound, and the combine stage it
+helps most is already running at the memory bus's speed (see below), so the
+gain is real but bounded. FSA stores its partial outputs in bfloat16, which is
+precedent for eventually flipping the default.
+
+## The combine pass is finished
+
+At head_dim 128 with 12 slots and S=8192 the combine pass moves ~221 MB in
+1313 us — **168 GB/s**. A bare `torch.zeros` on the same card runs at
+**163 GB/s**. The combine kernel is running at this machine's memory bandwidth.
+
+Consequently tile shape is irrelevant to its speed. Measured, every tile from 1
+to 64 queries per program lands within 1% of the same time:
+
+| queries per program | time | registers |
+|---:|---:|---:|
+| 1 | 1316 us | 84 |
+| 8 | 1309 us | 168 |
+| 16 | 1315 us | 181 |
+| 64 | 1311 us | 255 |
+
+So the tile is chosen for robustness rather than speed: 8 uses a quarter of the
+register file and cannot spill, where 64 sat exactly on the 255-register
+ceiling and stayed off it only by deriving the right warp count. This follows
+FSA's `reduce_kernel`, which runs one query per program. The wide tile was
+inherited from FlashAttention-2, where it is forced by `tl.dot` needing a matrix
+to fill a tensor core; there is no `tl.dot` in this pass, so nothing forced it.
+
+The only remaining lever on this stage is moving fewer bytes — which is exactly
+what the bfloat16 result above shows, at -48%.
+
+## Corrections to earlier versions of this document
+
+Two claims here were wrong and are recorded rather than quietly removed.
+
+**"Buffer allocation is expensive because of the Windows driver."** Wrong
+cause. `torch.empty` costs ~2 us at any size — the caching allocator just hands
+back a pointer. What costs 394 us at 64 MB is `torch.zeros`, and it scales with
+size at ~163 GB/s, this card's memory bandwidth. That is the zeroing, and it is
+physics, not the OS. (A *genuine* `cudaMalloc` of 64 MB does cost 4.6 ms here,
+which is a real WDDM effect — but the caching allocator normally prevents one
+from happening.)
+
+**"The gate's fixed cost is kernel launch overhead."** Wrong mechanism. A
+launch costs 6 us here; twenty of them is 120 us, about 3% of the gate. The
+fixed cost was the two host synchronizations at ~230 us each, plus copy
+traffic that is fixed in S because `num_blocks` grows while the per-block work
+shrinks. The flatness was correctly observed and then twice misattributed;
+the profiler settled it.
 
 ## Measurement notes — this box is hostile to benchmarking
 
-This machine runs **WDDM**: the GPU is shared with the desktop compositor and
-work submissions are batched by the display driver. Two consequences bit hard
-enough to be worth recording.
+WSL2 has no NVIDIA kernel driver. CUDA calls forward through `/dev/dxg` to the
+Windows driver, so Windows costs — WDDM submission batching, expensive real
+allocations, slow host round trips — apply despite the Linux userspace.
 
-**Allocation is not free and must be hoisted out of timed regions.** An earlier
-version of `bench/stages.py` allocated the partial buffers inside the timed
-call and reported `index` at **120% of total** — arithmetically impossible.
-Under WDDM a `cudaMalloc` goes through the display driver and costs
-milliseconds; repeated `do_bench` runs fragmented the caching allocator until
-it began genuinely calling the driver. That measured the Windows memory
-manager, not the kernel. `attend_partials` now accepts pre-allocated buffers
-(`empty_partials`) so the benchmark can pay allocation once — which is also a
-real improvement to the library, since allocation was 400–900 us of production
-time per call.
+**Allocation must be hoisted out of timed regions.** An early version allocated
+inside them and reported `index` at **120% of total**, which is impossible.
+Repeated `do_bench` runs had fragmented the caching allocator until it began
+calling the driver for real, so the measurement was of the Windows memory
+manager. `attend_partials` now accepts pre-allocated buffers via
+`empty_partials`, which is also a real improvement to the library — allocation
+was 400–900 us of production time per call.
 
-**`build_csc` cannot be fully hoisted**, because `nonzero()` returns a
-data-dependent size that the caching allocator cannot reuse. The gate numbers
-above are therefore an *upper bound* on its true compute cost.
+**Do not hold large tensors alive across a timed region.** A later version
+computed the bfloat16 accuracy check inside every timing run, holding two extra
+full-size outputs beside the timing buffers. At S=8192 that is 128 MB of
+partials on a 4 GiB card, and the allocator thrashed: the *gate* was reported
+26x slower while the attention stage barely moved — impossible, since the gate
+never touches those buffers. The accuracy probe now runs once at a fixed small
+shape, which is correct anyway: the error is a property of the storage dtype,
+not of the sequence length.
 
 **Take the minimum of repeated measurements, not the mean.** Composed calls
-were observed to spread 1.4x run to run while individual components held to
-1.2x. The minimum is the run least polluted by the compositor; a mean averages
-over how busy the desktop happened to be.
+spread 1.4x run to run while individual components held to 1.2x. The minimum is
+the run least polluted by the desktop compositor.
 
 **Absolute numbers from this box should not be quoted.** Ratios and scaling
-trends survive the noise, and those are what this document reports. The
-spec's performance criteria at S >= 16384 need rented hardware.
+trends survive the noise, and those are what this document reports. The spec's
+performance criteria at S >= 16384 need rented hardware.
 
 ## What this does not measure
 
-No comparison against dense SDPA or against the reference MoBA
-implementations appears here — that is `bench/suite.py`'s job, and our kernel
-now runs in it automatically as the `moba_triton` backend. This document is
-attribution only: given that the forward pass takes some time, where does it
-go.
+No comparison against dense SDPA or the reference MoBA implementations — that
+is `bench/suite.py`'s job, and our kernel runs there automatically as the
+`moba_triton` backend.
 
 The query-major control kernel remains unbuilt, so the wall-clock crossover
 between the two loop orders is still inferred from the traffic model rather

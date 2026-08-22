@@ -247,3 +247,73 @@ def gate_select(
         num_warps=choose_gate_warps(block_m, n_pow2),
     )
     return out
+
+
+@triton.jit
+def _block_representatives_fwd(
+    K, Kbar,
+    S,
+    BLOCK_SIZE: tl.constexpr, BLOCK_POW2: tl.constexpr, D: tl.constexpr,
+):
+    """One program per (block, batch-head). Mean-pools a block's keys.
+
+    The PyTorch version pads the sequence to a block multiple with `F.pad`,
+    which copies the entire key tensor, and then writes the final block's
+    occupancy from the host -- a device-to-host round trip costing ~230 us on
+    WSL. A kernel needs neither: it masks the tail instead of padding it, and
+    computes the occupancy from the sequence length it was already passed.
+    """
+    blk = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+
+    rows = blk * BLOCK_SIZE + tl.arange(0, BLOCK_POW2)
+    offs_d = tl.arange(0, D)
+    live = (rows < S) & (tl.arange(0, BLOCK_POW2) < BLOCK_SIZE)
+
+    k = tl.load(K + pid_bh * S * D + rows[:, None] * D + offs_d[None, :],
+                mask=live[:, None], other=0.0)
+
+    # Accumulate in float32 regardless of input dtype, matching what torch's
+    # reduction does internally, then round to the input dtype before dividing.
+    # The rounding point is not cosmetic: the gate ranks these representatives,
+    # and rounding at a different step would flip near-ties, which the routing
+    # test compares for exact equality.
+    total = tl.sum(k.to(tl.float32), axis=0)
+    total = total.to(K.dtype.element_ty).to(tl.float32)
+
+    # A short final block averages only the positions that exist. Dividing by
+    # BLOCK_SIZE instead would shrink a 1-key tail block's representative
+    # toward zero and make it almost never selected -- a bug invisible whenever
+    # seq_len divides evenly by block_size.
+    occupancy = tl.minimum(BLOCK_SIZE, S - blk * BLOCK_SIZE)
+    mean = total / occupancy.to(tl.float32)
+
+    n_blocks = tl.cdiv(S, BLOCK_SIZE)
+    tl.store(Kbar + pid_bh * n_blocks * D + blk * D + offs_d,
+             mean.to(Kbar.dtype.element_ty))
+
+
+def block_representatives_triton(
+    k: torch.Tensor, cfg: MoBAConfig
+) -> torch.Tensor:
+    """Mean-pools each block's keys into one representative.
+
+    Args:
+        k: Keys shaped [B, H, S, D], contiguous.
+        cfg: Configuration supplying `block_size`.
+
+    Returns:
+        Block representatives shaped [B, H, num_blocks, D], same dtype as `k`.
+    """
+    b, h, s, d = k.shape
+    n = cfg.num_blocks(s)
+    k = k.contiguous()
+    out = torch.empty((b, h, n, d), device=k.device, dtype=k.dtype)
+
+    _block_representatives_fwd[(n, b * h)](
+        k, out, s,
+        BLOCK_SIZE=cfg.block_size,
+        BLOCK_POW2=triton.next_power_of_2(cfg.block_size),
+        D=d,
+    )
+    return out

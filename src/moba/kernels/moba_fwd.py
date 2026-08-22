@@ -42,7 +42,8 @@ from moba.device import (
     round_up_to_tensor_core_tile,
     shared_memory_budget,
 )
-from moba.kernels.index import CSCIndex, build_csc
+from moba.kernels.index import CSCIndex
+from moba.kernels.index_fused import build_csc_fused
 
 
 @triton.jit
@@ -582,9 +583,10 @@ def moba_forward(
         k: Keys shaped [B, H, S, D], contiguous.
         v: Values shaped [B, H, S, D], contiguous.
         cfg: Configuration.
-        index: Precomputed CSC index; built from `q` and `k` when omitted.
-            Passing one explicitly holds routing fixed while inputs vary,
-            which is what the invariant tests need.
+        index: Precomputed CSC index; built from `q` and `k` when omitted
+            with the fused device-side gate. Passing one explicitly holds
+            routing fixed while inputs vary, which is what the invariant tests
+            need.
         causal: Whether to apply causal masking within the query's own block.
         partials_dtype: Storage dtype for the per-slot accumulators.
 
@@ -598,7 +600,7 @@ def moba_forward(
     _validate(q, k, v, cfg)
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     if index is None:
-        index = build_csc(q, k, cfg)
+        index = build_csc_fused(q, k, cfg)
 
     part_m, part_l, part_acc = attend_partials(
         q, k, v, cfg, index, causal=causal, partials_dtype=partials_dtype

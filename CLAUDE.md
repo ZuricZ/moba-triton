@@ -143,4 +143,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward path complete and registered as `moba_triton`; 243 tests green. Stage timing says the PyTorch gate is 63-89% of the pass (D11 trigger fired). Next: fuse the gate.
+> Status: Whole forward path in Triton -- gate (mean-pool, top-k, CSC build), attention, combine; zero host syncs; 315 tests green. Next: refresh the stale measurement docs, then the backward pass.
