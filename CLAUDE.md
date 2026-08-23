@@ -47,6 +47,37 @@ S=4096 this card can run it discards 57%. See `docs/divergence-measurements.md`.
 - Keep diffs small enough that each one maps to a single explainable idea —
   don't bundle five optimizations into one unexplained rewrite.
 
+## When I say "I don't get it" — the recipe that works
+When I push back a second time on the same thing, the first explanation was
+too abstract. Don't re-say it louder or add more prose. Rebuild it this way.
+`docs/learning/03-gqa-and-the-column-merge.md` is the worked example; that
+explanation landed and this is what it did.
+
+1. **Name the part of my guess that was right, first.** "Yes — your guess
+   about columns is right." I need to know which half to keep before I can
+   fix the other half.
+2. **Kill the jargon outright.** Not "column (i.e. a list of queries)" —
+   say "that list is all *column* ever means here. I'll say *list* from now
+   on," then never use the term again. Half of "I don't get it" is a word
+   doing unearned work.
+3. **Draw it.** ASCII grid, table, stacked boxes. If a thing has two axes,
+   it gets a picture with two axes.
+4. **Use absurdly small numbers I can count by hand.** 6 queries, 3 blocks,
+   12 lists, 48 X's — never S=8192. The reader must be able to *verify* the
+   claim by counting, not take it on faith.
+5. **State the one idea as a single bolded sentence,** on its own line.
+   "The entries did not multiply. Four lists got glued into one."
+6. **Show the same fact from both sides and then say they're one fact.**
+   "The list is 4x longer for the same reason there are 4x fewer lists."
+   That sentence is usually the actual insight.
+7. **A two-column before/after table, with the unchanged row marked "same".**
+   What *didn't* move is as load-bearing as what did, and I will otherwise
+   assume everything moved.
+8. **Say explicitly what does not change** — which files, which constants,
+   which resources. Silence there reads as "unknown", not "unaffected".
+
+Applies to prose in conversation and to `docs/learning/*.md` alike.
+
 ## Project facts
 - Language: Triton (Python)
 - GPU (measured, not assumed): NVIDIA GeForce RTX 3050 **Ti** Laptop, Ampere
