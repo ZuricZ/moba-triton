@@ -41,6 +41,7 @@ import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
+from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
 from moba.kernels.moba_fwd import (
     LOG2_E,
@@ -124,21 +125,39 @@ def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
 @triton.jit
 def _moba_bwd(
     Q, K, V, DO, Lse, Delta,
-    RowIdx, SlotIdx, ColOffsets, ColNnz, Order,
+    RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order,
     DK, DV, DQPart,
     S, T, softmax_scale, sm_scale, num_blocks,
     BLOCK_SIZE: tl.constexpr, KEY_TILE: tl.constexpr, GROUP: tl.constexpr,
     D: tl.constexpr, K_SLOTS: tl.constexpr, DQ_SLOTS: tl.constexpr,
+    H_Q: tl.constexpr, H_KV: tl.constexpr,
     CAUSAL: tl.constexpr,
 ):
-    """One program per (key sub-tile, batch-head).
+    """One program per (key sub-tile, batch, key/value head).
 
     Writes its sub-tile's `dK` and `dV` in full, and one `dQ` partial per
     (query, slot) pair for `reduce_dq` to sum. See `BWD_KEY_TILE` for why the
     unit of work is a sub-tile rather than a whole block.
+
+    Grouped-query attention needs no atomics and no wider accumulator here, and
+    the reason is worth stating because it looks like it should. The chain rule
+    says a shared key/value head's gradient is the *sum* over the query heads
+    consuming it -- normally an explicit reduction across the head axis. Here
+    the group's query rows are already merged into this program's column, and
+    `dk`/`dv` are reductions down that column, so the sum happens on the way
+    past. The accumulators are indexed by *key*, so their shape cannot depend
+    on how many queries feed them; and the program still owns a disjoint key
+    range, because grouped-query attention removed competing programs rather
+    than adding them.
     """
     pid = tl.program_id(0)
     pid_bh = tl.program_id(1)
+
+    # Keys are shared, queries are not. See `_moba_attn_fwd` -- the same split,
+    # and at H_Q == H_KV both reduce to `pid_bh` exactly.
+    pid_b = pid_bh // H_KV
+    q_base = pid_b * H_Q * S * D
+    q_lin = pid_b * H_Q * S
 
     tiles: tl.constexpr = BLOCK_SIZE // KEY_TILE
     # Longest-first dispatch is preserved: the block index still comes from
@@ -173,14 +192,19 @@ def _moba_bwd(
         live = offs < n
 
         rows = tl.load(RowIdx + pid_bh * T + lo + offs, mask=live, other=0)
+        heads = tl.load(HeadIdx + pid_bh * T + lo + offs, mask=live, other=0)
         slots = tl.load(SlotIdx + pid_bh * T + lo + offs, mask=live, other=0)
 
-        q = tl.load(Q + kv_base + rows[:, None] * D + offs_d[None, :],
+        # `rows` stays a raw position so the causal compare below is untouched;
+        # the head rides alongside it. Same trade as the forward.
+        q_row = heads * S + rows
+
+        q = tl.load(Q + q_base + q_row[:, None] * D + offs_d[None, :],
                     mask=live[:, None], other=0.0)
-        do = tl.load(DO + kv_base + rows[:, None] * D + offs_d[None, :],
+        do = tl.load(DO + q_base + q_row[:, None] * D + offs_d[None, :],
                      mask=live[:, None], other=0.0)
-        lse = tl.load(Lse + pid_bh * S + rows, mask=live, other=0.0)
-        delta = tl.load(Delta + pid_bh * S + rows, mask=live, other=0.0)
+        lse = tl.load(Lse + q_lin + q_row, mask=live, other=0.0)
+        delta = tl.load(Delta + q_lin + q_row, mask=live, other=0.0)
 
         # Same additive construction as the forward, for the same reason: the
         # masks do not depend on the matmul, so they can issue while it is in
@@ -227,9 +251,9 @@ def _moba_bwd(
         # Restored by widening the slot axis to give each sub-tile its own
         # address. `reduce_dq` sums over all of them.
         dq = tl.dot(ds.to(k.dtype), k) * softmax_scale
-        dst = rows * DQ_SLOTS + slots * (BLOCK_SIZE // KEY_TILE) + sub
+        dst = q_row * DQ_SLOTS + slots * (BLOCK_SIZE // KEY_TILE) + sub
         tl.store(
-            DQPart + pid_bh * S * DQ_SLOTS * D + dst[:, None] * D
+            DQPart + pid_b * H_Q * S * DQ_SLOTS * D + dst[:, None] * D
             + offs_d[None, :],
             dq.to(DQPart.dtype.element_ty),
             mask=live[:, None],
@@ -351,9 +375,9 @@ def moba_backward(
     Args:
         dout: Gradient of the loss w.r.t. the forward output, [B, H, S, D].
         q: Queries as passed to the forward, [B, H, S, D].
-        k: Keys, same shape.
-        v: Values, same shape.
-        out: Forward output, same shape.
+        k: Keys, [B, H_kv, S, D], where `H_kv` divides `H`.
+        v: Values, same shape as `k`.
+        out: Forward output, shaped like `q`.
         lse: Per-query global log-sum-exp in log2 units, [B, H, S], as
             `combine_partials(..., return_lse=True)` returns.
         part_m: Forward per-slot maxima [B, H, S, K], the written-marker.
@@ -363,12 +387,16 @@ def moba_backward(
         causal: Whether the forward applied causal masking.
 
     Returns:
-        A tuple of (dq, dk, dv), each shaped like its input.
+        A tuple of (dq, dk, dv), each shaped like its input. Under grouped-query
+        attention `dk` and `dv` carry `H_kv` heads, each already summed over the
+        query heads that shared it.
 
     Raises:
         ValueError: If no chunk height compiles within shared memory.
     """
-    b, h, s, d = q.shape
+    b, h_q, s, d = q.shape
+    h_kv = k.shape[1]
+    head_group_size(h_q, h_kv)
     slots = index.max_slots
     q, k, v, dout = (t.contiguous() for t in (q, k, v, dout))
 
@@ -378,14 +406,14 @@ def moba_backward(
     dv = torch.empty_like(v)
     key_tile = min(cfg.block_size, BWD_KEY_TILE)
     tiles = cfg.block_size // key_tile
-    dq_part = torch.empty((b, h, s, slots * tiles, d), device=q.device,
+    dq_part = torch.empty((b, h_q, s, slots * tiles, d), device=q.device,
                           dtype=q.dtype)
 
     # Same try-and-fall-back as the forward, and the ceiling is lower here:
     # this kernel gathers two tiles per iteration (q and dO) where the forward
     # gathers one, so a chunk height the forward accepts may not compile. The
     # compiler is the authority either way.
-    key = (cfg.block_size, d, q.element_size(), slots, causal,
+    key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
            torch.cuda.get_device_capability(q.device))
     cached = _BWD_GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
@@ -395,15 +423,16 @@ def moba_backward(
 
     for group in candidates:
         try:
-            _moba_bwd[(index.num_blocks * tiles, b * h)](
+            _moba_bwd[(index.num_blocks * tiles, b * h_kv)](
                 q, k, v, dout, lse, delta,
-                index.row_indices, index.slot_of_pair,
+                index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,
                 dk, dv, dq_part,
                 s, index.row_indices.shape[-1],
                 d ** -0.5, d ** -0.5 * LOG2_E, index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, KEY_TILE=key_tile, GROUP=group,
-                D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles, CAUSAL=causal,
+                D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles,
+                H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
                 num_warps=BWD_WARPS, num_stages=BWD_STAGES,
             )
         except OutOfResources:

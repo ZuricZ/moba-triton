@@ -92,14 +92,19 @@ def moba_attention(
 
     Args:
         q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H, S, D].
-        v: Values shaped [B, H, S, D].
+        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+            key/value heads than query heads is grouped-query attention; the
+            kernel shares a K/V tile by owning it for the whole group, never by
+            materializing copies.
+        v: Values, same shape as `k`.
         cfg: Configuration.
         index: Precomputed CSC index; built with the fused device-side gate
             when omitted. Passing one holds routing fixed while inputs vary.
         causal: Whether to apply causal masking within the query's own block.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`.
+        Attention output shaped [B, H, S, D], same dtype as `q`. `k` and `v`
+        receive gradients with their own `H_kv` heads, each already summed over
+        the query heads that shared it.
     """
     return _MoBAAttention.apply(q, k, v, cfg, index, causal)

@@ -135,3 +135,137 @@ def test_mismatched_key_and_value_shapes_are_rejected(device):
     v = torch.randn(1, 4, 256, 64, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="key/value"):
         moba_forward(q, k, v, cfg)
+
+
+def _grads(fn, q, k, v, g):
+    """Runs `fn` and returns the input gradients."""
+    q, k, v = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
+    out = fn(q, k, v)
+    (out * g.to(out.dtype)).sum().backward()
+    return q.grad, k.grad, v.grad
+
+
+@pytest.mark.parametrize("gate", GQA_GATES)
+def test_gradients_under_gqa_are_within_the_precision_budget(device, gate):
+    """dk and dv must accumulate every sharing head's contribution.
+
+    The chain rule says a shared key/value head's gradient is the *sum* over
+    the query heads consuming it. The kernel gets that for free: the group's
+    query rows are already in the same column, and summing down a column is
+    what the dK/dV accumulation was already doing. This test is what makes
+    "for free" a claim rather than a hope.
+
+    The failure to fear is an off-by-`group`: a dk that is right in shape and
+    plausible in magnitude but sums only one head's contribution.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    shape = (1, 8, 2, 512, 64)
+    b, h_q, h_kv, s, d = shape
+
+    q64, k64, v64 = _shapes(shape, torch.float64, device)
+    qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
+    gen = torch.Generator(device=device).manual_seed(7)
+    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.float64) * 0.1
+
+    index = build_csc_fused(qb, kb, cfg)
+    selected = csc_to_mask(index, s)
+
+    def oracle(a, x, y):
+        return moba_attention_naive(a, x, y, cfg, selected=selected)
+
+    def kernel(a, x, y):
+        return moba_attention(a, x, y, cfg, index=index)
+
+    tq, tk, tv = _grads(oracle, q64, k64, v64, g)
+    rq, rk, rv = _grads(oracle, qb, kb, vb, g)
+    dq, dk, dv = _grads(kernel, qb, kb, vb, g)
+
+    assert dq.shape == (b, h_q, s, d)
+    assert dk.shape == (b, h_kv, s, d)
+    assert dv.shape == (b, h_kv, s, d)
+
+    for name, ours, ref, truth in [("dq", dq, rq, tq), ("dk", dk, rk, tk),
+                                   ("dv", dv, rv, tv)]:
+        cap = max(TOLERANCE_FACTOR * max_abs_error(ref, truth),
+                  TOLERANCE_FLOOR)
+        err = max_abs_error(ours, truth)
+        assert err <= cap, (
+            f"{name} error {err:.3e} exceeds {cap:.3e} "
+            f"({TOLERANCE_FACTOR}x the bfloat16 oracle's {max_abs_error(ref, truth):.3e})"
+        )
+
+
+def test_gqa_backward_equals_the_kernel_on_expanded_heads(device):
+    """Sharing must be free of arithmetic consequences in the backward too.
+
+    The expanded run produces one dk per *query* head; summing each group
+    recovers what the shared run computes in one pass. That sum is the
+    comparison, and it is the chain rule written out.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
+    q, k, v = _shapes((b, h_q, h_kv, s, d), torch.bfloat16, device, seed=5)
+    gen = torch.Generator(device=device).manual_seed(9)
+    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16) * 0.1
+    group = h_q // h_kv
+
+    nq, nk, nv = _grads(lambda a, x, y: moba_attention(a, x, y, cfg), q, k, v, g)
+    wq, wk, wv = _grads(lambda a, x, y: moba_attention(a, x, y, cfg),
+                        q, expand_kv(k, h_q), expand_kv(v, h_q), g)
+
+    folded_k = wk.view(b, h_kv, group, s, d).sum(dim=2)
+    folded_v = wv.view(b, h_kv, group, s, d).sum(dim=2)
+
+    for name, a, bb in [("dq", nq, wq), ("dk", nk, folded_k),
+                        ("dv", nv, folded_v)]:
+        assert torch.allclose(a.float(), bb.float(), rtol=3e-2, atol=2e-3), (
+            f"{name} differs by more than summation order explains: "
+            f"max {max_abs_error(a, bb):.3e}"
+        )
+
+
+def test_unselected_blocks_still_get_a_zero_gradient_under_gqa(device):
+    """A merged column that nobody filled must still write zeros.
+
+    The backward deliberately does not return early on an empty column, because
+    its store is the only writer of that block's dK and dV; returning would
+    leave whatever the allocator handed back. Grouped-query attention makes the
+    case rarer -- every head in the group must decline the block -- so it needs
+    reaching on purpose rather than hoping a sweep wanders into it.
+
+    `always_select_current=False` is what makes it reachable at all. With the
+    default, a block is always selected by the queries inside it, so `col_nnz`
+    is at least `block_size` for every column and an empty one cannot exist.
+    Measured: zero empty columns across six GQA configurations with the flag
+    on, one or two with it off.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    cfg = MoBAConfig(block_size=64, top_k=2, dtype=torch.bfloat16,
+                     always_select_current=False)
+    b, h_q, h_kv, s, d = 1, 4, 1, 1024, 64
+    q, k, v = _shapes((b, h_q, h_kv, s, d), torch.bfloat16, device, seed=11)
+    gen = torch.Generator(device=device).manual_seed(13)
+    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16) * 0.1
+
+    index = build_csc_fused(q, k, cfg)
+    empty = (index.col_nnz == 0)
+    if not bool(empty.any()):
+        pytest.skip("no unselected block at this configuration")
+
+    _, dk, dv = _grads(
+        lambda a, x, y: moba_attention(a, x, y, cfg, index=index), q, k, v, g)
+
+    for bi, kv, blk in empty.nonzero().tolist():
+        lo = blk * cfg.block_size
+        hi = min(lo + cfg.block_size, s)
+        assert not bool(dk[bi, kv, lo:hi].any()), f"block {blk} has nonzero dk"
+        assert not bool(dv[bi, kv, lo:hi].any()), f"block {blk} has nonzero dv"
