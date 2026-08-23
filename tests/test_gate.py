@@ -17,7 +17,12 @@ import torch
 
 from conftest import GATE_SWEEP, SHAPE_SWEEP, make_qkv
 from moba.config import MoBAConfig
-from moba.kernels.gate import GATE_BLOCK_N, gate_select
+from moba.heads import expand_kv
+from moba.kernels.gate import (
+    GATE_BLOCK_N,
+    block_representatives_triton,
+    gate_select,
+)
 from moba.ref.naive import block_representatives, select_blocks
 
 
@@ -191,3 +196,83 @@ def test_gate_respects_the_budget_when_capacity_is_not_a_power_of_two(device):
     assert torch.equal(select_blocks(q, kbar, cfg),
                        indices_to_mask(idx, kbar.shape[2]))
 
+
+
+def test_gate_scores_each_query_head_against_its_shared_representatives(device):
+    """A query head must rank against its own KV head's blocks, and no other.
+
+    The failure this guards against is silent and plausible: with the wrong
+    divisor the gate ranks head 5 against head 5's representatives instead of
+    head 1's, which produces a perfectly well-formed index that attends to the
+    wrong keys. Comparing against the expanded oracle catches it; a shape check
+    cannot.
+
+    Note the grid this implies. The gate runs per *query* head, because each
+    query head ranks independently -- same representatives, different `q`, so
+    different winners. Only the thing being ranked is shared. See
+    `docs/learning/03-gqa-and-the-column-merge.md`.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
+    gen = torch.Generator(device=device).manual_seed(0)
+    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+
+    kbar = block_representatives_triton(k, cfg)
+    assert kbar.shape == (b, h_kv, cfg.num_blocks(s), d)
+
+    narrow = gate_select(q, kbar, cfg)
+    wide = gate_select(q, expand_kv(kbar, h_q), cfg)
+    assert narrow.shape == (b, h_q, s, cfg.top_k)
+    assert torch.equal(narrow, wide)
+
+
+def test_gate_agrees_with_the_pytorch_oracle_under_gqa(device):
+    """Exact equality against the PyTorch gate, as everywhere else in this file."""
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
+    gen = torch.Generator(device=device).manual_seed(1)
+    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+
+    kbar = block_representatives(k, cfg)
+    idx = gate_select(q, kbar, cfg)
+    assert torch.equal(select_blocks(q, kbar, cfg),
+                       indices_to_mask(idx, kbar.shape[2]))
+
+
+def test_every_query_head_is_gated_under_gqa(device):
+    """No query head may be left unwritten.
+
+    Sizing the gate's grid by kv heads instead of query heads would run the
+    gate for 2 heads of 8 and leave the other 6 holding whatever the allocator
+    returned -- uninitialized memory that transposes into a well-formed index
+    and attends to blocks nobody chose. It would not crash, so it is checked.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s, d = 1, 8, 2, 256, 64
+    gen = torch.Generator(device=device).manual_seed(2)
+    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+
+    idx = gate_select(q, block_representatives_triton(k, cfg), cfg)
+    n = cfg.num_blocks(s)
+
+    # Every query selects its own block at minimum, so every row has an entry
+    # in range. An ungated head would fail this on uninitialized memory.
+    assert bool(((idx >= -1) & (idx < n)).all()), "an id is out of range"
+    assert bool(((idx >= 0).sum(-1) > 0).all()), "a query selected nothing"
+
+
+def test_gate_rejects_indivisible_head_counts(device):
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
+    kbar = torch.randn(1, 3, 4, 64, dtype=torch.bfloat16, device=device)
+    with pytest.raises(ValueError, match="divisible"):
+        gate_select(q, kbar, cfg)

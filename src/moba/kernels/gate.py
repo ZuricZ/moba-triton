@@ -51,6 +51,7 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
+from moba.heads import head_group_size
 from moba.device import TENSOR_CORE_TILE
 
 # Queries per gate program. 32 rather than the 16 the one-shot gate used:
@@ -86,15 +87,32 @@ def _moba_gate_fwd(
     BLOCK_N: tl.constexpr, N_BLOCKS: tl.constexpr, K_POW2: tl.constexpr,
     CAPACITY: tl.constexpr, TAKE: tl.constexpr, TOP_K: tl.constexpr,
     ALWAYS_CURRENT: tl.constexpr,
+    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr,
 ):
-    """One program per (query tile, batch-head). Emits selected block ids.
+    """One program per (query tile, batch, query head). Emits selected block ids.
 
     Writes `BlockIdx[b, h, s, j] = block id of the query's j-th selection`,
     ascending in `j`, padded with -1. Nothing else is written: no scores, no
     dense mask.
+
+    Per *query* head, not per key/value head, and that survives grouped-query
+    attention unchanged. Query heads sharing a key/value head rank the same
+    representatives, but they rank them with different queries, so they choose
+    different blocks -- the ranking is independent even though the thing ranked
+    is shared. Only `Kbar`'s base pointer is remapped.
+
+    The merging of a group's selections into one list happens downstream, in
+    the CSC transpose, which is the first stage that deals in blocks rather
+    than queries. Nothing here gets longer under grouped-query attention.
     """
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
+
+    # `pid_bh` enumerates B * H_Q. Queries, the output, and this program's whole
+    # job are per query head; only the block representatives are shared, so only
+    # their base pointer is remapped. At Q_PER_KV == 1 this is `pid_bh` exactly,
+    # which is why the multi-head path is untouched.
+    kv_bh = (pid_bh // H_Q) * (H_Q // Q_PER_KV) + (pid_bh % H_Q) // Q_PER_KV
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     live = offs_m < S
@@ -150,7 +168,7 @@ def _moba_gate_fwd(
         in_range = cols < N_BLOCKS
 
         kbar = tl.load(
-            Kbar + pid_bh * N_BLOCKS * D + cols[:, None] * D + offs_d[None, :],
+            Kbar + kv_bh * N_BLOCKS * D + cols[:, None] * D + offs_d[None, :],
             mask=in_range[:, None], other=0.0,
         )
 
@@ -255,23 +273,29 @@ def gate_select(
 
     Args:
         q: Queries shaped [B, H, S, D], contiguous.
-        kbar: Block representatives shaped [B, H, num_blocks, D], contiguous.
+        kbar: Block representatives shaped [B, H_kv, num_blocks, D],
+            contiguous, where `H_kv` divides `H`. Fewer representative heads
+            than query heads is grouped-query attention: the group shares what
+            it ranks, not how it ranks.
         cfg: Configuration supplying `block_size`, `top_k` and the selection
             conventions.
 
     Returns:
         Selected block ids shaped [B, H, S, top_k], int32, ascending within
-        each query and padded with -1.
+        each query and padded with -1. One row per *query* head regardless of
+        how many representative heads there were.
 
     Raises:
-        ValueError: If the shapes disagree.
+        ValueError: If the shapes disagree, or if the head counts do not
+            divide.
     """
     b, h, s, d = q.shape
-    if kbar.shape[:2] != (b, h) or kbar.shape[-1] != d:
+    if kbar.shape[0] != b or kbar.shape[-1] != d:
         raise ValueError(
             f"representative shape {tuple(kbar.shape)} does not match queries "
             f"{tuple(q.shape)}"
         )
+    q_per_kv = head_group_size(h, kbar.shape[1])
     n = kbar.shape[2]
 
     q, kbar = q.contiguous(), kbar.contiguous()
@@ -298,6 +322,7 @@ def gate_select(
         N_BLOCKS=n, K_POW2=k_pow2, CAPACITY=capacity,
         TAKE=take, TOP_K=cfg.top_k,
         ALWAYS_CURRENT=cfg.always_select_current,
+        H_Q=h, Q_PER_KV=q_per_kv,
         num_warps=GATE_WARPS,
     )
     return out
