@@ -145,4 +145,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward and backward both done and correct; 343 tests green. Forward 2.18x over dense SDPA at S=8192 (attainment 0.481). Backward 1.27x over dense at S=8192 but 0.43x at S=2048, and costs 4.6x its own forward against a theoretical 2.5x -- unoptimized, and the next thing to work on.
+> Status: Forward and backward both done, correct and tuned; 343 tests green. Forward 2.18x over dense SDPA at S=8192 (attainment 0.481); backward 2.58x over dense at S=8192, costing 2.3x its own forward against a theoretical 2.5x. Both still lose to dense below ~4K, where there is little sparsity to exploit. Next: a real head-to-head needs rented sm_80/90 hardware.

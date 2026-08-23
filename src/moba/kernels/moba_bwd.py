@@ -69,7 +69,27 @@ BWD_BLOCK_M = 64
 # and the cost is that Q and dO are gathered once per sub-tile rather than once
 # per block. Some of that is bought back in parallelism: splitting multiplies
 # the program count, and 20 SMs are easy to leave idle otherwise.
+#
+# 64 rather than 32, and the two do not disagree by much, but *why* 32 loses is
+# worth recording. Measured on the main kernel alone, 32 wins: it halves shared
+# memory, which lifts occupancy from one program per SM to two. Measured on the
+# whole backward, 32 loses -- because this constant is not local to that kernel.
+# Halving it doubles the slot axis of the dQ partial buffer, so `reduce_dq`
+# reads twice as much and the allocation doubles, 128 MB to 256 MB at S=8192.
+# Tuning the stage that is 91% of the time, in isolation, chose wrongly.
 BWD_KEY_TILE = 64
+
+# Queries per iteration, and the launch shape. All measured, none inherited:
+# the backward first shipped with the forward's chunk height and Triton's
+# default warp count, which cost a factor of two.
+#
+# 32 queries over 8 warps, against the forward's 64 over 4. The backward does
+# four matmuls per iteration where the forward does two, so it wants more warps
+# on a narrower tile; the forward wants the opposite. Nothing about one kernel's
+# tuning transfers to the other.
+BWD_GROUP = 32
+BWD_WARPS = 8
+BWD_STAGES = 3
 
 _BWD_GROUP_CACHE: dict[tuple, int] = {}
 
@@ -369,7 +389,9 @@ def moba_backward(
            torch.cuda.get_device_capability(q.device))
     cached = _BWD_GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
-                  else group_candidates(cfg, d, q.element_size(), q.device))
+                  else [g for g in group_candidates(
+                      cfg, d, q.element_size(), q.device) if g <= BWD_GROUP]
+                  or [BWD_GROUP])
 
     for group in candidates:
         try:
@@ -382,6 +404,7 @@ def moba_backward(
                 d ** -0.5, d ** -0.5 * LOG2_E, index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, KEY_TILE=key_tile, GROUP=group,
                 D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles, CAUSAL=causal,
+                num_warps=BWD_WARPS, num_stages=BWD_STAGES,
             )
         except OutOfResources:
             continue
