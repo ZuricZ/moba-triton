@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from moba.config import MoBAConfig
+from moba.heads import expand_kv
 
 
 def block_representatives(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
@@ -76,7 +77,8 @@ def select_blocks(
 
     Args:
         q: Queries shaped [B, H, S, D].
-        kbar: Block representatives shaped [B, H, num_blocks, D].
+        kbar: Block representatives shaped [B, H_kv, num_blocks, D],
+            where `H_kv` divides `H`.
         cfg: Configuration supplying `block_size`, `top_k`, and semantics flags.
 
     Returns:
@@ -85,6 +87,13 @@ def select_blocks(
     b, h, s, _ = q.shape
     num_blocks = kbar.shape[2]
     device = q.device
+
+    # Grouped-query attention. Expanding here rather than broadcasting inside
+    # the einsum keeps this function one line per line of the algorithm, which
+    # is the oracle's whole job -- the kernel gets to be clever, this does not.
+    # Each query head still ranks blocks independently; only the thing being
+    # ranked is shared.
+    kbar = expand_kv(kbar, h)
 
     # Gate scores. Deliberately unscaled: softmax's 1/sqrt(D) is a positive
     # monotone transform, and a monotone transform cannot reorder a ranking.
@@ -136,7 +145,7 @@ def moba_selection(
 
     Args:
         q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H, S, D].
+        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`.
         cfg: Configuration.
 
     Returns:
@@ -170,8 +179,9 @@ def moba_attention_naive(
 
     Args:
         q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H, S, D].
-        v: Values shaped [B, H, S, D].
+        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+            key/value heads than query heads is grouped-query attention.
+        v: Values, same shape as `k`.
         cfg: Configuration.
         selected: Optional precomputed selection mask shaped
             [B, H, S, num_blocks]. Computed from `q` and `k` when omitted.
@@ -192,6 +202,11 @@ def moba_attention_naive(
     """
     b, h, s, d = q.shape
     scale = d ** -0.5
+
+    # See `select_blocks`. Materializing the shared heads is exactly the memory
+    # traffic the kernel exists to avoid, and doing it here is what makes the
+    # kernel's avoidance of it checkable.
+    k, v = expand_kv(k, h), expand_kv(v, h)
 
     if selected is None:
         selected = moba_selection(q, k, cfg)         # [B, H, S, num_blocks]
