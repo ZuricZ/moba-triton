@@ -176,4 +176,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward and backward both done, correct and tuned; 343 tests green. Forward 2.18x over dense SDPA at S=8192 (attainment 0.481); backward 2.58x over dense at S=8192, costing 2.3x its own forward against a theoretical 2.5x. Both still lose to dense below ~4K, where there is little sparsity to exploit. Next: a real head-to-head needs rented sm_80/90 hardware.
+> Status: Forward, backward and grouped-query attention all done; 379 tests green. Forward 2.18x over dense SDPA at S=8192; backward 2.58x. GQA is correct and costs no registers or shared memory, but on 20 SMs at batch 1 it *loses* a few percent -- it shrinks the launch grid, and the penalty vanishes by ~128 programs (`docs/gqa-measurements.md`). Next: varlen, then a real head-to-head on rented sm_80/90.
