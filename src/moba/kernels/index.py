@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from moba.config import MoBAConfig
+from moba.heads import head_group_size
 from moba.ref.naive import moba_selection
 
 
@@ -28,28 +29,51 @@ class CSCIndex:
     """KV-block-major view of the routing decision.
 
     Attributes:
-        col_nnz: Queries selecting each block, [B, H, num_blocks] int32.
-        col_offsets: Exclusive prefix sum of `col_nnz`, [B, H, num_blocks + 1]
+        col_nnz: Queries selecting each block, [B, H_kv, num_blocks] int32.
+        col_offsets: Exclusive prefix sum of `col_nnz`, [B, H_kv, num_blocks + 1]
             int32. Column `j` occupies `row_indices[..., col_offsets[j] :
             col_offsets[j] + col_nnz[j]]`.
-        row_indices: Query indices grouped by block and ascending within each
-            block, [B, H, T] int32. Allocated at the static upper bound
-            `T = S * top_k`; entries past a column's extent are undefined.
+        row_indices: Query positions grouped by block, [B, H_kv, T] int32.
+            Allocated at the static upper bound `T = G * S * top_k`; entries
+            past a column's extent are undefined.
+
+            Ordering within a column is lexicographic by (query head, position)
+            -- ascending within each head's run, not across the column. Do not
+            try to restore a global ascending order: what mattered was never
+            the ordering but the *locality* of the kernel's gather, and
+            head-major is the layout that has it. Consecutive entries then step
+            one query row; position-major would step `S` rows, 2 MB apart at
+            S=8192. `index_fused` drops ordering entirely and measured 1.03x
+            (`docs/gather-cost-measurements.md`).
+        head_indices: Which query head each entry came from, [B, H_kv, T]
+            int32, aligned with `row_indices`. Required because a column is
+            keyed by (batch, kv_head, block), which under grouped-query
+            attention no longer determines the query head: every query head
+            sharing that kv head lands in the same column.
+
+            Held separately rather than packed into `row_indices` as
+            `head * S + pos` so the kernels' causal comparison
+            `key_pos <= rows` stays a raw position compare, with no runtime
+            integer modulo in the inner loop.
         slot_of_pair: Which of the query's `top_k` output slots each pair owns,
-            [B, H, T] int32, aligned with `row_indices`.
-        order: Block ids sorted by descending `col_nnz`, [B, H, num_blocks]
+            [B, H_kv, T] int32, aligned with `row_indices`.
+        order: Block ids sorted by descending `col_nnz`, [B, H_kv, num_blocks]
             int32. Longest-first dispatch (D8).
         num_blocks: Number of KV blocks.
         max_slots: `top_k`; the number of partial slots reserved per query.
+        num_query_heads: H_q. Equal to `col_nnz.shape[1]` for multi-head
+            attention, a multiple of it under grouped-query attention.
     """
 
     col_nnz: torch.Tensor
     col_offsets: torch.Tensor
     row_indices: torch.Tensor
+    head_indices: torch.Tensor
     slot_of_pair: torch.Tensor
     order: torch.Tensor
     num_blocks: int
     max_slots: int
+    num_query_heads: int
 
 
 def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
@@ -63,11 +87,13 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
     Returns:
         A populated CSCIndex.
     """
-    mask = moba_selection(q, k, cfg)                    # [B, H, S, N] bool
-    b, h, s, n = mask.shape
+    mask = moba_selection(q, k, cfg)                # [B, H_q, S, N] bool
+    b, h_q, s, n = mask.shape
+    h_kv = k.shape[1]
+    group = head_group_size(h_q, h_kv)
     device = mask.device
     slots = cfg.top_k
-    total = s * slots
+    total = group * s * slots
 
     # Slot number is the rank of this block among the query's selections,
     # ordered by ascending block index. Any fixed rule works; having *a* fixed
@@ -75,34 +101,56 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
     # order in which partial sums are added.
     slot_grid = (mask.cumsum(dim=-1) - 1).to(torch.int32)
 
-    # Block-major flattening. Reading [B, H, N, S] in memory order visits all
-    # of column 0, then column 1, and so on -- which *is* CSC ordering, with
-    # query indices ascending inside each column at no extra cost.
+    # Block-major flattening. Reading [B, H_kv, N, G, S] in memory order visits
+    # all of column 0, then column 1, and so on -- which *is* CSC ordering, at
+    # no extra cost.
     #
     # The alternative was argsort on a `block * S + query` key. At S=4096 that
     # sorts ~1M elements per (batch, head); this costs one scan and no sort,
     # because the layout already is the sorted order.
-    bm = mask.permute(0, 1, 3, 2).reshape(b * h, n * s)
+    #
+    # Grouped-query attention stacks the group's query heads onto the *row*
+    # axis of a shared grid, because the columns they index are now the same
+    # physical blocks. `view` splits H_q into (H_kv, G) with the group index
+    # fastest, matching the convention that query head `qh` reads kv head
+    # `qh // G`. Nothing is copied; the permute reorders strides only.
+    #
+    # Order within a column is then lexicographic by (head, position). See
+    # `CSCIndex.row_indices` for why that is preferred to a globally ascending
+    # order rather than merely tolerated.
+    stacked = mask.view(b, h_kv, group, s, n)           # [B, H_kv, G, S, N]
+    bm = stacked.permute(0, 1, 4, 2, 3).reshape(b * h_kv, n * group * s)
 
     flat = bm.reshape(-1).nonzero(as_tuple=False).squeeze(1)
-    bh_of = torch.div(flat, n * s, rounding_mode="floor")
-    within = flat - bh_of * (n * s)
-    n_of = torch.div(within, s, rounding_mode="floor")
-    s_of = within - n_of * s
+    bh_of = torch.div(flat, n * group * s, rounding_mode="floor")
+    within = flat - bh_of * (n * group * s)
+    n_of = torch.div(within, group * s, rounding_mode="floor")
+    rem = within - n_of * (group * s)
+    g_of = torch.div(rem, s, rounding_mode="floor")
+    s_of = rem - g_of * s
 
     # Position within each (batch, head)'s own segment of the global pair list.
-    counts = bm.sum(dim=1)                              # [B*H]
+    counts = bm.sum(dim=1)                              # [B*H_kv]
     starts = torch.zeros_like(counts)
     starts[1:] = counts.cumsum(0)[:-1]
     pos = torch.arange(flat.numel(), device=device) - starts[bh_of]
 
-    row_indices = torch.zeros(b * h, total, dtype=torch.int32, device=device)
-    slot_of_pair = torch.zeros(b * h, total, dtype=torch.int32, device=device)
-    row_indices[bh_of, pos] = s_of.to(torch.int32)
-    slot_of_pair[bh_of, pos] = slot_grid.reshape(b * h, s, n)[bh_of, s_of, n_of]
+    row_indices = torch.zeros(b * h_kv, total, dtype=torch.int32, device=device)
+    head_indices = torch.zeros(b * h_kv, total, dtype=torch.int32, device=device)
+    slot_of_pair = torch.zeros(b * h_kv, total, dtype=torch.int32, device=device)
 
-    col_nnz = mask.sum(dim=2).to(torch.int32)           # [B, H, N]
-    col_offsets = torch.zeros(b, h, n + 1, dtype=torch.int32, device=device)
+    row_indices[bh_of, pos] = s_of.to(torch.int32)
+
+    # The *absolute* query head, not its index within the group, so the kernels
+    # address Q directly without having to know which group they are in.
+    kv_of = bh_of % h_kv
+    head_indices[bh_of, pos] = (kv_of * group + g_of).to(torch.int32)
+
+    sg = slot_grid.reshape(b * h_kv, group, s, n)
+    slot_of_pair[bh_of, pos] = sg[bh_of, g_of, s_of, n_of]
+
+    col_nnz = stacked.sum(dim=(2, 3)).to(torch.int32)   # [B, H_kv, N]
+    col_offsets = torch.zeros(b, h_kv, n + 1, dtype=torch.int32, device=device)
     col_offsets[..., 1:] = col_nnz.cumsum(dim=-1)
 
     # Longest-first dispatch (D8). Stable, so the order is reproducible run to
@@ -115,11 +163,13 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
     return CSCIndex(
         col_nnz=col_nnz,
         col_offsets=col_offsets,
-        row_indices=row_indices.view(b, h, total),
-        slot_of_pair=slot_of_pair.view(b, h, total),
+        row_indices=row_indices.view(b, h_kv, total),
+        head_indices=head_indices.view(b, h_kv, total),
+        slot_of_pair=slot_of_pair.view(b, h_kv, total),
         order=order,
         num_blocks=n,
         max_slots=slots,
+        num_query_heads=h_q,
     )
 
 
@@ -135,17 +185,21 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
         seq_len: Sequence length.
 
     Returns:
-        Boolean mask shaped [B, H, seq_len, num_blocks].
+        Boolean mask shaped [B, H_q, seq_len, num_blocks]. Columns are keyed
+        by kv head, but the mask this reconstructs is per query head, so
+        `head_indices` is what routes each entry back.
     """
-    b, h, n = index.col_nnz.shape
+    b, h_kv, n = index.col_nnz.shape
     out = torch.zeros(
-        b, h, seq_len, n, dtype=torch.bool, device=index.col_nnz.device
+        b, index.num_query_heads, seq_len, n, dtype=torch.bool,
+        device=index.col_nnz.device
     )
     for bi in range(b):
-        for hi in range(h):
+        for kv in range(h_kv):
             for blk in range(n):
-                lo = int(index.col_offsets[bi, hi, blk])
-                cnt = int(index.col_nnz[bi, hi, blk])
-                rows = index.row_indices[bi, hi, lo:lo + cnt].long()
-                out[bi, hi, rows, blk] = True
+                lo = int(index.col_offsets[bi, kv, blk])
+                cnt = int(index.col_nnz[bi, kv, blk])
+                rows = index.row_indices[bi, kv, lo:lo + cnt].long()
+                heads = index.head_indices[bi, kv, lo:lo + cnt].long()
+                out[bi, heads, rows, blk] = True
     return out

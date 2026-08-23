@@ -173,3 +173,71 @@ def test_fused_index_handles_a_sequence_that_is_not_a_block_multiple(device):
 
     assert actual.num_blocks == 8, f"expected 8 blocks, got {actual.num_blocks}"
     assert torch.equal(csc_to_mask(expected, 1000), csc_to_mask(actual, 1000))
+
+
+def _gqa_qk(device, b=1, h_q=8, h_kv=2, s=512, d=64, seed=0):
+    """Returns (q, k) with fewer key/value heads than query heads."""
+    gen = torch.Generator(device=device).manual_seed(seed)
+    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    return q, k
+
+
+def test_fused_index_merges_columns_across_a_head_group(device):
+    """Same pairs, fewer columns -- the whole point of grouped-query support.
+
+    A column is one program's job and loads K and V once, so `group` times
+    fewer columns is `group` times fewer K/V loads for identical arithmetic.
+    See `docs/learning/03-gqa-and-the-column-merge.md`.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s = 1, 8, 2, 512
+    q, k = _gqa_qk(device, b=b, h_q=h_q, h_kv=h_kv, s=s)
+
+    index = build_csc_fused(q, k, cfg)
+    assert index.col_nnz.shape == (b, h_kv, cfg.num_blocks(s))
+    assert index.head_indices.shape == index.row_indices.shape
+    assert index.num_query_heads == h_q
+
+    mha_pairs = int(build_csc(q, k, cfg).col_nnz.sum())
+    assert int(index.col_nnz.sum()) == mha_pairs
+
+
+def test_fused_index_agrees_with_the_pytorch_builder_under_gqa(device):
+    """Order-insensitive comparison, as everywhere else in this file.
+
+    The atomic cursor permutes each column, so the round-trip mask is the
+    comparable object rather than the raw arrays.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q, k = _gqa_qk(device, s=512, seed=1)
+
+    ours = csc_to_mask(build_csc_fused(q, k, cfg), 512)
+    ref = csc_to_mask(build_csc(q, k, cfg), 512)
+    assert ours.shape == (1, 8, 512, cfg.num_blocks(512))
+    assert torch.equal(ours, ref)
+
+
+def test_fused_entries_name_a_head_inside_their_own_group(device):
+    """A wrong kv-head divisor would file entries under the wrong column.
+
+    It would not crash and the shapes would be right; the kernel would simply
+    attend to another head's keys. Checked directly on the stored heads.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    b, h_q, h_kv, s = 1, 8, 2, 512
+    q, k = _gqa_qk(device, b=b, h_q=h_q, h_kv=h_kv, s=s)
+    group = h_q // h_kv
+
+    index = build_csc_fused(q, k, cfg)
+    for bi in range(b):
+        for kv in range(h_kv):
+            for blk in range(cfg.num_blocks(s)):
+                lo = int(index.col_offsets[bi, kv, blk])
+                cnt = int(index.col_nnz[bi, kv, blk])
+                heads = index.head_indices[bi, kv, lo:lo + cnt]
+                assert bool(((heads // group) == kv).all()), (
+                    f"column ({kv}, {blk}) holds a head outside its group"
+                )
