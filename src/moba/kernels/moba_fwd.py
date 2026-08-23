@@ -44,26 +44,42 @@ from moba.device import (
     round_up_to_tensor_core_tile,
     shared_memory_budget,
 )
+from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
 from moba.kernels.index_fused import build_csc_fused
 
 
 @triton.jit
 def _moba_attn_fwd(
-    Q, K, V, RowIdx, SlotIdx, ColOffsets, ColNnz, Order,
+    Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order,
     PartM, PartL, PartAcc,
     S, T, sm_scale, num_blocks,
     BLOCK_SIZE: tl.constexpr, GROUP: tl.constexpr, D: tl.constexpr,
-    K_SLOTS: tl.constexpr, CAUSAL: tl.constexpr,
+    K_SLOTS: tl.constexpr, H_Q: tl.constexpr, H_KV: tl.constexpr,
+    CAUSAL: tl.constexpr,
 ):
-    """One program per (KV block, batch-head).
+    """One program per (KV block, batch, key/value head).
 
     Writes un-normalized partials; nothing here is divided by a softmax
     denominator, because this program does not know the other programs'
     running maxima.
+
+    The grid follows what a program *owns*, which is a block of keys -- so it
+    is sized by key/value heads, and grouped-query attention shrinks it. The
+    queries streamed through it come from every query head sharing this
+    key/value head, so the query side is addressed by an explicit
+    (head, position) pair carried in the column rather than by the program id.
     """
     pid_col = tl.program_id(0)
     pid_bh = tl.program_id(1)
+
+    # Keys are what got shared, so `pid_bh` is a kv head and `kv_base` below is
+    # unchanged in form. Queries are wider: a batch holds H_Q of them, indexed
+    # by the head each entry names. At H_Q == H_KV this reduces to `pid_bh`
+    # exactly, which is why the multi-head path is untouched.
+    pid_b = pid_bh // H_KV
+    q_base = pid_b * H_Q * S * D
+    q_part_base = pid_b * H_Q * S * K_SLOTS
 
     # Longest-first dispatch (D8). Only the block id changes -- results are
     # written to query addresses, which never depended on the program id, so
@@ -92,12 +108,24 @@ def _moba_attn_fwd(
         live = offs < n
 
         rows = tl.load(RowIdx + pid_bh * T + lo + offs, mask=live, other=0)
+        heads = tl.load(HeadIdx + pid_bh * T + lo + offs, mask=live, other=0)
         slots = tl.load(SlotIdx + pid_bh * T + lo + offs, mask=live, other=0)
+
+        # One extra [GROUP] int32 gather -- 128 bytes against a 16 KiB K/V tile
+        # -- and one multiply-add. That is the entire inner-loop cost of
+        # grouped-query support: the tile shapes, register count and shared
+        # memory are untouched, because a longer column means more trips around
+        # this loop, not a wider tile. See
+        # `docs/learning/03-gqa-and-the-column-merge.md`.
+        #
+        # `rows` deliberately stays a raw position, so the causal comparison
+        # below needs no change and no runtime integer modulo appears here.
+        q_row = heads * S + rows
 
         # Gathered rows (D7). One row is D*itemsize bytes -- exactly one
         # 128-byte cache line at D=64 bf16 -- so this costs the same
         # transaction count as a contiguous read. Measured at 1.03x.
-        q = tl.load(Q + kv_base + rows[:, None] * D + offs_d[None, :],
+        q = tl.load(Q + q_base + q_row[:, None] * D + offs_d[None, :],
                     mask=live[:, None], other=0.0)
 
         # Masks are *added* into a zeroed accumulator before the matmul, not
@@ -152,12 +180,11 @@ def _moba_attn_fwd(
         # Fixed-slot destination (D10). Task 1 guarantees each (query, slot)
         # pair is written by exactly one program, so these scattered stores
         # never collide.
-        dst = rows * K_SLOTS + slots
-        tl.store(PartM + pid_bh * S * K_SLOTS + dst, m, mask=live)
-        tl.store(PartL + pid_bh * S * K_SLOTS + dst, l, mask=live)
+        dst = q_row * K_SLOTS + slots
+        tl.store(PartM + q_part_base + dst, m, mask=live)
+        tl.store(PartL + q_part_base + dst, l, mask=live)
         tl.store(
-            PartAcc + pid_bh * S * K_SLOTS * D
-            + dst[:, None] * D + offs_d[None, :],
+            PartAcc + q_part_base * D + dst[:, None] * D + offs_d[None, :],
             acc,
             mask=live[:, None],
         )
@@ -562,16 +589,24 @@ def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
     Args:
         q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H, S, D].
-        v: Values shaped [B, H, S, D].
+        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+            key/value heads than query heads is grouped-query attention.
+        v: Values, same shape as `k`.
         cfg: Configuration.
 
     Raises:
-        ValueError: If shapes disagree, or head_dim or block_size is
-            unsupported.
+        ValueError: If shapes disagree, if the head counts do not divide, or
+            if head_dim or block_size is unsupported.
     """
-    if not (q.shape == k.shape == v.shape):
+    if k.shape != v.shape:
+        raise ValueError(f"key/value shape mismatch: {k.shape}, {v.shape}")
+    if q.shape[0] != k.shape[0] or q.shape[2:] != k.shape[2:]:
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
+
+    # Grouped-query attention is a shape property, not a configuration one:
+    # the group size is H_q // H_kv and there is nowhere else it could be
+    # stated. Raises if the counts do not divide.
+    head_group_size(q.shape[1], k.shape[1])
     ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
     if not ok:
         raise ValueError(reason)
@@ -656,8 +691,8 @@ def attend_partials(
 
     Args:
         q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H, S, D], contiguous.
-        v: Values shaped [B, H, S, D], contiguous.
+        k: Keys shaped [B, H_kv, S, D], contiguous, where `H_kv` divides `H`.
+        v: Values, same shape as `k`.
         cfg: Configuration.
         index: Precomputed CSC index.
         causal: Whether to apply causal masking within the query's own block.
@@ -676,7 +711,8 @@ def attend_partials(
         units; `combine_partials` expects that and no other consumer
         exists.
     """
-    b, h, s, d = q.shape
+    b, h_q, s, d = q.shape
+    h_kv = k.shape[1]
     slots = index.max_slots
 
     if partials_dtype is None:
@@ -701,24 +737,31 @@ def attend_partials(
     # is a proposal; Triton raises OutOfResources at compile time, before any
     # argument is read, so a rejected attempt leaves nothing to undo. The
     # winner is cached, making this a one-time cost per configuration.
-    key = (cfg.block_size, d, q.element_size(), slots, causal,
+    #
+    # The head group is in the key even though it changes no allocation: a
+    # stale entry would be very hard to diagnose, and the key is free.
+    key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
            torch.cuda.get_device_capability(q.device))
     cached = _GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
                   else group_candidates(cfg, d, q.element_size(), q.device))
 
+    # One program per (KV block, batch, kv head). Grouped-query attention
+    # shrinks this grid by the group size and lengthens each program's column
+    # by the same factor -- identical total work, `group` times fewer K and V
+    # loads, which is the whole gain.
     for group in candidates:
         try:
-            _moba_attn_fwd[(index.num_blocks, b * h)](
+            _moba_attn_fwd[(index.num_blocks, b * h_kv)](
                 q, k, v,
-                index.row_indices, index.slot_of_pair,
+                index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,
                 part_m, part_l, part_acc,
                 s, index.row_indices.shape[-1],
                 d ** -0.5 * LOG2_E,
                 index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-                K_SLOTS=slots, CAUSAL=causal,
+                K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
             )
         except OutOfResources:
             continue
@@ -745,8 +788,8 @@ def moba_forward(
 
     Args:
         q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H, S, D], contiguous.
-        v: Values shaped [B, H, S, D], contiguous.
+        k: Keys shaped [B, H_kv, S, D], contiguous, where `H_kv` divides `H`.
+        v: Values, same shape as `k`.
         cfg: Configuration.
         index: Precomputed CSC index; built from `q` and `k` when omitted
             with the fused device-side gate. Passing one explicitly holds

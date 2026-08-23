@@ -342,7 +342,9 @@ def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
     budget = shared_memory_budget(q.device)
 
     attend_partials(q, k, v, cfg, index)
-    key = (block_size, head_dim, q.element_size(), index.max_slots, True,
+    # The head-group size is part of the key; 1 here, since `make_qkv` gives
+    # q, k and v the same head count.
+    key = (block_size, head_dim, q.element_size(), index.max_slots, True, 1,
            torch.cuda.get_device_capability(q.device))
     used = _GROUP_CACHE[key]
 
@@ -361,14 +363,16 @@ def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
 
 def _compile_attn(q, k, v, cfg, index, group):
     """Launches the attention kernel at a given chunk height."""
-    b, h, s, d = q.shape
+    b, h_q, s, d = q.shape
+    h_kv = k.shape[1]
     part_m, part_l, part_acc = empty_partials(
         q.shape, index.max_slots, q.device, q.dtype)
     part_m.fill_(float("-inf"))
-    return _moba_attn_fwd[(index.num_blocks, b * h)](
-        q, k, v, index.row_indices, index.slot_of_pair, index.col_offsets,
+    return _moba_attn_fwd[(index.num_blocks, b * h_kv)](
+        q, k, v, index.row_indices, index.head_indices, index.slot_of_pair,
+        index.col_offsets,
         index.col_nnz, index.order, part_m, part_l, part_acc,
         s, index.row_indices.shape[-1], d ** -0.5 * 1.4426950408889634,
         index.num_blocks, BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-        K_SLOTS=index.max_slots, CAUSAL=True,
+        K_SLOTS=index.max_slots, H_Q=h_q, H_KV=h_kv, CAUSAL=True,
     )

@@ -1,0 +1,137 @@
+"""Grouped-query attention end to end, forward and backward.
+
+Every test here is anchored the same way: the GQA kernel must agree with the
+*same code path* run on expanded key/value heads. That comparison isolates the
+head-sharing logic from everything else -- arithmetic, routing and tuning are
+identical on both sides, so a disagreement can only be an indexing bug.
+
+The failure mode this is defending against does not crash. A wrong head mapping
+produces a well-formed index of the right shape holding plausible numbers, and
+the kernel attends to another head's keys. Shape assertions cannot see it.
+
+See `docs/superpowers/plans/2026-08-23-gqa-support.md` and
+`docs/learning/03-gqa-and-the-column-merge.md`.
+"""
+
+import pytest
+import torch
+
+from moba.config import MoBAConfig
+from moba.heads import expand_kv
+from moba.kernels.index import csc_to_mask
+from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.moba_fwd import moba_forward
+from moba.ref.naive import moba_attention_naive
+from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
+
+# (batch, query heads, kv heads, seq_len, head_dim). Small on purpose: 4 GiB of
+# VRAM, and grouped-query attention lengthens every column, so a shape that fit
+# under multi-head attention may not fit here.
+GQA_SHAPES = [
+    (1, 4, 1, 512, 64),     # group 4 -- the multi-query extreme
+    (1, 8, 2, 512, 64),     # group 4
+    (1, 4, 4, 512, 64),     # group 1 -- must reproduce plain MHA exactly
+    (1, 4, 2, 1024, 128),   # group 2, head_dim 128
+]
+GQA_GATES = [(64, 4), (128, 8)]
+
+
+def _shapes(shape, dtype, device, seed=0):
+    """Returns (q, k, v) with the query and key/value head counts of `shape`."""
+    b, h_q, h_kv, s, d = shape
+    gen = torch.Generator(device=device).manual_seed(seed)
+    q = torch.randn(b, h_q, s, d, generator=gen, device=device, dtype=dtype)
+    k = torch.randn(b, h_kv, s, d, generator=gen, device=device, dtype=dtype)
+    v = torch.randn(b, h_kv, s, d, generator=gen, device=device, dtype=dtype)
+    return q, k, v
+
+
+@pytest.mark.parametrize("shape", GQA_SHAPES)
+@pytest.mark.parametrize("gate", GQA_GATES)
+def test_forward_matches_the_oracle_under_gqa(device, shape, gate):
+    """Routing held fixed, so this measures arithmetic and not gate flips.
+
+    The gate is discontinuous in its inputs -- a ranking, so a near-tie can
+    swap under a dtype change and send a query to entirely different keys.
+    Passing the kernel's own selection to the oracle removes that from the
+    measurement; see `moba.tolerance`.
+    """
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    b, h_q, h_kv, s, d = shape
+
+    q64, k64, v64 = _shapes(shape, torch.float64, device)
+    qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
+
+    index = build_csc_fused(qb, kb, cfg)
+    selected = csc_to_mask(index, s)
+    assert selected.shape == (b, h_q, s, cfg.num_blocks(s))
+
+    truth = moba_attention_naive(q64, k64, v64, cfg, selected=selected)
+    ref = moba_attention_naive(qb, kb, vb, cfg, selected=selected)
+    ours = moba_forward(qb, kb, vb, cfg, index=index)
+
+    assert ours.shape == (b, h_q, s, d)
+    cap = max(TOLERANCE_FACTOR * max_abs_error(ref, truth), TOLERANCE_FLOOR)
+    err = max_abs_error(ours, truth)
+    assert err <= cap, (
+        f"forward error {err:.3e} exceeds {cap:.3e} "
+        f"({TOLERANCE_FACTOR}x the bfloat16 oracle's)"
+    )
+
+
+@pytest.mark.parametrize("gate", GQA_GATES)
+def test_gqa_forward_equals_the_kernel_on_expanded_heads(device, gate):
+    """The sharing must be free of arithmetic consequences.
+
+    Expanding K/V and running the ordinary multi-head path poses the identical
+    mathematical problem. Results differ only by summation order within a
+    column, whose entries an atomic cursor permutes -- hence allclose rather
+    than bitwise. `test_index_fused` pins the routing itself exactly.
+    """
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    q, k, v = _shapes((1, 8, 2, 512, 64), torch.bfloat16, device)
+
+    narrow = moba_forward(q, k, v, cfg)
+    wide = moba_forward(q, expand_kv(k, 8), expand_kv(v, 8), cfg)
+    assert torch.allclose(narrow, wide, rtol=2e-2, atol=1e-3), (
+        f"max {max_abs_error(narrow, wide):.3e}"
+    )
+
+
+def test_every_query_head_receives_output_under_gqa(device):
+    """No query head may be left unwritten.
+
+    `attend_partials` allocates uninitialized and relies on every (query, slot)
+    pair being written by exactly one program. If the head axis were dropped
+    anywhere in the chain, some heads would return whatever the allocator held
+    -- which is finite, plausible, and silent.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q, k, v = _shapes((1, 8, 2, 512, 64), torch.bfloat16, device, seed=3)
+
+    out = moba_forward(q, k, v, cfg)
+    assert bool(torch.isfinite(out).all()), "a head returned non-finite output"
+    per_head = out.abs().amax(dim=(0, 2, 3))
+    assert bool((per_head > 0).all()), (
+        f"a query head produced an all-zero output: {per_head.tolist()}"
+    )
+
+
+def test_indivisible_head_counts_are_rejected_at_the_boundary(device):
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, 3, 256, 64, dtype=torch.bfloat16, device=device)
+    with pytest.raises(ValueError, match="divisible"):
+        moba_forward(q, k, k, cfg)
+
+
+def test_mismatched_key_and_value_shapes_are_rejected(device):
+    """K and V must still agree with each other, GQA or not."""
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, 2, 256, 64, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, 4, 256, 64, dtype=torch.bfloat16, device=device)
+    with pytest.raises(ValueError, match="key/value"):
+        moba_forward(q, k, v, cfg)
