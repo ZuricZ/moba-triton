@@ -59,6 +59,24 @@ packed — token-major. NSA supports both from one kernel via a `head_first` fla
   `q_row = rows * H_Q + heads`). Not a rewrite. The larger cost is the test and
   benchmark churn, not the kernels.
 
+**Concrete cost carried today: `pack` is a strided gather.**
+
+FlashAttention's `bert_padding.py` implements packing as
+`torch.gather` along axis 0 of a `(b s) ...`-flattened tensor
+(`IndexFirstAxis.forward`), with a hand-written backward using `scatter_`. One
+token is one contiguous row, so the gather is a sequence of `H*D`-byte memcpys.
+
+Ours cannot be that. In `[B, H, S, D]` a token's data is `H` separate runs of
+`D` elements, each `S*D` apart, so `pack` gathers along dim 2 and each token
+costs `H` short transactions rather than one long one. At `H=8, D=64, bf16`
+that is eight 128-byte pieces instead of one 1024-byte piece.
+
+The mitigations are that packing runs **once per batch at data-prep time**, not
+per forward, and that 128 bytes is still a full cache line on this card, so the
+transaction count rises but each transaction is not wasted. It is a real
+deficiency, not a fatal one — but it is the second concrete cost of DD-1 after
+the caller-side transpose, and both point the same way.
+
 **Revisit when any of these becomes true.**
 
 * The project acquires users outside its own benchmark suite — anyone
@@ -68,6 +86,9 @@ packed — token-major. NSA supports both from one kernel via a `head_first` fla
   be the common case.
 * A head-to-head against FlashMoBA on rented hardware shows measurable time
   going into layout conversion at the benchmark boundary.
+* `pack` shows up in a profile. It runs once per batch, so it should not — but
+  if batches are small and frequent, the strided gather above stops being
+  amortized.
 
 **Do not revisit before** the varlen work is complete and green. Layout is an
 API-wide change, and doing it while a feature is half-built would mix two

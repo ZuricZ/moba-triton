@@ -139,19 +139,86 @@ def select_blocks(
 
 
 def moba_selection(
-    q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cfg: MoBAConfig,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Convenience wrapper: pools keys and returns the block selection mask.
 
     Args:
-        q: Queries shaped [B, H, S, D].
+        q: Queries shaped [B, H, S, D], or [1, H, T, D] when packed.
         k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`.
         cfg: Configuration.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1]. When given,
+            `q` and `k` hold one packed batch and `B` must be 1.
 
     Returns:
-        Boolean selection mask shaped [B, H, S, num_blocks].
+        Boolean selection mask shaped [B, H, S, num_blocks]. When packed, block
+        ids are **sequence-local** and the last axis is sized by the *longest*
+        sequence's block count -- a column `j` means "block j of my own
+        sequence". A global numbering would need a mask `total_blocks` wide,
+        almost entirely false, growing with the batch for no information.
+        `moba.kernels.index.csc_to_mask` reproduces this convention.
+
+    Raises:
+        ValueError: If `cu_seqlens` is given and the batch axis is not 1.
     """
-    return select_blocks(q, block_representatives(k, cfg), cfg)
+    if cu_seqlens is None:
+        return select_blocks(q, block_representatives(k, cfg), cfg)
+
+    _require_packed(q)
+    bounds = cu_seqlens.tolist()
+    spans = list(zip(bounds[:-1], bounds[1:]))
+    width = max(cfg.num_blocks(hi - lo) for lo, hi in spans)
+    out = torch.zeros(1, q.shape[1], q.shape[2], width, dtype=torch.bool,
+                      device=q.device)
+    for lo, hi in spans:
+        piece = moba_selection(q[:, :, lo:hi], k[:, :, lo:hi], cfg)
+        out[:, :, lo:hi, :piece.shape[-1]] = piece
+    return out
+
+
+def _require_packed(q: torch.Tensor) -> None:
+    """Raises unless `q` carries a packed batch.
+
+    Packed mode pins the batch axis to 1 and puts every sequence on the token
+    axis; there is no rectangle left to have a batch of. fla-org's NSA asserts
+    the same thing (`ops/naive.py:84`).
+    """
+    if q.shape[0] != 1:
+        raise ValueError(
+            f"packed input must have batch 1, got {q.shape[0]}; every sequence "
+            f"lives on the token axis and cu_seqlens says where"
+        )
+
+
+def _packed_naive(q, k, v, cfg, cu_seqlens, selected, query_chunk):
+    """Runs each packed sequence through the rectangular oracle, alone.
+
+    Deliberately a Python loop. This is the oracle: one line per line of the
+    algorithm, and "a packed batch means each sequence attends alone" is the
+    definition being encoded. fla-org's NSA does the same in its reference
+    (`ops/naive.py:111`), and FSA's *production* path still does
+    (`FSA_topk_sparse_attention.py:583`, with a TODO to fuse it) -- fusing is
+    the kernel's job, not the definition's.
+
+    A precomputed `selected` is sliced per sequence and trimmed to that
+    sequence's own block count, matching the sequence-local convention
+    `moba_selection` documents.
+    """
+    _require_packed(q)
+    out = torch.empty_like(q)
+    bounds = cu_seqlens.tolist()
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        piece = None
+        if selected is not None:
+            piece = selected[:, :, lo:hi, :cfg.num_blocks(hi - lo)]
+        out[:, :, lo:hi] = moba_attention_naive(
+            q[:, :, lo:hi], k[:, :, lo:hi], v[:, :, lo:hi], cfg,
+            selected=piece, query_chunk=query_chunk,
+        )
+    return out
 
 
 def moba_attention_naive(
@@ -161,6 +228,7 @@ def moba_attention_naive(
     cfg: MoBAConfig,
     selected: torch.Tensor | None = None,
     query_chunk: int | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention the slow, obvious way.
 
@@ -185,6 +253,10 @@ def moba_attention_naive(
         cfg: Configuration.
         selected: Optional precomputed selection mask shaped
             [B, H, S, num_blocks]. Computed from `q` and `k` when omitted.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1]. When given,
+            the inputs hold one packed batch, `B` must be 1, and each sequence
+            is attended independently -- no query may see another sequence's
+            keys.
         query_chunk: If set, process queries in row-blocks of this size,
             reducing peak memory from O(S^2) to O(query_chunk * S). Purely a
             memory optimization -- results are unchanged.
@@ -200,6 +272,9 @@ def moba_attention_naive(
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
     """
+    if cu_seqlens is not None:
+        return _packed_naive(q, k, v, cfg, cu_seqlens, selected, query_chunk)
+
     b, h, s, d = q.shape
     scale = d ** -0.5
 
