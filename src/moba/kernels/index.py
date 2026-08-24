@@ -63,6 +63,13 @@ class CSCIndex:
         max_slots: `top_k`; the number of partial slots reserved per query.
         num_query_heads: H_q. Equal to `col_nnz.shape[1]` for multi-head
             attention, a multiple of it under grouped-query attention.
+        cu_seqlens: Cumulative token counts when this index describes a packed
+            batch, else None. Carried so the attention and backward kernels need
+            no extra argument, and so a mismatched index cannot silently be used
+            with the wrong mode.
+        max_seqlen: Longest sequence of a packed batch, else None. `num_blocks`
+            is `cdiv(max_seqlen, block_size)` in that case -- the *padded index*
+            of a packed batch, one row per sequence.
     """
 
     col_nnz: torch.Tensor
@@ -74,6 +81,8 @@ class CSCIndex:
     num_blocks: int
     max_slots: int
     num_query_heads: int
+    cu_seqlens: torch.Tensor | None = None
+    max_seqlen: int | None = None
 
 
 def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
@@ -185,14 +194,22 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
         seq_len: Sequence length.
 
     Returns:
-        Boolean mask shaped [B, H_q, seq_len, num_blocks]. Columns are keyed
-        by kv head, but the mask this reconstructs is per query head, so
-        `head_indices` is what routes each entry back.
+        Boolean mask shaped [B, H_q, seq_len, num_blocks], or
+        [1, H_q, T, num_blocks] when the index describes a packed batch --
+        rows are packed token indices and block ids are sequence-local, the
+        same convention `moba.ref.naive.moba_selection` produces. Columns are
+        keyed by kv head, but the mask is per query head, so `head_indices` is
+        what routes each entry back.
     """
     b, h_kv, n = index.col_nnz.shape
+    packed = index.cu_seqlens is not None
+
+    # Packed: one batch axis of 1, because rows are packed token indices and
+    # every sequence shares the token axis. The block axis stays sequence-local
+    # and `n` wide, matching `moba.ref.naive.moba_selection`'s convention.
     out = torch.zeros(
-        b, index.num_query_heads, seq_len, n, dtype=torch.bool,
-        device=index.col_nnz.device
+        1 if packed else b, index.num_query_heads, seq_len, n,
+        dtype=torch.bool, device=index.col_nnz.device
     )
     for bi in range(b):
         for kv in range(h_kv):
@@ -201,5 +218,5 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
                 cnt = int(index.col_nnz[bi, kv, blk])
                 rows = index.row_indices[bi, kv, lo:lo + cnt].long()
                 heads = index.head_indices[bi, kv, lo:lo + cnt].long()
-                out[bi, heads, rows, blk] = True
+                out[0 if packed else bi, heads, rows, blk] = True
     return out

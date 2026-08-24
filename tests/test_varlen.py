@@ -178,3 +178,112 @@ def test_max_seqlen_is_required_when_packing(device):
     kbar = torch.randn(4, 2, 5, 16, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="max_seqlen"):
         gate_select(q, kbar, cfg, cu_seqlens=cu)
+
+
+def test_columns_keep_a_batch_axis_and_hold_only_their_sequence(device):
+    """Pack the data, pad the index (D-VL-3).
+
+    Block ids are sequence-local, so a column is `(b, kv_head, local_block)` and
+    the CSC arrays keep a real batch axis -- exactly FlashMoBA's
+    `moba_col_offsets: (batch_size, num_heads, max_lg_col_num)` alongside a
+    packed `q`. The data is O(T*H*D) and worth packing; this metadata is
+    O(B*H*NB) and is not.
+    """
+    from moba.kernels.index_fused import build_csc_fused
+
+    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, _ = _packed(device, torch.bfloat16)
+
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    assert index.col_nnz.shape == (4, 2, 5)        # B, H_kv, NB
+    assert index.num_blocks == 5
+
+    for b, (lo, n) in enumerate(zip(CU[:-1], LENS)):
+        for kv in range(2):
+            for blk in range(index.num_blocks):
+                cnt = int(index.col_nnz[b, kv, blk])
+                if cnt == 0:
+                    continue
+                off = int(index.col_offsets[b, kv, blk])
+                rows = index.row_indices[b, kv, off:off + cnt]
+                assert bool(((rows >= lo) & (rows < lo + n)).all()), (
+                    f"column ({b}, {kv}, {blk}) holds a query from another "
+                    f"sequence; rows {rows.tolist()} outside [{lo}, {lo + n})"
+                )
+
+
+def test_no_column_exists_past_a_sequences_own_block_count(device):
+    """Padded index slots must stay empty, not merely unread.
+
+    A sequence of 5 tokens has 2 blocks at block_size 4, but its row of the
+    padded index is 5 wide. Slots 2..4 describe blocks that do not exist; if
+    anything ever landed there the attention kernel would launch a program for
+    a block whose keys are another document's.
+    """
+    from moba.kernels.index_fused import build_csc_fused
+
+    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, _ = _packed(device, torch.bfloat16, seed=5)
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+
+    for b, n in enumerate(LENS):
+        own = -(-n // cfg.block_size)
+        beyond = index.col_nnz[b, :, own:]
+        assert not bool(beyond.any()), (
+            f"sequence {b} has {own} blocks but its index describes "
+            f"{int((index.col_nnz[b] > 0).sum())} non-empty columns"
+        )
+
+
+def test_index_round_trips_to_the_gate_under_packing(device):
+    """The transpose must be lossless, and in sequence-local ids.
+
+    A wrong transpose does not crash -- it attends to the wrong keys and
+    returns plausible numbers -- so the round trip is what makes it visible.
+    """
+    from moba.kernels.index import csc_to_mask
+    from moba.kernels.index_fused import build_csc_fused
+    from moba.ref.naive import moba_selection
+
+    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, _ = _packed(device, torch.bfloat16, seed=6)
+
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    got = csc_to_mask(index, TOTAL)
+    assert got.shape == (1, 2, TOTAL, 5)
+    assert int(got.sum()) == int(index.col_nnz.sum()), "entries were lost"
+
+    # The oracle uses the same sequence-local convention, established in
+    # `moba_selection`'s docstring.
+    assert torch.equal(got, moba_selection(q, k, cfg, cu_seqlens=cu))
+
+
+def test_slots_stay_unique_per_query_under_packing(device):
+    """Two entries for one query with the same slot would collide in `part_acc`.
+
+    Slots address the partial buffers, which are indexed by (packed token,
+    slot). Packing changes what a row index means, so this is worth re-pinning.
+    """
+    from moba.kernels.index_fused import build_csc_fused
+
+    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, _ = _packed(device, torch.bfloat16, seed=7)
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+
+    seen = set()
+    for b in range(4):
+        for kv in range(2):
+            for blk in range(index.num_blocks):
+                cnt = int(index.col_nnz[b, kv, blk])
+                off = int(index.col_offsets[b, kv, blk])
+                for i in range(off, off + cnt):
+                    key = (int(index.head_indices[b, kv, i]),
+                           int(index.row_indices[b, kv, i]),
+                           int(index.slot_of_pair[b, kv, i]))
+                    assert key not in seen, f"duplicate (head, query, slot): {key}"
+                    seen.add(key)
+                    assert key[2] < cfg.top_k, "slot outside the budget"

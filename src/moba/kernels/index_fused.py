@@ -40,6 +40,7 @@ from moba.device import TENSOR_CORE_TILE
 from moba.kernels.gate import block_representatives_triton, gate_select
 from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
+from moba.packing import validate_cu_seqlens
 
 # Queries per program for the count and scatter passes. Both are pure
 # scatter-with-atomics over `S * top_k` entries, so this only trades program
@@ -49,10 +50,10 @@ INDEX_BLOCK_M = 128
 
 @triton.jit
 def _count_columns(
-    BlockIdx, ColNnz,
-    S,
+    BlockIdx, ColNnz, CuSeqlens,
+    S, T,
     TOP_K: tl.constexpr, N_BLOCKS: tl.constexpr, BLOCK_M: tl.constexpr,
-    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr,
+    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr, VARLEN: tl.constexpr,
 ):
     """Counts how many queries selected each block.
 
@@ -65,14 +66,30 @@ def _count_columns(
     rises by the group size, on an int32 array of `num_blocks` entries that
     stays resident in L2.
     """
-    offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
-    live = offs < S
 
     kv_bh = (pid_bh // H_Q) * (H_Q // Q_PER_KV) + (pid_bh % H_Q) // Q_PER_KV
 
+    if VARLEN:
+        # Same split as the gate: `offs` is the packed token index that
+        # addresses BlockIdx, `local` bounds the tile against this sequence.
+        b = pid_bh // H_Q
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        if pid_m * BLOCK_M >= eos - bos:
+            return
+        local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs = bos + local
+        live = local < eos - bos
+        idx_base = (pid_bh % H_Q) * T * TOP_K
+    else:
+        offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        live = offs < S
+        idx_base = pid_bh * S * TOP_K
+
     for j in tl.static_range(TOP_K):
-        blk = tl.load(BlockIdx + pid_bh * S * TOP_K + offs * TOP_K + j,
+        blk = tl.load(BlockIdx + idx_base + offs * TOP_K + j,
                       mask=live, other=-1)
         ok = live & (blk >= 0)
         # A padding slot carries -1, which would address before the array.
@@ -122,10 +139,10 @@ def _offsets_and_order(
 
 @triton.jit
 def _scatter_pairs(
-    BlockIdx, ColOffsets, Cursor, RowIdx, HeadIdx, SlotIdx,
-    S, T,
+    BlockIdx, ColOffsets, Cursor, RowIdx, HeadIdx, SlotIdx, CuSeqlens,
+    S, T, TOKENS,
     TOP_K: tl.constexpr, N_BLOCKS: tl.constexpr, BLOCK_M: tl.constexpr,
-    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr,
+    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr, VARLEN: tl.constexpr,
 ):
     """Writes each (query head, query, slot) triple into its column's region.
 
@@ -137,15 +154,29 @@ def _scatter_pairs(
     head -- every query head sharing that kv head writes into the same column.
     Reading `RowIdx` alone would not say whose query an entry was.
     """
-    offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
-    live = offs < S
 
     kv_bh = (pid_bh // H_Q) * (H_Q // Q_PER_KV) + (pid_bh % H_Q) // Q_PER_KV
     q_head = pid_bh % H_Q
 
+    if VARLEN:
+        b = pid_bh // H_Q
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        if pid_m * BLOCK_M >= eos - bos:
+            return
+        local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs = bos + local
+        live = local < eos - bos
+        idx_base = q_head * TOKENS * TOP_K
+    else:
+        offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        live = offs < S
+        idx_base = pid_bh * S * TOP_K
+
     for j in tl.static_range(TOP_K):
-        blk = tl.load(BlockIdx + pid_bh * S * TOP_K + offs * TOP_K + j,
+        blk = tl.load(BlockIdx + idx_base + offs * TOP_K + j,
                       mask=live, other=-1)
         ok = live & (blk >= 0)
         safe = tl.where(ok, blk, 0)
@@ -163,6 +194,8 @@ def _scatter_pairs(
 def build_csc_from_indices(
     block_idx: torch.Tensor, num_blocks: int, cfg: MoBAConfig,
     num_kv_heads: int | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> CSCIndex:
     """Assembles a CSC index from per-query selected block ids.
 
@@ -176,6 +209,12 @@ def build_csc_from_indices(
             heads share a column, so the column list is `group` times longer
             and there are `group` times fewer of them -- see
             `docs/learning/03-gqa-and-the-column-merge.md`.
+        cu_seqlens: Cumulative token counts. When given, `block_idx` holds one
+            packed batch with a pinned batch axis of 1, and `num_blocks` is the
+            *longest* sequence's block count -- the padded index of a packed
+            batch. Block ids are sequence-local, so the transpose itself is
+            unchanged: it is handed the same small integers it always was.
+        max_seqlen: Longest sequence, required with `cu_seqlens`.
 
     Returns:
         A populated CSCIndex. Query indices within a column are in arbitrary
@@ -185,32 +224,61 @@ def build_csc_from_indices(
     h_kv = h_q if num_kv_heads is None else num_kv_heads
     group = head_group_size(h_q, h_kv)
     device = block_idx.device
-    bh_kv = b * h_kv
+    varlen = cu_seqlens is not None
+
+    if varlen:
+        if b != 1:
+            raise ValueError(
+                f"packed block ids must have batch 1, got {b}"
+            )
+        if max_seqlen is None:
+            raise ValueError("max_seqlen is required when cu_seqlens is given")
+        n_seq = validate_cu_seqlens(cu_seqlens, total_tokens=s,
+                                    max_seqlen=max_seqlen)
+        rows_per_seq = max_seqlen
+    else:
+        n_seq = b
+        rows_per_seq = s
+
+    bh_kv = n_seq * h_kv
 
     # Upper bound per column array: every query of every head in the group may
     # select up to top_k blocks. The pair count is unchanged from multi-head --
-    # `group` times more entries in `group` times fewer arrays.
-    total = group * s * cfg.top_k
+    # `group` times more entries in `group` times fewer arrays. Packed, the
+    # bound is per *sequence*, so it is the longest one that sizes the array.
+    total = group * rows_per_seq * cfg.top_k
 
     block_idx = block_idx.contiguous()
-    col_nnz = torch.zeros(b, h_kv, num_blocks, dtype=torch.int32, device=device)
-    col_offsets = torch.zeros(b, h_kv, num_blocks + 1, dtype=torch.int32,
+    col_nnz = torch.zeros(n_seq, h_kv, num_blocks, dtype=torch.int32,
+                          device=device)
+    col_offsets = torch.zeros(n_seq, h_kv, num_blocks + 1, dtype=torch.int32,
                               device=device)
-    order = torch.zeros(b, h_kv, num_blocks, dtype=torch.int32, device=device)
-    cursor = torch.zeros(b, h_kv, num_blocks, dtype=torch.int32, device=device)
-    row_indices = torch.zeros(b, h_kv, total, dtype=torch.int32, device=device)
-    head_indices = torch.zeros(b, h_kv, total, dtype=torch.int32, device=device)
-    slot_of_pair = torch.zeros(b, h_kv, total, dtype=torch.int32, device=device)
+    order = torch.zeros(n_seq, h_kv, num_blocks, dtype=torch.int32,
+                        device=device)
+    cursor = torch.zeros(n_seq, h_kv, num_blocks, dtype=torch.int32,
+                         device=device)
+    row_indices = torch.zeros(n_seq, h_kv, total, dtype=torch.int32,
+                              device=device)
+    head_indices = torch.zeros(n_seq, h_kv, total, dtype=torch.int32,
+                               device=device)
+    slot_of_pair = torch.zeros(n_seq, h_kv, total, dtype=torch.int32,
+                               device=device)
 
     # Count and scatter run per *query* head and write into kv-head columns:
     # they are the transpose. Offsets-and-order runs per kv head, because it
     # reduces over a column array that already exists.
-    grid = (triton.cdiv(s, INDEX_BLOCK_M), b * h_q)
+    grid = (triton.cdiv(rows_per_seq, INDEX_BLOCK_M), n_seq * h_q)
+    ptr = cu_seqlens if varlen else block_idx
     _count_columns[grid](
-        block_idx, col_nnz, s,
+        block_idx, col_nnz, ptr, s, s,
         TOP_K=top_k, N_BLOCKS=num_blocks, BLOCK_M=INDEX_BLOCK_M,
-        H_Q=h_q, Q_PER_KV=group,
+        H_Q=h_q, Q_PER_KV=group, VARLEN=varlen,
     )
+    # Per kv head, and unchanged. `N_BLOCKS` here is one *sequence's* block
+    # count even when packed, because block ids stay sequence-local -- which is
+    # what keeps this kernel's `static_range(N_BLOCKS)` reduction the size it is
+    # in the padded path. Global numbering would have multiplied it by the
+    # batch.
     _offsets_and_order[(bh_kv,)](
         col_nnz, col_offsets, order,
         N_BLOCKS=num_blocks,
@@ -218,9 +286,9 @@ def build_csc_from_indices(
     )
     _scatter_pairs[grid](
         block_idx, col_offsets, cursor, row_indices, head_indices,
-        slot_of_pair, s, total,
+        slot_of_pair, ptr, s, total, s,
         TOP_K=top_k, N_BLOCKS=num_blocks, BLOCK_M=INDEX_BLOCK_M,
-        H_Q=h_q, Q_PER_KV=group,
+        H_Q=h_q, Q_PER_KV=group, VARLEN=varlen,
     )
 
     return CSCIndex(
@@ -233,11 +301,17 @@ def build_csc_from_indices(
         num_blocks=num_blocks,
         max_slots=cfg.top_k,
         num_query_heads=h_q,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=max_seqlen,
     )
 
 
 def build_csc_fused(
-    q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cfg: MoBAConfig,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> CSCIndex:
     """Builds the index entirely on device, replacing `build_csc`.
 
@@ -247,14 +321,23 @@ def build_csc_fused(
     path needed -- ~230 us each on WSL -- are gone entirely.
 
     Args:
-        q: Queries shaped [B, H, S, D].
+        q: Queries shaped [B, H, S, D], or [1, H, T, D] when packed.
         k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`.
         cfg: Configuration.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
+            given, the inputs hold one packed batch and `B` must be 1.
+        max_seqlen: Longest sequence, required with `cu_seqlens`.
 
     Returns:
-        A populated CSCIndex.
+        A populated CSCIndex. Packed, its column arrays keep a real batch axis
+        of one row per sequence while the data stayed packed -- see the varlen
+        plan's D-VL-3.
     """
-    kbar = block_representatives_triton(k, cfg)
-    block_idx = gate_select(q, kbar, cfg)
+    kbar = block_representatives_triton(k, cfg, cu_seqlens=cu_seqlens,
+                                        max_seqlen=max_seqlen)
+    block_idx = gate_select(q, kbar, cfg, cu_seqlens=cu_seqlens,
+                            max_seqlen=max_seqlen)
     return build_csc_from_indices(block_idx, kbar.shape[2], cfg,
-                                  num_kv_heads=k.shape[1])
+                                  num_kv_heads=k.shape[1],
+                                  cu_seqlens=cu_seqlens,
+                                  max_seqlen=max_seqlen)
