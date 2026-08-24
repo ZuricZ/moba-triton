@@ -82,13 +82,13 @@ GATE_WARPS = 4
 
 @triton.jit
 def _moba_gate_fwd(
-    Q, Kbar, BlockIdx,
-    S, sm_scale,
+    Q, Kbar, BlockIdx, CuSeqlens,
+    S, T, sm_scale,
     BLOCK_SIZE: tl.constexpr, BLOCK_M: tl.constexpr, D: tl.constexpr,
     BLOCK_N: tl.constexpr, N_BLOCKS: tl.constexpr, K_POW2: tl.constexpr,
     CAPACITY: tl.constexpr, TAKE: tl.constexpr, TOP_K: tl.constexpr,
     ALWAYS_CURRENT: tl.constexpr,
-    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr,
+    H_Q: tl.constexpr, Q_PER_KV: tl.constexpr, VARLEN: tl.constexpr,
 ):
     """One program per (query tile, batch, query head). Emits selected block ids.
 
@@ -105,6 +105,20 @@ def _moba_gate_fwd(
     The merging of a group's selections into one list happens downstream, in
     the CSC transpose, which is the first stage that deals in blocks rather
     than queries. Nothing here gets longer under grouped-query attention.
+
+    Packed mode adds a sequence and changes nothing else. Because the grid is
+    per sequence, a tile belongs to exactly one of them, so `bos`, `eos` and the
+    candidate count are *scalars* -- and that is what keeps the streaming top-k
+    below a zero-line diff. A tile spanning two sequences would give its lanes
+    different candidate ranges, and a Triton program has one loop bound for all
+    its lanes.
+
+    The emitted ids are sequence-local in both modes, so nothing is added to
+    them on the way out. What the packed path must never do is offer a query a
+    block belonging to another sequence: the attention kernel's causal mask
+    compares packed token indices and is correct only because that cannot
+    happen. See the varlen plan's D-VL-7 and
+    `test_no_selected_block_crosses_a_sequence_boundary`.
     """
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -115,15 +129,44 @@ def _moba_gate_fwd(
     # which is why the multi-head path is untouched.
     kv_bh = (pid_bh // H_Q) * (H_Q // Q_PER_KV) + (pid_bh % H_Q) // Q_PER_KV
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    live = offs_m < S
     offs_d = tl.arange(0, D)
     slots = tl.arange(0, K_POW2)
 
-    q = tl.load(Q + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
+    if VARLEN:
+        # The batch comes from the grid, so every value here is a scalar.
+        # `offs_m` is the *packed* token index, used to address Q and the
+        # output; `local` is the position within the sequence, which is what
+        # decides the query's own block and the causal horizon. Confusing the
+        # two is invisible in the first sequence and wrong in every other one.
+        b = pid_bh // H_Q
+        hq = pid_bh % H_Q
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        seqlen = eos - bos
+        if pid_m * BLOCK_M >= seqlen:
+            return              # an over-launched tile: this sequence is short
+        local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = bos + local
+        live = local < seqlen
+        # This sequence's own block count. Distinct from N_BLOCKS, which stays
+        # the *stride* of Kbar and the sentinel for "no block" -- conflating
+        # them would let a query rank against another sequence's
+        # representatives.
+        n_cand = tl.cdiv(seqlen, BLOCK_SIZE)
+        q_base = hq * T * D
+        out_base = hq * T * TOP_K
+    else:
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        local = offs_m
+        live = offs_m < S
+        n_cand = N_BLOCKS
+        q_base = pid_bh * S * D
+        out_base = pid_bh * S * TOP_K
+
+    q = tl.load(Q + q_base + offs_m[:, None] * D + offs_d[None, :],
                 mask=live[:, None], other=0.0)
 
-    own_block = offs_m // BLOCK_SIZE
+    own_block = local // BLOCK_SIZE
 
     # --- The running top-k, held in registers for the whole kernel. ----------
     # `best_val` holds the k best scores seen so far and `best_idx` where each
@@ -162,11 +205,11 @@ def _moba_gate_fwd(
     # included, and it is expressible only because the trip count is a runtime
     # value rather than a tile width.
     horizon = tl.max(tl.where(live, own_block, 0))
-    n_chunks = tl.cdiv(tl.minimum(horizon, N_BLOCKS), BLOCK_N)
+    n_chunks = tl.cdiv(tl.minimum(horizon, n_cand), BLOCK_N)
 
     for c in range(0, n_chunks):
         cols = c * BLOCK_N + tl.arange(0, BLOCK_N)
-        in_range = cols < N_BLOCKS
+        in_range = cols < n_cand
 
         kbar = tl.load(
             Kbar + kv_bh * N_BLOCKS * D + cols[:, None] * D + offs_d[None, :],
@@ -257,7 +300,7 @@ def _moba_gate_fwd(
         nxt = tl.min(remaining, axis=1)
         valid = nxt < N_BLOCKS
         tl.store(
-            BlockIdx + pid_bh * S * TOP_K + offs_m * TOP_K + j,
+            BlockIdx + out_base + offs_m * TOP_K + j,
             tl.where(valid, nxt, -1).to(tl.int32),
             mask=live,
         )
@@ -268,7 +311,11 @@ def _moba_gate_fwd(
 
 
 def gate_select(
-    q: torch.Tensor, kbar: torch.Tensor, cfg: MoBAConfig
+    q: torch.Tensor,
+    kbar: torch.Tensor,
+    cfg: MoBAConfig,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> torch.Tensor:
     """Selects blocks for every query, returning ids rather than a dense mask.
 
@@ -280,18 +327,45 @@ def gate_select(
             it ranks, not how it ranks.
         cfg: Configuration supplying `block_size`, `top_k` and the selection
             conventions.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
+            given, `q` holds one packed batch and `B` must be 1.
+        max_seqlen: Longest sequence, required with `cu_seqlens`. It shapes the
+            launch grid; deriving it would cost a host synchronization.
 
     Returns:
         Selected block ids shaped [B, H, S, top_k], int32, ascending within
         each query and padded with -1. One row per *query* head regardless of
-        how many representative heads there were.
+        how many representative heads there were. Ids are **sequence-local** in
+        both modes: under packing, `j` means "block j of my own sequence".
 
     Raises:
-        ValueError: If the shapes disagree, or if the head counts do not
-            divide.
+        ValueError: If the shapes disagree, if the head counts do not divide,
+            if packed input has a batch axis above 1, or if `max_seqlen` is
+            missing.
     """
     b, h, s, d = q.shape
-    if kbar.shape[0] != b or kbar.shape[-1] != d:
+    block_m = max(TENSOR_CORE_TILE, GATE_BLOCK_M)
+    varlen = cu_seqlens is not None
+
+    # The packed checks run before the shape guard because they decide what the
+    # guard should expect: `q` carries a pinned batch of 1 while `kbar` carries
+    # one row per *sequence*, so comparing the two batch axes directly is only
+    # right in padded mode.
+    if varlen:
+        if b != 1:
+            raise ValueError(
+                f"packed input must have batch 1, got {b}; every sequence "
+                f"lives on the token axis and cu_seqlens says where"
+            )
+        if max_seqlen is None:
+            raise ValueError("max_seqlen is required when cu_seqlens is given")
+        n_seq = validate_cu_seqlens(cu_seqlens, total_tokens=s,
+                                    max_seqlen=max_seqlen)
+        expected_rows = n_seq
+    else:
+        expected_rows = b
+
+    if kbar.shape[0] != expected_rows or kbar.shape[-1] != d:
         raise ValueError(
             f"representative shape {tuple(kbar.shape)} does not match queries "
             f"{tuple(q.shape)}"
@@ -300,8 +374,15 @@ def gate_select(
     n = kbar.shape[2]
 
     q, kbar = q.contiguous(), kbar.contiguous()
-    block_m = max(TENSOR_CORE_TILE, GATE_BLOCK_M)
-    take = cfg.past_blocks_selected(n)
+
+    if varlen:
+        grid = (triton.cdiv(max_seqlen, block_m), n_seq * h)
+        # A query can never see more than its own sequence's blocks, so the
+        # budget is capped by the longest sequence rather than the packed total.
+        take = cfg.past_blocks_selected(cfg.num_blocks(max_seqlen))
+    else:
+        grid = (triton.cdiv(s, block_m), b * h)
+        take = cfg.past_blocks_selected(n)
 
     # Room for `take` past blocks plus the seeded current one. Rounded to a
     # power of two because `tl.arange` requires it.
@@ -311,9 +392,9 @@ def gate_select(
 
     out = torch.empty((b, h, s, cfg.top_k), device=q.device, dtype=torch.int32)
 
-    _moba_gate_fwd[(triton.cdiv(s, block_m), b * h)](
-        q, kbar, out,
-        s,
+    _moba_gate_fwd[grid](
+        q, kbar, out, cu_seqlens if varlen else q,
+        s, s,
         # The gate score is deliberately unscaled: softmax's 1/sqrt(D) is a
         # positive monotone transform and cannot reorder a ranking, so applying
         # it would be arithmetic that changes no decision.
@@ -323,7 +404,7 @@ def gate_select(
         N_BLOCKS=n, K_POW2=k_pow2, CAPACITY=capacity,
         TAKE=take, TOP_K=cfg.top_k,
         ALWAYS_CURRENT=cfg.always_select_current,
-        H_Q=h, Q_PER_KV=q_per_kv,
+        H_Q=h, Q_PER_KV=q_per_kv, VARLEN=varlen,
         num_warps=GATE_WARPS,
     )
     return out
