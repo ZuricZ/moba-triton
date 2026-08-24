@@ -3,26 +3,38 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let the MoBA kernels attend over a batch of sequences of *different*
-lengths packed end to end, addressed by a `cu_seqlens` array, with the existing
-padded rectangular path unchanged and byte-identical.
+lengths packed end to end, with the existing padded rectangular path unchanged
+and byte-identical.
 
-**Architecture:** Packed mode keeps the four-dimensional layout and pins
-`B = 1`, so `[1, H, T, D]` holds every token of every sequence. **No tensor
-changes shape family and no kernel's address arithmetic changes at all.** What
-changes is that blocks are cut *per sequence* rather than every `block_size`
-tokens, so a block's key range comes from two small lookup arrays instead of
-`blk * BLOCK_SIZE`. A host-built tile→sequence map guarantees no query tile ever
-straddles a sequence boundary, which keeps the gate's streaming top-k
-untouched.
+**Architecture:** **Pack the data, pad the index.** The big tensors — `q`, `k`,
+`v`, the partials — hold only real tokens, shaped `[1, H, T, D]`. The small
+metadata — block counts, column offsets, dispatch order — keeps a real batch
+axis, padded to `max_seqlen`'s worth of blocks per sequence. Every kernel
+therefore learns its sequence from its own `program_id`, and a block's key range
+is *computed* from `cu_seqlens` rather than looked up. Block ids stay
+sequence-local, so the gate's streaming top-k, the CSC transpose, and every
+tuning constant are untouched.
 
 **Tech Stack:** Triton 3.7.1, PyTorch 2.13.0+cu126, Python 3.13, pytest.
 
 **Spec:** No separate design doc; decisions were settled in conversation and are
 recorded under "Design decisions" below. Background:
 `docs/superpowers/specs/2026-08-18-moba-kernel-design.md` (D6 KV-block-major,
-D8 longest-first dispatch, D10 fixed-slot partials) and
+D8 longest-first dispatch, D10 fixed-slot partials),
 `docs/superpowers/plans/2026-08-23-gqa-support.md` (the head-axis split this
-builds on).
+builds on), `docs/learning/04-packed-sequences-and-where-the-work-goes.md` (the
+plain-language version) and `docs/deferred-decisions.md` DD-1 (why head-major,
+and when to reconsider).
+
+> **This plan supersedes an earlier draft of the same name**, which carried a
+> host-built `SeqLayout` table, a tile→sequence map, and globally numbered
+> blocks. All three were removed after reading the references' public
+> interfaces: FlashMoBA keeps its MoBA index at
+> `(batch_size, num_heads, max_lg_col_num)` while packing `q` to
+> `(total_q, nheads, headdim)` — packed data, padded index — and FlashAttention
+> requires the caller to pass `max_seqlen`, which is enough to shape a
+> per-sequence grid. The result is materially smaller. Git history holds the
+> earlier version.
 
 ---
 
@@ -39,172 +51,201 @@ builds on).
     cd "/mnt/c/D/Side Projects/GPU Kernel" && uv run <command>'
   ```
 - **`git` runs from PowerShell**, not WSL — git identity is set on Windows only.
-- **4 GiB VRAM.** Keep test totals small: `total_tokens` ≤ 2048 for correctness
-  work, sequences in the tens to low hundreds.
+- **4 GiB VRAM.** Keep test totals small: `total_tokens` ≤ 2048, a handful of
+  sequences.
 - **Correctness policy is `moba.tolerance`**, never an absolute threshold: pass
   if our error is within `TOLERANCE_FACTOR` (2.0) of the same-dtype oracle's own
   deviation from an fp64 truth.
 - **Measured hardware:** RTX 3050 Ti Laptop, sm_86, 20 SMs, 101376 B shared
   memory per block.
 - **The padded path must not change.** 379 tests and every published benchmark
-  number depend on it. Any diff that alters padded behaviour is a bug in this
+  number depend on it. A diff that alters padded behaviour is a bug in this
   work, not an improvement.
+- **No new host synchronizations.** `index_fused.py` exists to remove them
+  (~230 us each on this box). Nothing here may read a scalar off a device
+  tensor; every host-side number comes from `.numel()`, `.shape`, or a caller
+  argument.
+
+---
+
+## The interface
+
+```python
+moba_attention(q, k, v, cfg, *, cu_seqlens=None, max_seqlen=None, causal=True)
+```
+
+* `cu_seqlens=None` — the padded path, exactly as today, `[B, H, S, D]`.
+* `cu_seqlens` given — the packed path. `q, k, v` are `[1, H, T, D]`;
+  `cu_seqlens` is `[B+1]` int32 **on the device**; `max_seqlen` is a plain
+  Python `int` and is **required**.
+
+`max_seqlen` is an argument rather than a derived value for the reason
+FlashAttention makes it one: deriving it means reading a scalar off
+`cu_seqlens`, which is a host synchronization. `flash_moba_attn_varlen_func`
+takes `max_seqlen_q` and `max_seqlen_k` as ints for exactly this. It also earns
+its keep — see D-VL-4.
+
+Everything else the kernels need is host-known without touching the device:
+`B = cu_seqlens.numel() - 1`, `T = q.shape[2]`,
+`NB = cdiv(max_seqlen, block_size)`.
 
 ---
 
 ## Design decisions
 
-Each was chosen against a named alternative, several of them after reading the
-references. Implementers should not silently re-decide them.
-
-**D-VL-1 — Packed mode keeps four dimensions and pins `B = 1`.**
-`q` is `[1, H_q, T, D]`, not `[T, H_q, D]`. Borrowed from fla-org's NSA, which
-asserts exactly this (`ops/naive.py:84`: *"batch size must be 1 when cu_seqlens
-are provided"*). *Rejected:* FlashAttention's `[T, H, D]` convention. It is the
-better public convention and the wrong internal one **for us**: our kernels
-address queries as `pid_bh * S * D + row * D`, and with `B = 1` that is `head *
-T * D + token * D` — already correct, character for character. Adopting
-`[T, H, D]` would rewrite the address arithmetic of six kernels to buy nothing.
-Conversion at the API edge is a transpose the caller can do if they want FA's
-layout.
+**D-VL-1 — Packed tensors keep four dimensions and pin `B = 1`.**
+`q` is `[1, H_q, T, D]`, matching fla-org's NSA, which asserts this exactly
+(`ops/naive.py:84`) and names the ordering `head_first=True` (`:44`).
+*Rejected:* FlashAttention's `[T, H, D]`. Both are legitimate — NSA supports
+both from one kernel, because the layout is invisible where the compute happens
+— and the criterion is **consistency with our own API beats consistency with
+someone else's**: 379 tests, every benchmark number and the `sdpa_dense`
+baseline speak `[B, H, S, D]`. Recorded as provisional with a revisit condition
+in `docs/deferred-decisions.md`, DD-1.
 
 **D-VL-2 — One entry point, `cu_seqlens=None` meaning padded.**
-`moba_attention(q, k, v, cfg, cu_seqlens=None)`. *Rejected:* a separate
-`moba_attention_varlen`. FlashMoBA's own C++ does it the single-entry way —
-`Varlen` is a template parameter and `cu_seqlens_q == nullptr` selects padded
-(`csrc/flash_moba/src/block_info.h:19-25`). Also rejected: making packed the
-only internal form and having padded callers pack first, which costs a copy of
-Q, K and V — ~25 MB at S=8192, ≈300 µs against a 2280 µs forward, about 13%.
+FlashMoBA does it the single-entry way: `Varlen` is a C++ template parameter
+and `cu_seqlens_q == nullptr` selects padded (`csrc/.../block_info.h:19-25`).
+*Rejected:* a separate `moba_attention_varlen`; and making packed the only
+internal form with padded callers packing first, which costs a copy of Q, K and
+V — ~25 MB at S=8192, ≈300 us against a 2280 us forward, about 13%.
 
-**D-VL-3 — One `SeqLayout` helper answers every raggedness question.**
-Modelled on FlashMoBA's `BlockInfo` struct, whose whole job is to yield
-`actual_seqlen_q` and the row offset for both modes so that downstream code
-never asks which mode it is in. *Rejected:* `if VARLEN:` branches scattered
-through six kernels. The difference must live in one place or it will be got
-wrong in six.
+**D-VL-3 — Pack the data, pad the index.**
+`q`, `k`, `v`, `part_*`, `lse`, `delta`, `dq_part` hold only real tokens. The
+CSC metadata keeps a real batch axis: `col_nnz` is `[B, H_kv, NB]` where
+`NB = cdiv(max_seqlen, block_size)`. Taken directly from FlashMoBA, whose varlen
+entry point takes `moba_col_offsets: (batch_size, num_heads, max_lg_col_num)`
+alongside a packed `q`.
 
-**D-VL-3b — `SeqLayout` is built on the CPU and transferred once.**
-`from_cu_seqlens` takes a **CPU** tensor or a plain list of ints, does every
-`int()` extraction and every derivation there, and moves the four device-side
-arrays over in one transfer. *Rejected:* building it from a CUDA `cu_seqlens`.
-That reads `int(cu[-1])`, `int(cu_blocks[-1])` and `int(lengths.max())` off the
-device — **three host synchronizations**, measured at ~230 us each on this WSL
-box (`index_fused.py` module docstring), against a 2280 us forward. Roughly 30%
-of the pass, reintroducing precisely what the fused index builder was written to
-remove.
+The asymmetry is the point: the data is `O(T·H·D)` and worth packing; the
+metadata is `O(B·H·NB)` and is not. Padding the small thing buys three things —
+a batch axis the grid can carry, sequence-local block ids, and an
+`_offsets_and_order` whose reduction stays bounded by *one sequence's* block
+count rather than the whole batch's.
 
-This is not a workaround. `cu_seqlens` *originates* on the host: the data loader
-knows the lengths before it packs anything. Keeping the layout there is the same
-rule that puts it in PyTorch rather than Triton -- **work that scales with the
-number of sequences belongs on the host; work that scales with tokens belongs on
-the device.** A `SeqLayout` is also then cacheable across calls with the same
-batch shape.
+**D-VL-4 — Every kernel learns its sequence from its `program_id`.**
+Grids gain the batch as a real dimension: the gate launches
+`(cdiv(max_seqlen, BLOCK_M), B * H_q)`, attention launches `(NB, B * H_kv)`. A
+program decodes `b` by division and reads `bos = cu_seqlens[b]`,
+`eos = cu_seqlens[b+1]` — two scalar loads, once per program.
 
-If a caller only has a CUDA `cu_seqlens`, they pay one sync to move it and are
-told so by the docstring, rather than paying three silently.
+*Rejected:* a host-built tile→sequence map (NSA's `token_indices`,
+`ops/parallel.py:64`). The map makes the grid exact; the per-sequence grid
+over-launches for short sequences and lets those programs return immediately. On
+a card measured as **grid-starved** — `docs/gqa-measurements.md` found a small
+grid costing up to 2x — extra programs that return immediately are not the thing
+to economise on, and the map is an array, a kernel argument and a construction
+step we then do not need. This is what `max_seqlen` buys.
 
-**D-VL-4 — Blocks are cut per sequence; a block never straddles a boundary.**
-Not a preference. Cutting on the packed buffer would put tokens from two
-documents in one block, and a query selecting it would attend across the
-boundary — well-formed, plausible, silent. Each sequence gets
-`ceil(len_b / block_size)` blocks, and each may end short. Block ids are
-**global** across the packed batch, with `cu_blocks` giving each sequence's
-first.
+**D-VL-5 — Blocks are cut per sequence, and their ranges are computed, not stored.**
+Cutting on the packed buffer would put two documents' tokens in one block, and a
+query selecting it would attend across the boundary — well-formed, plausible,
+silent. Each sequence gets `ceil(len/block_size)` blocks, the last possibly
+short. A program owning sequence-local block `blk` computes:
 
-**D-VL-5 — A host-built tile→sequence map; query tiles never straddle.**
-Borrowed from NSA (`ops/parallel.py:64`), whose `token_indices` array holds one
-`(sequence_id, local_offset)` pair per tile and is indexed by the grid.
-*Rejected:* looping over the union of the tile's sequences' candidate ranges
-and masking. The union wastes most lanes on every iteration, and — the part
-that is easy to miss — **the causal mask alone would not make it correct**. A
-block belonging to an earlier sequence is causally *before* the current tile's
-tokens, so `key_pos <= rows` passes; the union form needs an extra
-same-sequence comparison in the hottest loop, guarding a case the map removes
-for free. Ragged work is cheaper to fix on the host than in the kernel.
+```python
+lo = bos + blk * BLOCK_SIZE
+hi = tl.minimum(lo + BLOCK_SIZE, eos)
+```
 
-**D-VL-6 — The gate ranks in sequence-local block indices and adds an offset.**
-Inside `_moba_gate_fwd`, `cols` stays `0 .. n_blocks_of_this_sequence`, and the
-sequence's block offset `boc` is added when loading `Kbar` and when emitting the
-chosen ids. Because D-VL-5 guarantees a tile belongs to one sequence, `bos`,
-`boc` and the sequence length are **scalars**, not per-lane vectors — which is
-exactly what keeps the streaming top-k, its tie-break, and its horizon
-computation a zero-line diff. *Rejected:* ranking in global indices, which would
-make the loop's start a per-lane value and the horizon logic per-lane with it.
+*Rejected:* `block_start` / `block_end` lookup arrays, which the earlier draft
+used. With `b` known from the grid, the range is two arithmetic ops on values
+already loaded — cheaper than a gather, and it removes the arrays entirely.
+
+**D-VL-6 — Block ids stay sequence-local everywhere.**
+The gate emits `0 .. n_seq_blocks-1`; columns are keyed by
+`(b, kv_head, local_block)`. *Rejected:* global ids across the packed batch.
+Local ids keep the gate's streaming top-k, its tie-break and its horizon
+computation a **zero-line diff**, because they were always local; they keep the
+CSC transpose kernels' bodies unmodified; and they keep `_offsets_and_order`'s
+reduction the size it is today (see Risks).
 
 **D-VL-7 — The causal mask is not modified, and the gate is what makes that safe.**
 `qk += tl.where(key_pos <= rows, 0.0, -inf)` compares packed token indices.
-Within a sequence, packed order *is* position order, so the comparison is
-correct **provided a query is never offered a block from another sequence**.
-That invariant is enforced entirely by the gate (D-VL-6). This is the one place
-in the design where correctness of an untouched line is delegated to a distant
-one; it must be commented on both sides and tested directly
+Within a sequence, packed order *is* position order, so it is correct —
+**provided a query is never offered a block from another sequence**. That
+invariant is enforced entirely by the gate. This is the one place where an
+untouched line's correctness is guaranteed by a distant one; comment it on both
+sides and test it directly
 (`test_no_selected_block_crosses_a_sequence_boundary`).
 
 **D-VL-8 — `_moba_combine`, `_moba_dq_reduce` and `_moba_bwd_preprocess` are not modified.**
-All three stream over `[B, H_q, S, ...]` and launch over `b * h_q`. With
-`B = 1` and `S = T` they are already correct. As under GQA: an implementer who
-finds themselves editing these has an upstream problem.
+Verified by reading the code, not assumed: all three address memory as
+`pid_bh * S * ...` over a grid of `B * H_q` (`moba_fwd.py:465`,
+`moba_bwd.py:298`, `moba_bwd.py:116`). With `B = 1` and `S = T` those
+expressions are already correct, and none has any notion of a sequence. As under
+GQA: an implementer editing these has an upstream problem.
 
-### What changes, and what does not
+### Exactly which expressions branch
 
-| | padded | packed | changed? |
-|---|---|---|---|
-| `q` | `[B, H_q, S, D]` | `[1, H_q, T, D]` | **same shape family** |
-| `k`, `v` | `[B, H_kv, S, D]` | `[1, H_kv, T, D]` | same |
-| `part_m`, `part_l`, `part_acc` | `[B, H_q, S, K(,D)]` | `[1, H_q, T, K(,D)]` | same |
-| `lse`, `delta` | `[B, H_q, S]` | `[1, H_q, T]` | same |
-| CSC arrays | `[B, H_kv, N]` | `[1, H_kv, N_total]` | same |
-| attention grid | `N × B × H_kv` | `N_total × 1 × H_kv` | same |
-| **kernel address arithmetic** | — | — | **none** |
-| **tile shapes, registers, SRAM** | — | — | **none** |
-| **tuning constants** | — | — | **none** |
-| a block's key range | `blk * BLOCK_SIZE + arange`, `< S` | `BlockStart[blk] + arange`, `< BlockEnd[blk]` | **two loads** |
-| gate candidate range | `0 .. own_block` | `0 .. own_block` **local**, `+boc` on access | **one offset** |
-| gate grid | `cdiv(S, BLOCK_M) × B × H_q` | `n_tiles × H_q`, tiles from a map | **new map** |
+`VARLEN` is a `tl.constexpr`, so Triton compiles two specializations and there
+is no runtime branch. Every line not listed here is shared.
 
-### New metadata, all derived from `cu_seqlens`
+| File:line | padded | packed |
+|---|---|---|
+| `moba_fwd.py:81` `q_base` | `pid_b * H_Q * S * D` | `0` |
+| `moba_fwd.py:82` `q_part_base` | `pid_b * H_Q * S * K_SLOTS` | `0` |
+| `moba_fwd.py:98` `kv_base` | `pid_bh * S * D` | `(pid_bh % H_KV) * T * D` |
+| `moba_fwd.py` `key_pos`, `key_ok` | `blk*BLOCK_SIZE + arange`, `< S` | `bos + blk*BLOCK_SIZE + arange`, `< min(lo+BLOCK_SIZE, eos)` |
+| `moba_bwd.py:159,160` `q_base`, `q_lin` | `pid_b * H_Q * S * (D or 1)` | `0` |
+| `moba_bwd.py:173` `kv_base` | `pid_bh * S * D` | `(pid_bh % H_KV) * T * D` |
+| `moba_bwd.py:256` `DQPart` base | `pid_b * H_Q * S * DQ_SLOTS * D` | `0` |
+| `moba_bwd.py:262` `kv_out` | `pid_bh * S * D + …` | `(pid_bh % H_KV) * T * D + …` |
+| `moba_bwd.py` `key_pos`, `key_ok` | as above, plus `sub * KEY_TILE` | as above, plus `sub * KEY_TILE` |
+| `gate.py:122` Q load base | `pid_bh * S * D` | `(pid_bh % H_Q) * T * D` |
+| `gate.py` `offs_m`, `live`, candidate count | `pid_m*BLOCK_M + arange`, `< S`, `N_BLOCKS` | `bos + local`, `< eos`, `cdiv(eos-bos, BLOCK_SIZE)` |
+| `gate.py:352` K load base | `pid_bh * S * D` | `(pid_bh % H_KV) * T * D` |
+| `gate.py` rep rows, occupancy | `blk*BLOCK_SIZE`, `< S` | `bos + blk*BLOCK_SIZE`, `< eos` |
 
-For `cu_seqlens = [0, 5, 8, 12]` with `block_size = 2`:
+Thirteen sites. Nothing else moves: not the matmuls, not the online softmax, not
+the additive masks, not the streaming top-k, not the CSC transpose, not one
+tuning constant.
 
-```
-packed token:  0  1  2  3  4 | 5  6  7 | 8  9 10 11
-blocks:       [0,1][2,3][4]  |[5,6][7] |[8,9][10,11]
-block id:       0    1   2   |  3   4  |  5     6
+### Shapes
 
-cu_blocks   = [0, 3, 5, 7]          # per sequence, B+1
-block_start = [0, 2, 4, 5, 7, 8, 10]    # per block, N_total
-block_end   = [2, 4, 5, 7, 8, 10, 12]   # per block, N_total
-seq_of_block= [0, 0, 0, 1, 1, 2, 2]     # per block, N_total
-```
+| Tensor | padded | packed |
+|---|---|---|
+| `q`, `out`, `dq` | `[B, H_q, S, D]` | `[1, H_q, T, D]` |
+| `k`, `v`, `dk`, `dv` | `[B, H_kv, S, D]` | `[1, H_kv, T, D]` |
+| `lse`, `delta` | `[B, H_q, S]` | `[1, H_q, T]` |
+| `part_m`, `part_l` | `[B, H_q, S, K]` | `[1, H_q, T, K]` |
+| `part_acc` | `[B, H_q, S, K, D]` | `[1, H_q, T, K, D]` |
+| `dq_part` | `[B, H_q, S, K·tiles, D]` | `[1, H_q, T, K·tiles, D]` |
+| `kbar` | `[B, H_kv, N, D]` | `[B, H_kv, NB, D]` |
+| `block_idx` (gate out) | `[B, H_q, S, top_k]` | `[1, H_q, T, top_k]` |
+| `col_nnz`, `order` | `[B, H_kv, N]` | `[B, H_kv, NB]` |
+| `col_offsets` | `[B, H_kv, N+1]` | `[B, H_kv, NB+1]` |
+| `row_indices`, `head_indices`, `slot_of_pair` | `[B, H_kv, G·S·top_k]` | `[B, H_kv, G·max_seqlen·top_k]` |
 
-`block_end - block_start` is the true occupancy, which
-`_block_representatives_fwd` needs so a short tail is not divided by
-`block_size`.
+`NB = cdiv(max_seqlen, block_size)`, `G = H_q // H_kv`. `kbar` and the CSC
+arrays keep `B` — they are the padded index of D-VL-3.
 
 ---
 
 ## File Structure
 
 **Create:**
-- `src/moba/seqlayout.py` — `SeqLayout`, the single source of truth for
-  raggedness. Builds and validates every array above plus the tile map. The
-  `BlockInfo` analogue.
-- `tests/test_seqlayout.py` — unit tests, CPU where possible.
+- `src/moba/packing.py` — caller-facing converters between a padded batch plus
+  mask and the packed form, in our head-major layout, plus shared validation of
+  `cu_seqlens`.
+- `tests/test_packing.py`
 - `tests/test_varlen.py` — end-to-end packed correctness, forward and backward.
-- `docs/varlen-measurements.md` — padding waste removed, grid effect, and a
-  head-to-head against nested-tensor dense SDPA.
+- `docs/varlen-measurements.md`
 
 **Modify:**
 - `src/moba/ref/naive.py` — oracle accepts `cu_seqlens`.
-- `src/moba/kernels/gate.py` — `_block_representatives_fwd` and
-  `_moba_gate_fwd` gain block ranges and the tile map.
-- `src/moba/kernels/index_fused.py`, `index.py` — `num_blocks` becomes
-  `N_total`; verify nothing else needs touching.
-- `src/moba/kernels/moba_fwd.py` — `_validate`, `_moba_attn_fwd` key range.
-- `src/moba/kernels/moba_bwd.py` — `_moba_bwd` key range.
-- `src/moba/kernels/autograd.py` — plumb `cu_seqlens`.
-- `src/moba/backends/sdpa_dense.py` — nested-tensor varlen baseline.
-- `bench/suite.py` — a packed row.
+- `src/moba/kernels/gate.py` — `_block_representatives_fwd`, `_moba_gate_fwd`,
+  both wrappers.
+- `src/moba/kernels/index_fused.py` — the three transpose kernels learn `b` from
+  the grid.
+- `src/moba/kernels/index.py` — `CSCIndex` carries `cu_seqlens`/`max_seqlen`;
+  `csc_to_mask` packed form.
+- `src/moba/kernels/moba_fwd.py` — `_validate`, `_moba_attn_fwd`,
+  `attend_partials`, `moba_forward`.
+- `src/moba/kernels/moba_bwd.py` — `_moba_bwd`, `moba_backward`.
+- `src/moba/kernels/autograd.py` — plumb `cu_seqlens`, `max_seqlen`.
+- `src/moba/backends/sdpa_dense.py` — nested-tensor packed baseline.
+- `bench/suite.py`
 
 **Untouched by design:** `_moba_combine`, `_moba_dq_reduce`,
 `_moba_bwd_preprocess`, `moba/config.py`, `moba/tolerance.py`,
@@ -212,491 +253,248 @@ seq_of_block= [0, 0, 0, 1, 1, 2, 2]     # per block, N_total
 
 ---
 
-## Task 1: `SeqLayout` and the oracle
+## Task 1: Packing helpers and the oracle
 
-Pure PyTorch, no kernels. Establishes the definition everything else is checked
-against and gets "packed with one sequence equals padded with batch 1" nailed
-down before any Triton moves.
+Pure PyTorch, no kernels. Establishes the definition everything is checked
+against.
 
 **Files:**
-- Create: `src/moba/seqlayout.py`, `tests/test_seqlayout.py`
+- Create: `src/moba/packing.py`, `tests/test_packing.py`
 - Modify: `src/moba/ref/naive.py`
-- Test: `tests/test_seqlayout.py`
+- Test: `tests/test_packing.py`
 
 **Interfaces:**
 - Produces:
-  - `SeqLayout.from_cu_seqlens(cu_seqlens: torch.Tensor, block_size: int, tile: int) -> SeqLayout`
-  - `SeqLayout.uniform(batch: int, seq_len: int, block_size: int, tile: int) -> SeqLayout`
-  - Fields: `cu_seqlens [B+1]`, `cu_blocks [B+1]`, `block_start [N]`,
-    `block_end [N]`, `seq_of_block [N]`, `tile_map [n_tiles, 2]`,
-    `total_tokens: int`, `total_blocks: int`, `num_sequences: int`,
-    `max_seqlen: int`
-  - `moba.ref.naive.moba_attention_naive(..., cu_seqlens=None)` and
-    `moba_selection(..., cu_seqlens=None)`
+  - `validate_cu_seqlens(cu_seqlens, total_tokens, max_seqlen) -> int`
+    returning the sequence count; raises on anything malformed.
+  - `pack(x, attention_mask) -> (packed, cu_seqlens, max_seqlen)`, `x` is
+    `[B, H, S, D]`, `packed` is `[1, H, T, D]`.
+  - `unpack(packed, cu_seqlens, batch, seq_len) -> [B, H, S, D]`.
+  - `from_nested(nt) -> (packed, cu_seqlens, max_seqlen)`.
+  - `moba_attention_naive(..., cu_seqlens=None)`,
+    `moba_selection(..., cu_seqlens=None)`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_seqlayout.py`:
+Create `tests/test_packing.py`:
 
 ```python
-"""Ragged-batch metadata: everything derived from `cu_seqlens`, once.
+"""Converting between a padded batch and the packed form, in our layout.
 
-`SeqLayout` is the only place in the codebase that knows sequences can have
-different lengths. Every kernel reads its arrays and none of them recompute a
-boundary, which is the point -- a boundary computed in two places is a boundary
-that will disagree in one of them.
-
-Modelled on FlashMoBA's `BlockInfo`
-(`references/flash-moba/csrc/flash_moba/src/block_info.h`), whose whole job is
-to answer "where does my sequence start and how long is it" so downstream code
-never asks which mode it is in.
+FlashAttention ships `unpad_input`/`pad_input` for this
+(`references/flash-moba/flash_moba/bert_padding.py:98`), but they cannot be
+lifted verbatim: they gather *rows*, which works because FA's token axis is
+outermost. Ours is head-major, so one token's data is `H` separate runs of `D`
+rather than a contiguous block, and packing is a strided gather. Same idea,
+different index arithmetic. See `docs/deferred-decisions.md`, DD-1.
 """
 
 import pytest
 import torch
 
-from moba.seqlayout import SeqLayout
+from moba.packing import from_nested, pack, unpack, validate_cu_seqlens
 
 
-def test_the_worked_example_from_the_plan(device):
-    """Lengths 5, 3, 4 at block_size 2 -- countable by hand."""
+def test_pack_keeps_only_real_tokens(device):
+    """Lengths 5, 3, 4 in a batch padded to 5 -- countable by hand."""
+    x = torch.arange(3 * 2 * 5 * 4, dtype=torch.float32,
+                     device=device).view(3, 2, 5, 4)
+    mask = torch.tensor([[1, 1, 1, 1, 1],
+                         [1, 1, 1, 0, 0],
+                         [1, 1, 1, 1, 0]], device=device)
+
+    packed, cu, max_seqlen = pack(x, mask)
+    assert packed.shape == (1, 2, 12, 4)
+    assert cu.tolist() == [0, 5, 8, 12]
+    assert max_seqlen == 5
+
+    for i, (lo, n) in enumerate([(0, 5), (5, 3), (8, 4)]):
+        assert torch.equal(packed[0, :, lo:lo + n], x[i, :, :n]), f"seq {i}"
+
+
+def test_unpack_inverts_pack_on_the_real_tokens(device):
+    x = torch.randn(3, 2, 5, 4, device=device)
+    mask = torch.tensor([[1, 1, 1, 1, 1],
+                         [1, 1, 1, 0, 0],
+                         [1, 1, 1, 1, 0]], device=device)
+    packed, cu, _ = pack(x, mask)
+    back = unpack(packed, cu, batch=3, seq_len=5)
+
+    m = mask.bool()[:, None, :, None].expand_as(x)
+    assert torch.equal(back[m], x[m]), "a real token changed"
+    assert not bool(back[~m].any()), "padding must come back zeroed"
+
+
+def test_from_nested_unwraps_a_jagged_tensor(device):
+    """A jagged nested tensor is already packed plus cu_seqlens.
+
+    `nt.values()` is the packed data and `nt.offsets()` *is* cu_seqlens; the
+    only work is the transpose into our head-major layout.
+    """
+    nt = torch.nested.nested_tensor(
+        [torch.randn(5, 2, 4), torch.randn(3, 2, 4), torch.randn(4, 2, 4)],
+        layout=torch.jagged, device=device, dtype=torch.float32)
+    packed, cu, max_seqlen = from_nested(nt)
+    assert packed.shape == (1, 2, 12, 4)
+    assert cu.tolist() == [0, 5, 8, 12]
+    assert max_seqlen == 5
+
+
+def test_validate_returns_the_sequence_count(device):
     cu = torch.tensor([0, 5, 8, 12], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, block_size=2, tile=4)
-
-    assert lay.num_sequences == 3
-    assert lay.total_tokens == 12
-    assert lay.total_blocks == 7          # 3 + 2 + 2
-    assert lay.max_seqlen == 5
-
-    assert lay.cu_blocks.tolist() == [0, 3, 5, 7]
-    assert lay.block_start.tolist() == [0, 2, 4, 5, 7, 8, 10]
-    assert lay.block_end.tolist() == [2, 4, 5, 7, 8, 10, 12]
-    assert lay.seq_of_block.tolist() == [0, 0, 0, 1, 1, 2, 2]
+    assert validate_cu_seqlens(cu, total_tokens=12, max_seqlen=5) == 3
 
 
-def test_no_block_straddles_a_sequence_boundary(device):
-    """The one thing that must never happen.
-
-    A block holding tokens from two documents would let a query attend across
-    the boundary. It would not crash: the shapes stay right and the numbers
-    stay finite.
-    """
-    cu = torch.tensor([0, 5, 8, 12, 13], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, block_size=2, tile=4)
-
-    for blk in range(lay.total_blocks):
-        lo = int(lay.block_start[blk])
-        hi = int(lay.block_end[blk])
-        seq = int(lay.seq_of_block[blk])
-        assert int(lay.cu_seqlens[seq]) <= lo < hi <= int(lay.cu_seqlens[seq + 1])
+@pytest.mark.parametrize("cu,total,mx,match", [
+    ([0, 5, 8, 12], 11, 5, "total"),
+    ([0, 5, 8, 12], 12, 4, "max_seqlen"),
+    ([5, 8, 12], 12, 5, "start at 0"),
+    ([0, 8, 5], 5, 8, "increasing"),
+    ([0, 0, 5], 5, 5, "increasing"),
+])
+def test_malformed_metadata_is_rejected(device, cu, total, mx, match):
+    t = torch.tensor(cu, dtype=torch.int32, device=device)
+    with pytest.raises(ValueError, match=match):
+        validate_cu_seqlens(t, total_tokens=total, max_seqlen=mx)
 
 
-def test_every_token_belongs_to_exactly_one_block(device):
-    """Blocks partition the packed buffer -- no gap, no overlap."""
-    cu = torch.tensor([0, 5, 8, 12, 13], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, block_size=2, tile=4)
+def test_validation_does_not_synchronize_with_the_host(device):
+    """Checks run on device; reading a scalar back costs ~230 us.
 
-    covered = []
-    for blk in range(lay.total_blocks):
-        covered.extend(range(int(lay.block_start[blk]),
-                             int(lay.block_end[blk])))
-    assert covered == list(range(lay.total_tokens))
-
-
-def test_no_query_tile_straddles_a_sequence_boundary(device):
-    """`tile_map` is what makes `bos` a scalar inside the gate.
-
-    A tile spanning two sequences would give its lanes different candidate
-    ranges, and a Triton program has one loop bound for all its lanes.
+    `index_fused` exists to remove synchronizations of this kind. Validation
+    that reintroduced one on every forward call would be a silent ~10% tax that
+    looked like a kernel regression.
     """
     cu = torch.tensor([0, 5, 8, 12], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, block_size=2, tile=4)
-
-    # ceil(5/4) + ceil(3/4) + ceil(4/4) = 2 + 1 + 1
-    assert lay.tile_map.shape == (4, 2)
-    for seq, off in lay.tile_map.tolist():
-        start = int(lay.cu_seqlens[seq]) + off
-        length = int(lay.cu_seqlens[seq + 1]) - int(lay.cu_seqlens[seq])
-        assert 0 <= off < length
-        assert start < int(lay.cu_seqlens[seq + 1])
-
-
-def test_uniform_layout_matches_a_padded_batch(device):
-    """`uniform` is the packed description of the rectangular case.
-
-    Used by tests to run one code path against the other; the padded kernels
-    never construct it.
-    """
-    lay = SeqLayout.uniform(batch=3, seq_len=4, block_size=2, tile=4)
-    assert lay.cu_seqlens.tolist() == [0, 4, 8, 12]
-    assert lay.total_blocks == 6
-    assert lay.block_start.tolist() == [0, 2, 4, 6, 8, 10]
-
-
-def test_a_sequence_shorter_than_one_block_gets_one_short_block(device):
-    cu = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, block_size=8, tile=4)
-    assert lay.total_blocks == 1
-    assert lay.block_start.tolist() == [0]
-    assert lay.block_end.tolist() == [1]
-
-
-def test_building_a_layout_does_not_synchronize_with_the_host(device):
-    """Every scalar must come from CPU data, never off the device.
-
-    Reading `int(cu[-1])` from a CUDA tensor costs ~230 us on this box, and
-    there are three such reads to make. `index_fused` was written specifically
-    to remove synchronizations of that kind; reintroducing them here would cost
-    about 30% of a forward pass and look like a kernel regression.
-    """
     torch.cuda.synchronize()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        SeqLayout.from_cu_seqlens([0, 20, 32, 48], block_size=4, tile=32,
-                                  device=device)
+        validate_cu_seqlens(cu, total_tokens=12, max_seqlen=5)
     finally:
         torch.cuda.set_sync_debug_mode("default")
-
-
-@pytest.mark.parametrize("bad", [
-    [1, 5],          # does not start at zero
-    [0, 5, 3],       # not monotone
-    [0, 0, 5],       # empty sequence
-])
-def test_malformed_cu_seqlens_are_rejected(device, bad):
-    cu = torch.tensor(bad, dtype=torch.int32, device=device)
-    with pytest.raises(ValueError):
-        SeqLayout.from_cu_seqlens(cu, block_size=2, tile=4)
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/test_seqlayout.py -q` (WSL prefix).
-Expected: `ModuleNotFoundError: No module named 'moba.seqlayout'`.
+Run: `uv run pytest tests/test_packing.py -q` (WSL prefix).
+Expected: `ModuleNotFoundError: No module named 'moba.packing'`.
 
-- [ ] **Step 3: Write `src/moba/seqlayout.py`**
+- [ ] **Step 3: Write `src/moba/packing.py`**
+
+Constraints for the implementer:
+
+* `validate_cu_seqlens` must not read a scalar off the device. `numel()` and
+  `shape` are host metadata and free; value checks stay as device tensors
+  (`torch._assert_async`) or compare against the host arguments. The last-entry
+  check compares against `total_tokens`, which the caller supplied — never
+  `int(cu[-1])`.
+* `pack` **may** synchronize; it runs once at data-prep time, exactly as FA's
+  `unpad_input` does with `.item()` on `max_seqlen_in_batch`. Say so in the
+  docstring so the asymmetry is deliberate rather than accidental.
+* `from_nested` transposes `nt.values()` `[T, H, D]` into `[1, H, T, D]` and
+  must `.contiguous()`, which is a copy — document it and point at DD-1.
 
 ```python
-"""Everything the kernels need to know about a ragged batch, derived once.
+def validate_cu_seqlens(
+    cu_seqlens: torch.Tensor, total_tokens: int, max_seqlen: int
+) -> int:
+    """Checks packed metadata and returns the sequence count.
 
-A packed batch stores sequences of different lengths end to end in one buffer,
-with `cu_seqlens` -- cumulative sequence lengths -- marking the boundaries.
-There is no `S` dimension because there is no single sequence length, so the
-raggedness has to live somewhere; this module is that somewhere, and the only
-one. A boundary computed in two places is a boundary that will disagree.
+    Deliberately reads nothing off the device. `cu_seqlens` lives in GPU memory
+    and pulling a scalar from it costs a host synchronization -- ~230 us on this
+    box, measured in `index_fused`. Every host-side number here comes from
+    `numel()` or from an argument the caller already had.
 
-Modelled on FlashMoBA's `BlockInfo` struct, whose entire job is to answer
-"where does my sequence start, and how long is it?" for both the padded and the
-packed case so that every kernel downstream reads one field and never asks
-which mode it is in.
+    Args:
+        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32, on the
+            same device as the data.
+        total_tokens: `q.shape[2]`. The last entry of `cu_seqlens` must equal
+            this, and the caller knows it without a transfer.
+        max_seqlen: Longest sequence in the batch, as a plain int. Required for
+            the reason FlashAttention requires it: deriving it would mean
+            reading `cu_seqlens.max()` back to the host.
 
-BLOCKS ARE CUT PER SEQUENCE. Cutting every `block_size` tokens of the packed
-buffer would place tokens from two documents in one block, and a query
-selecting that block would attend across the boundary. That failure does not
-crash: the shapes stay correct and the numbers stay finite. Each sequence
-therefore gets its own `ceil(len / block_size)` blocks, the last of which may be
-short -- exactly the case `_block_representatives_fwd` already handles for the
-tail of a padded sequence, now arising once per sequence rather than once per
-batch.
+    Returns:
+        Number of sequences.
 
-QUERY TILES ARE ALSO CUT PER SEQUENCE, via `tile_map`. A Triton program has one
-loop bound for all of its lanes, so a tile holding queries from two sequences
-would need the union of their candidate ranges and a per-lane mask on every
-iteration. Precomputing the map costs one small host-side array and makes the
-launch grid exact. Borrowed from fla-org's NSA, whose `token_indices` serves the
-same purpose (`references/native-sparse-attention/.../ops/parallel.py:64`).
-"""
-
-from dataclasses import dataclass
-
-import torch
-
-
-@dataclass(frozen=True)
-class SeqLayout:
-    """Block and tile structure of one packed batch.
-
-    Frozen because kernels are launched against it; mutating one after an index
-    was built would silently invalidate the index.
-
-    Attributes:
-        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. Sequence
-            `i` occupies packed tokens `cu_seqlens[i] : cu_seqlens[i + 1]`.
-        cu_blocks: Cumulative block counts, [num_sequences + 1] int32. Sequence
-            `i` owns global blocks `cu_blocks[i] : cu_blocks[i + 1]`.
-        block_start: First packed token of each block, [total_blocks] int32.
-        block_end: One past the last packed token of each block,
-            [total_blocks] int32. `block_end - block_start` is the block's true
-            occupancy, which the mean-pool needs so a short tail is not divided
-            by `block_size`.
-        seq_of_block: Which sequence each block belongs to, [total_blocks]
-            int32.
-        tile_map: One `(sequence, local_token_offset)` pair per query tile,
-            [num_tiles, 2] int32. Indexed by the gate's grid.
-        tile: Queries per tile that `tile_map` was built for. Kept so the gate
-            can assert the launch matches; a layout built for one tile size and
-            launched with another produces a map that silently misaddresses
-            every program.
-        total_tokens: Packed token count.
-        total_blocks: Block count across all sequences.
-        num_sequences: Sequence count.
-        max_seqlen: Longest sequence, in tokens.
+    Raises:
+        ValueError: If the shape, dtype, start, monotonicity, total or
+            max_seqlen is wrong.
     """
-
-    cu_seqlens: torch.Tensor
-    cu_blocks: torch.Tensor
-    block_start: torch.Tensor
-    block_end: torch.Tensor
-    seq_of_block: torch.Tensor
-    tile_map: torch.Tensor
-    tile: int
-    total_tokens: int
-    total_blocks: int
-    num_sequences: int
-    max_seqlen: int
-
-    @classmethod
-    def from_cu_seqlens(
-        cls, cu_seqlens: torch.Tensor | list[int], block_size: int, tile: int,
-        device=None,
-    ) -> "SeqLayout":
-        """Derives the full layout from cumulative sequence lengths.
-
-        Everything is computed on the CPU and the device arrays are transferred
-        once; see D-VL-3b. Passing a CUDA `cu_seqlens` costs one synchronization
-        to bring it back, which is one instead of the three that reading scalars
-        off it would cost.
-
-        Args:
-            cu_seqlens: Cumulative token counts, [num_sequences + 1], on the CPU
-                or as a plain list. Must start at zero, be strictly increasing,
-                and hold no empty sequence.
-            block_size: Keys per MoBA block.
-            tile: Queries per gate program, so the tile map can be built.
-            device: Where the four device-side arrays should live. Defaults to
-                CPU, which is what the unit tests want.
-
-        Returns:
-            A populated SeqLayout with its arrays on `device`.
-
-        Raises:
-            ValueError: If `cu_seqlens` is malformed or the sizes are not
-                positive.
-        """
-        if block_size <= 0 or tile <= 0:
-            raise ValueError(
-                f"block_size and tile must be positive, got {block_size}, {tile}"
-            )
-        if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
-            raise ValueError(
-                f"cu_seqlens must be 1-D with at least two entries, got "
-                f"{tuple(cu_seqlens.shape)}"
-            )
-        cu = cu_seqlens.to(torch.int64)
-        if int(cu[0]) != 0:
-            raise ValueError(f"cu_seqlens must start at 0, got {int(cu[0])}")
-        lengths = cu[1:] - cu[:-1]
-        if bool((lengths <= 0).any()):
-            raise ValueError(
-                f"cu_seqlens must be strictly increasing (no empty sequence), "
-                f"got lengths {lengths.tolist()}"
-            )
-
-        n_seq = lengths.numel()
-        blocks_per = (lengths + block_size - 1) // block_size
-        cu_blocks = torch.zeros(n_seq + 1, dtype=torch.int64, device=device)
-        cu_blocks[1:] = blocks_per.cumsum(0)
-        total_blocks = int(cu_blocks[-1])
-
-        # Block b of sequence i starts at cu_seqlens[i] + b * block_size and
-        # stops at the sequence's end, which is what makes the last block short
-        # rather than overrunning into the next document.
-        seq_of_block = torch.repeat_interleave(
-            torch.arange(n_seq, device=device), blocks_per
-        )
-        local_block = (torch.arange(total_blocks, device=device)
-                       - cu_blocks[seq_of_block])
-        block_start = cu[seq_of_block] + local_block * block_size
-        block_end = torch.minimum(block_start + block_size,
-                                  cu[seq_of_block + 1])
-
-        tiles_per = (lengths + tile - 1) // tile
-        seq_of_tile = torch.repeat_interleave(
-            torch.arange(n_seq, device=device), tiles_per
-        )
-        cu_tiles = torch.zeros(n_seq + 1, dtype=torch.int64, device=device)
-        cu_tiles[1:] = tiles_per.cumsum(0)
-        local_tile = (torch.arange(int(cu_tiles[-1]), device=device)
-                      - cu_tiles[seq_of_tile])
-        tile_map = torch.stack([seq_of_tile, local_tile * tile], dim=1)
-
-        i32 = torch.int32
-        return cls(
-            cu_seqlens=cu.to(i32),
-            cu_blocks=cu_blocks.to(i32),
-            block_start=block_start.to(i32),
-            block_end=block_end.to(i32),
-            seq_of_block=seq_of_block.to(i32),
-            tile_map=tile_map.to(i32).contiguous().to(device),
-            tile=tile,
-            total_tokens=int(cu[-1]),
-            total_blocks=total_blocks,
-            num_sequences=n_seq,
-            max_seqlen=int(lengths.max()),
-        )
-
-    @classmethod
-    def uniform(
-        cls, batch: int, seq_len: int, block_size: int, tile: int,
-        device=None,
-    ) -> "SeqLayout":
-        """Builds the layout a padded batch would have, if packed.
-
-        Test support: it lets the packed path be run against the padded one on
-        the same data. The padded kernels never construct this -- they need no
-        layout at all, which is the point of keeping their arithmetic untouched.
-
-        Args:
-            batch: Sequence count.
-            seq_len: Length of every sequence.
-            block_size: Keys per MoBA block.
-            tile: Queries per gate program.
-            device: Where to build the arrays.
-
-        Returns:
-            A populated SeqLayout.
-        """
-        cu = torch.arange(batch + 1, device=device,
-                          dtype=torch.int32) * seq_len
-        return cls.from_cu_seqlens(cu, block_size, tile)
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `uv run pytest tests/test_seqlayout.py -q`
-Expected: 9 passed.
+Expected: 10 passed.
 
 - [ ] **Step 5: Write the failing oracle test**
 
-Append to `tests/test_seqlayout.py`:
+Append to `tests/test_packing.py`:
 
 ```python
-def test_packed_oracle_equals_per_sequence_padded_oracle(device):
-    """The definition of varlen: identical to running each sequence alone.
+def test_packed_oracle_equals_running_each_sequence_alone(device):
+    """The definition of varlen, checked bitwise.
 
-    Checked bitwise. Slicing the packed buffer gives exactly the same numbers,
-    so any difference is a boundary or indexing bug, not rounding.
+    Slicing the packed buffer gives the same inputs in the same order, so
+    anything but equality is a boundary bug rather than rounding.
     """
     from moba.config import MoBAConfig
     from moba.ref.naive import moba_attention_naive
 
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float64)
-    lens = [20, 12, 16]
     cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
     gen = torch.Generator(device=device).manual_seed(0)
-    q = torch.randn(1, 2, 48, 16, generator=gen, device=device,
-                    dtype=torch.float64)
-    k = torch.randn(1, 2, 48, 16, generator=gen, device=device,
-                    dtype=torch.float64)
-    v = torch.randn(1, 2, 48, 16, generator=gen, device=device,
-                    dtype=torch.float64)
+    mk = lambda: torch.randn(1, 2, 48, 16, generator=gen, device=device,
+                             dtype=torch.float64)
+    q, k, v = mk(), mk(), mk()
 
     packed = moba_attention_naive(q, k, v, cfg, cu_seqlens=cu)
-
     lo = 0
-    for n in lens:
-        piece = moba_attention_naive(
-            q[:, :, lo:lo + n], k[:, :, lo:lo + n], v[:, :, lo:lo + n], cfg)
-        assert torch.equal(packed[:, :, lo:lo + n], piece)
+    for n in [20, 12, 16]:
+        piece = moba_attention_naive(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
+                                     v[:, :, lo:lo + n], cfg)
+        assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [ ] **Step 6: Run to verify it fails, then add `cu_seqlens` to the oracle**
 
-Expected: `TypeError: moba_attention_naive() got an unexpected keyword
-argument 'cu_seqlens'`.
-
-- [ ] **Step 7: Add `cu_seqlens` to the oracle**
-
-In `src/moba/ref/naive.py`, give `moba_selection` and `moba_attention_naive` a
-`cu_seqlens: torch.Tensor | None = None` keyword. When set, require `B == 1` and
-loop over sequences, slicing and delegating to the existing per-sequence code:
+`moba_attention_naive` and `moba_selection` gain
+`cu_seqlens: torch.Tensor | None = None`. When set, require `B == 1` and loop
+over sequences in Python, slicing and delegating to the existing per-sequence
+code:
 
 ```python
     # Deliberately a Python loop. This is the oracle: one line per line of the
     # algorithm, and "a packed batch means each sequence attends alone" is the
-    # definition being encoded. fla-org's NSA reference does the same
-    # (`ops/naive.py:111`), and so does FSA's production path, which loops in
-    # Python with a TODO to fuse it -- the fusing is the kernel's job, not the
-    # definition's.
-    if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"packed input must have batch 1, got {q.shape[0]}"
-            )
-        out = torch.empty_like(q)
-        bounds = cu_seqlens.tolist()
-        for lo, hi in zip(bounds[:-1], bounds[1:]):
-            out[:, :, lo:hi] = moba_attention_naive(
-                q[:, :, lo:hi], k[:, :, lo:hi], v[:, :, lo:hi], cfg,
-                query_chunk=query_chunk,
-            )
-        return out
+    # definition being encoded. fla-org's NSA does the same in its reference
+    # (`ops/naive.py:111`), and FSA's *production* path still does
+    # (`FSA_topk_sparse_attention.py:583`, with a TODO to fuse it) -- fusing is
+    # the kernel's job, not the definition's.
 ```
 
-`moba_selection` takes the same shape, returning
-`[1, H, T, max_blocks_in_any_sequence]` — see Step 8 for why that shape.
+`moba_selection` returns `[1, H, T, NB]` with **sequence-local** block ids,
+`NB = cdiv(max length, block_size)`. This is the convention `csc_to_mask` must
+reproduce in Task 4; write it down here, once.
 
-- [ ] **Step 8: Give `moba_selection` the same treatment**
+- [ ] **Step 7: Run the oracle-facing suite**
 
-The packed selection mask uses **sequence-local** block ids, width
-`max_blocks_in_any_sequence`. Not `total_blocks`: such a mask would be almost
-entirely false, growing with the batch for no information -- at 32 sequences it
-is ~32x the memory of the useful part.
+Run: `uv run pytest tests/test_packing.py tests/test_semantics.py tests/test_smoke.py -q`
+Expected: all pass; existing tests take the unchanged branch.
 
-`csc_to_mask` must reproduce the identical convention in Task 4, so the
-conversion is written down once, here, in the docstring:
-
-```python
-    # Block ids are sequence-local in this mask and global in the CSC index.
-    # The conversion is `global = cu_blocks[seq] + local`, and it lives in
-    # exactly two functions -- this one producing local ids and `csc_to_mask`
-    # reproducing them. Everywhere else, ids are global.
-    if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"packed input must have batch 1, got {q.shape[0]}"
-            )
-        bounds = cu_seqlens.tolist()
-        width = max(-(-(hi - lo) // cfg.block_size)
-                    for lo, hi in zip(bounds[:-1], bounds[1:]))
-        out = torch.zeros(1, q.shape[1], q.shape[2], width,
-                          dtype=torch.bool, device=q.device)
-        for lo, hi in zip(bounds[:-1], bounds[1:]):
-            m = moba_selection(q[:, :, lo:hi], k[:, :, lo:hi], cfg)
-            out[:, :, lo:hi, :m.shape[-1]] = m
-        return out
-```
-
-- [ ] **Step 9: Run the oracle-facing suite**
-
-Run: `uv run pytest tests/test_seqlayout.py tests/test_semantics.py tests/test_smoke.py -q`
-Expected: all pass. Existing tests pass no `cu_seqlens`, so they take the
-unchanged branch.
-
-- [ ] **Step 10: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/moba/seqlayout.py tests/test_seqlayout.py src/moba/ref/naive.py docs/superpowers/plans/2026-08-24-varlen-support.md
-git commit -m "feat: SeqLayout, the one place that knows sequences differ"
+git add src/moba/packing.py tests/test_packing.py src/moba/ref/naive.py docs/superpowers/plans/2026-08-24-varlen-support.md
+git commit -m "feat: packing helpers and a packed-aware oracle"
 ```
 
 ---
 
-## Task 2: Block representatives over a ragged batch
+## Task 2: Block representatives over a packed batch
 
-Smallest kernel change, and it isolates the "blocks are cut per sequence" idea
-before anything depends on it.
+Smallest kernel change; isolates "blocks are cut per sequence" before anything
+depends on it.
 
 **Files:**
 - Modify: `src/moba/kernels/gate.py` — `_block_representatives_fwd`,
@@ -704,10 +502,9 @@ before anything depends on it.
 - Test: `tests/test_gate.py`
 
 **Interfaces:**
-- Consumes: `SeqLayout` (Task 1).
-- Produces: `block_representatives_triton(k, cfg, layout=None)` returning
-  `[1, H_kv, total_blocks, D]` when a layout is given, `[B, H, num_blocks, D]`
-  otherwise.
+- Consumes: `validate_cu_seqlens` (Task 1).
+- Produces: `block_representatives_triton(k, cfg, cu_seqlens=None,
+  max_seqlen=None)` returning `[B, H_kv, NB, D]` when packed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -715,89 +512,81 @@ Append to `tests/test_gate.py`:
 
 ```python
 def test_block_representatives_are_pooled_per_sequence(device):
-    """A block must average its own sequence's keys and stop at the boundary.
+    """A block averages its own sequence's keys and stops at the boundary.
 
-    The bug this catches is a block straddling two sequences: its mean would mix
-    documents, every downstream stage would accept it, and the numbers would
-    stay finite. Compared against per-sequence pooling of the same keys.
+    The bug this catches is a block straddling two sequences: its mean would
+    mix documents, every downstream stage would accept it, and the numbers stay
+    finite. Compared against per-sequence pooling of the same keys.
     """
-    from moba.seqlayout import SeqLayout
-
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
     cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
     gen = torch.Generator(device=device).manual_seed(0)
     k = torch.randn(1, 2, 48, 16, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
-    got = block_representatives_triton(k, cfg, layout=lay)
-    assert got.shape == (1, 2, lay.total_blocks, 16)
+    got = block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=20)
+    assert got.shape == (3, 2, 5, 16)      # B=3, H_kv=2, NB=cdiv(20,4)=5
 
     lo = 0
-    off = 0
-    for n in [20, 12, 16]:
+    for i, n in enumerate([20, 12, 16]):
         want = block_representatives_triton(k[:, :, lo:lo + n], cfg)
         nb = want.shape[2]
-        assert torch.equal(got[:, :, off:off + nb], want)
+        assert torch.equal(got[i:i + 1, :, :nb], want), f"sequence {i}"
         lo += n
-        off += nb
-    assert off == lay.total_blocks
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Expected: `TypeError: block_representatives_triton() got an unexpected keyword
-argument 'layout'`.
+Expected: `TypeError` on the `cu_seqlens` keyword.
 
-- [ ] **Step 3: Give the kernel a block range**
+- [ ] **Step 3: Patch the kernel**
 
-Add `BlockStart, BlockEnd` pointers and `VARLEN: tl.constexpr` to
-`_block_representatives_fwd`, and replace the row computation:
+Add `CuSeqlens` pointer, `T`, `H_KV`, `N_BLOCKS` (runtime), `VARLEN:
+tl.constexpr`. Replace the row computation:
 
 ```python
     if VARLEN:
-        # Blocks are cut per sequence, so a block's extent is looked up rather
-        # than computed. The tail case this creates is the one this kernel
-        # already handled for a padded sequence's last block -- it now arises
-        # once per sequence instead of once per batch.
-        lo = tl.load(BlockStart + blk)
-        hi = tl.load(BlockEnd + blk)
+        # `b` comes from the grid (D-VL-4), so a block's extent is two
+        # arithmetic ops on values already loaded -- no lookup array (D-VL-5).
+        b = pid_bh // H_KV
+        h = pid_bh % H_KV
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        if blk * BLOCK_SIZE >= eos - bos:
+            return              # a padded index slot; this block does not exist
+        lo = bos + blk * BLOCK_SIZE
+        hi = tl.minimum(lo + BLOCK_SIZE, eos)
+        kbase = h * T * D                       # [1, H_kv, T, D]
     else:
         lo = blk * BLOCK_SIZE
         hi = tl.minimum(lo + BLOCK_SIZE, S)
+        kbase = pid_bh * S * D
 
     rows = lo + tl.arange(0, BLOCK_POW2)
     live = (rows < hi) & (tl.arange(0, BLOCK_POW2) < BLOCK_SIZE)
     occupancy = hi - lo
 ```
 
-and the store, whose row stride is now `N_BLOCKS` passed in rather than
-`tl.cdiv(S, BLOCK_SIZE)`:
-
-```python
-    tl.store(Kbar + pid_bh * N_BLOCKS * D + blk * D + offs_d,
-             mean.to(Kbar.dtype.element_ty))
-```
-
-Pass `N_BLOCKS` as a runtime argument in both modes so the two paths differ only
-in the range lookup.
+`N_BLOCKS` becomes a runtime argument (`NB` packed,
+`cdiv(S, BLOCK_SIZE)` padded) so the store's row stride is one expression in
+both modes.
 
 - [ ] **Step 4: Update the wrapper**
 
 ```python
 def block_representatives_triton(
-    k: torch.Tensor, cfg: MoBAConfig, layout: "SeqLayout | None" = None
+    k: torch.Tensor, cfg: MoBAConfig,
+    cu_seqlens: torch.Tensor | None = None, max_seqlen: int | None = None,
 ) -> torch.Tensor:
 ```
 
-When `layout` is None the grid and shapes are exactly as today. When given,
-require `k.shape[0] == 1`, use `n = layout.total_blocks`, grid
-`(n, 1 * h)`, and pass the two arrays with `VARLEN=True`.
+Padded: grid and shapes exactly as today. Packed: require `k.shape[0] == 1`,
+call `validate_cu_seqlens`, set `nb = cdiv(max_seqlen, cfg.block_size)`, grid
+`(nb, b * h_kv)`, output `[B, H_kv, nb, D]`.
 
-- [ ] **Step 5: Run the gate suite**
+- [ ] **Step 5: Run**
 
-Run: `uv run pytest tests/test_gate.py -q`
-Expected: 39 passed — 38 existing plus the new one.
+Run: `uv run pytest tests/test_gate.py -q` — 39 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -808,37 +597,37 @@ git commit -m "feat: block representatives pooled per sequence"
 
 ---
 
-## Task 3: The gate over a ragged batch
+## Task 3: The gate over a packed batch
 
-The correctness linchpin. D-VL-7 delegates the causal mask's correctness here.
+The correctness linchpin; D-VL-7 delegates the causal mask's safety here.
 
 **Files:**
 - Modify: `src/moba/kernels/gate.py` — `_moba_gate_fwd`, `gate_select`
-- Test: `tests/test_gate.py`, `tests/test_varlen.py`
+- Create: `tests/test_varlen.py`
+- Test: `tests/test_varlen.py`
 
 **Interfaces:**
-- Consumes: `SeqLayout`, ragged `kbar` (Task 2).
-- Produces: `gate_select(q, kbar, cfg, layout=None)` returning
-  `[1, H_q, T, top_k]` int32 of **global** block ids, -1 padded.
+- Produces: `gate_select(q, kbar, cfg, cu_seqlens=None, max_seqlen=None)`
+  returning `[1, H_q, T, top_k]` int32 of **sequence-local** block ids,
+  -1 padded.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_varlen.py` with the boundary test first — it is the whole
-point of the task:
+Create `tests/test_varlen.py`:
 
 ```python
 """Packed (variable-length) batches, end to end.
 
-Anchored the same way throughout: the packed kernel must agree with the *same
-code path* run on each sequence separately. Everything else -- arithmetic,
-routing, tuning -- is identical on both sides, so a disagreement can only be a
-boundary or indexing bug.
+Anchored throughout against the *same code path* run on each sequence alone.
+Arithmetic, routing and tuning are identical on both sides, so a disagreement
+can only be a boundary or indexing bug.
 
-The failure to fear does not crash. A block that straddles a sequence boundary,
-or a gate that offers a query another document's block, produces finite,
-plausible numbers of exactly the right shape.
+The failure to fear does not crash. A block straddling a boundary, or a gate
+offering a query another document's block, produces finite, plausible numbers
+of exactly the right shape.
 
-See `docs/superpowers/plans/2026-08-24-varlen-support.md`.
+See `docs/superpowers/plans/2026-08-24-varlen-support.md` and
+`docs/learning/04-packed-sequences-and-where-the-work-goes.md`.
 """
 
 import pytest
@@ -846,266 +635,239 @@ import torch
 
 from moba.config import MoBAConfig
 from moba.kernels.gate import block_representatives_triton, gate_select
-from moba.seqlayout import SeqLayout
 
 LENS = [20, 12, 16, 5]
 CU = [0, 20, 32, 48, 53]
+MAXLEN = 20
+TOTAL = 53
 
 
-def _packed(device, dtype, heads=2, d=16, seed=0, total=53):
+def _packed(device, dtype, heads=2, d=16, seed=0):
     gen = torch.Generator(device=device).manual_seed(seed)
-    mk = lambda: torch.randn(1, heads, total, d, generator=gen,
+    mk = lambda: torch.randn(1, heads, TOTAL, d, generator=gen,
                              device=device, dtype=dtype)
     return mk(), mk(), mk()
 
 
-def test_no_selected_block_crosses_a_sequence_boundary(device):
-    """The invariant the untouched causal mask depends on.
+def _cu(device):
+    return torch.tensor(CU, dtype=torch.int32, device=device)
 
-    `qk += tl.where(key_pos <= rows, ...)` compares packed token indices. Within
-    a sequence packed order is position order, so it is correct -- but only
-    because a query is never offered a block from another sequence. Nothing in
-    the attention kernel checks that. This is the check.
+
+def test_no_selected_block_crosses_a_sequence_boundary(device):
+    """The invariant the untouched causal mask depends on (D-VL-7).
+
+    Block ids are sequence-local, so "crossing" appears as an id at or beyond
+    that sequence's own block count -- a block that does not exist for the
+    query but would address a real, padded index slot.
     """
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
+    cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
-    kbar = block_representatives_triton(k, cfg, layout=lay)
-    idx = gate_select(q, kbar, cfg, layout=lay)
-    assert idx.shape == (1, 2, lay.total_tokens, cfg.top_k)
+    kbar = block_representatives_triton(k, cfg, cu_seqlens=cu,
+                                        max_seqlen=MAXLEN)
+    idx = gate_select(q, kbar, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    assert idx.shape == (1, 2, TOTAL, cfg.top_k)
 
-    seq_of_block = lay.seq_of_block
-    for t in range(lay.total_tokens):
-        seq = int((cu[1:] <= t).sum())
-        chosen = idx[0, :, t]
+    lo = 0
+    for n in LENS:
+        n_blocks = -(-n // cfg.block_size)
+        chosen = idx[0, :, lo:lo + n]
         real = chosen[chosen >= 0]
-        assert bool((seq_of_block[real.long()] == seq).all()), (
-            f"token {t} (sequence {seq}) selected a block from another sequence"
+        assert bool((real < n_blocks).all()), (
+            f"sequence at {lo} (length {n}, {n_blocks} blocks) selected id "
+            f"{int(real.max())}"
         )
+        lo += n
 
 
 def test_gate_matches_running_each_sequence_alone(device):
-    """Selections must be identical, not merely similar -- routing is a ranking."""
+    """Selections must be identical -- routing is a ranking, not an estimate."""
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
+    cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
-    packed = gate_select(q, block_representatives_triton(k, cfg, layout=lay),
-                         cfg, layout=lay)
+    packed = gate_select(
+        q, block_representatives_triton(k, cfg, cu_seqlens=cu,
+                                        max_seqlen=MAXLEN),
+        cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
 
-    lo, off = 0, 0
+    lo = 0
     for n in LENS:
         piece = gate_select(
             q[:, :, lo:lo + n],
             block_representatives_triton(k[:, :, lo:lo + n], cfg), cfg)
-        # The packed gate emits global ids; the per-sequence one emits local.
-        shifted = torch.where(piece >= 0, piece + off, piece)
-        assert torch.equal(packed[:, :, lo:lo + n], shifted)
+        # Both are sequence-local, so no offset is needed (D-VL-6).
+        assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
-        off += (n + cfg.block_size - 1) // cfg.block_size
 
 
-def test_a_tile_spanning_a_boundary_is_never_launched(device):
-    """`tile_map` cuts tiles per sequence, so `bos` is a scalar in the kernel.
+def test_short_sequences_get_programs_that_return_immediately(device):
+    """The per-sequence grid over-launches; those programs must be harmless.
 
-    Uses a tile size larger than several sequences, which is the arrangement
-    that would straddle if the map were not there.
+    Sequence 3 holds 5 tokens against a max of 20, so most of its query tiles
+    have nothing to do. They must write nothing and leave no id in range.
     """
-    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
-    assert lay.tile_map.shape[0] == sum(
-        (n + 31) // 32 for n in LENS), "one tile per sequence chunk"
-    q, k, _ = _packed(device, torch.bfloat16)
-    idx = gate_select(q, block_representatives_triton(k, cfg, layout=lay),
-                      cfg, layout=lay)
-    assert bool((idx < lay.total_blocks).all())
+    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, _ = _packed(device, torch.bfloat16, seed=2)
+    idx = gate_select(
+        q, block_representatives_triton(k, cfg, cu_seqlens=cu,
+                                        max_seqlen=MAXLEN),
+        cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    nb = -(-MAXLEN // cfg.block_size)
+    assert bool(((idx >= -1) & (idx < nb)).all())
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Expected: `TypeError: gate_select() got an unexpected keyword argument 'layout'`.
+Expected: `TypeError` on the `cu_seqlens` keyword.
 
-- [ ] **Step 3: Give the gate kernel a sequence**
+- [ ] **Step 3: Patch the kernel**
 
-Add `TileMap, CuSeqlens, CuBlocks` pointers and `VARLEN: tl.constexpr`. Replace
-the tile's row computation:
+Add `CuSeqlens`, `T`, `H_KV`, `VARLEN`. Replace the tile setup:
 
 ```python
     if VARLEN:
-        # One tile belongs to exactly one sequence (`SeqLayout.tile_map`), so
-        # every value here is a *scalar*. That is what keeps the streaming
-        # top-k below unchanged: a tile spanning two sequences would make the
-        # loop bound and the candidate range per-lane, and a Triton program has
-        # one loop bound for all its lanes.
-        seq = tl.load(TileMap + pid_m * 2)
-        off = tl.load(TileMap + pid_m * 2 + 1)
-        bos = tl.load(CuSeqlens + seq)
-        eos = tl.load(CuSeqlens + seq + 1)
-        boc = tl.load(CuBlocks + seq)            # this sequence's first block
-        n_seq_blocks = tl.load(CuBlocks + seq + 1) - boc
-        local = off + tl.arange(0, BLOCK_M)      # position within the sequence
-        offs_m = bos + local                     # packed token index
-        live = offs_m < eos
+        # `b` from the grid (D-VL-4). Every value here is a *scalar*, which is
+        # what keeps the streaming top-k below a zero-line diff: a tile
+        # spanning two sequences would make the candidate range per-lane, and a
+        # Triton program has one loop bound for all its lanes. The per-sequence
+        # grid makes straddling impossible by construction.
+        b = pid_bh // H_Q
+        hq = pid_bh % H_Q
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        seqlen = eos - bos
+        if pid_m * BLOCK_M >= seqlen:
+            return
+        local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = bos + local          # packed token index: Q and BlockIdx
+        live = local < seqlen
+        n_cand = tl.cdiv(seqlen, BLOCK_SIZE)
+        qbase = hq * T * D
+        kbar_base = (b * H_KV + hq // Q_PER_KV) * N_BLOCKS * D
     else:
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         local = offs_m
         live = offs_m < S
-        boc = 0
-        n_seq_blocks = N_BLOCKS
+        n_cand = N_BLOCKS
+        qbase = pid_bh * S * D
+        kbar_base = kv_bh * N_BLOCKS * D
 
-    own_block = local // BLOCK_SIZE              # sequence-local (D-VL-6)
+    own_block = local // BLOCK_SIZE    # sequence-local in both modes
 ```
 
-`offs_m` addresses `Q` and `BlockIdx` (packed token index); `local` drives
-`own_block` and the horizon. In padded mode they are the same value, so nothing
-moves.
+Then substitute in the existing body: `N_BLOCKS` becomes `n_cand` wherever it
+bounds the **candidate range** (`in_range`, the horizon's `tl.minimum`) and
+stays `N_BLOCKS` where it is the **stride of `Kbar`** and the sentinel value in
+the tie-break. **Conflating those is the likeliest bug in this task.** The merge
+loop — tie-break, eviction, +inf retirement, seeding — is unchanged, and emitted
+ids are already sequence-local so nothing is added to them.
 
-- [ ] **Step 4: Offset the candidate loads and the emitted ids**
+- [ ] **Step 4: Update `gate_select`**
 
-Two edits inside the streaming loop, and one at the emit. The loop bound uses
-`n_seq_blocks` in place of `N_BLOCKS`:
+Padded: unchanged. Packed: require `q.shape[0] == 1`, call
+`validate_cu_seqlens`, grid `(cdiv(max_seqlen, block_m), b * h_q)`, output
+`[1, H_q, T, top_k]`.
 
-```python
-        in_range = cols < n_seq_blocks
-        kbar = tl.load(
-            Kbar + kv_bh * N_BLOCKS * D + (boc + cols)[:, None] * D
-            + offs_d[None, :],
-            mask=in_range[:, None], other=0.0,
-        )
-```
-
-and the horizon:
-
-```python
-    horizon = tl.max(tl.where(live, own_block, 0))
-    n_chunks = tl.cdiv(tl.minimum(horizon, n_seq_blocks), BLOCK_N)
-```
-
-The whole merge — tie-break, eviction, +inf retirement, seeding — is
-**unchanged**: it operates on sequence-local `cols` throughout. At the emit,
-add the offset once:
-
-```python
-        tl.store(BlockIdx + pid_bh * S * TOP_K + offs_m * TOP_K + j,
-                 tl.where(valid, boc + emitted, -1), mask=live)
-```
-
-Note `N_BLOCKS` remains the *stride* of `Kbar` (total blocks) while
-`n_seq_blocks` is the *range*. Conflating them is the likely bug here.
-
-- [ ] **Step 5: Update `gate_select`**
-
-Add `layout: SeqLayout | None = None`. When given, require `q.shape[0] == 1`,
-set `n = layout.total_blocks`, grid `(layout.tile_map.shape[0], 1 * h)`, and
-pass the three arrays with `VARLEN=True`. The `block_m` used to build the layout
-must equal the one launched with — assert it rather than assume, since a
-mismatch produces a silently wrong map:
-
-```python
-    if layout is not None and layout.tile != block_m:
-        raise ValueError(
-            f"layout was built for tile {layout.tile} but the gate launches "
-            f"{block_m}; the tile map would not match the grid"
-        )
-```
-
-- [ ] **Step 6: Run**
+- [ ] **Step 5: Run**
 
 Run: `uv run pytest tests/test_gate.py tests/test_varlen.py -q`
-Expected: all pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/moba/kernels/gate.py tests/test_gate.py tests/test_varlen.py
-git commit -m "feat: gate ranks within a sequence and emits global block ids"
+git add src/moba/kernels/gate.py tests/test_varlen.py
+git commit -m "feat: gate ranks within a sequence over a packed batch"
 ```
 
 ---
 
-## Task 4: The index, and confirming it needs almost nothing
+## Task 4: The CSC index over a packed batch
 
 **Files:**
 - Modify: `src/moba/kernels/index_fused.py`, `src/moba/kernels/index.py`
 - Test: `tests/test_varlen.py`
 
 **Interfaces:**
-- Produces: `build_csc_fused(q, k, cfg, layout=None)`; `CSCIndex` gains
-  `layout: SeqLayout | None`; a `csc_to_mask` that returns sequence-local
-  columns when a layout is present.
+- Produces: `build_csc_fused(q, k, cfg, cu_seqlens=None, max_seqlen=None)`;
+  `CSCIndex` gains `cu_seqlens: torch.Tensor | None` and
+  `max_seqlen: int | None`; `csc_to_mask` returns `[1, H_q, T, NB]` when packed.
 
 - [ ] **Step 1: Write the failing test**
 
-```python
-def test_index_needs_no_batch_axis_under_packing(device):
-    """Global block ids mean the CSC arrays are already the right shape.
+Append to `tests/test_varlen.py`:
 
-    A column is keyed by (kv_head, global_block). With B pinned to 1 the
-    existing `[B, H_kv, N]` arrays hold exactly that, so the transpose code is
-    untouched -- the block ids it is handed simply span the whole batch.
+```python
+def test_columns_keep_a_batch_axis_and_hold_only_their_sequence(device):
+    """Pack the data, pad the index (D-VL-3).
+
+    Block ids are sequence-local, so a column is `(b, kv_head, local_block)`
+    and the CSC arrays keep a real batch axis -- exactly FlashMoBA's
+    `moba_col_offsets: (batch_size, num_heads, max_lg_col_num)` alongside a
+    packed `q`.
     """
     from moba.kernels.index_fused import build_csc_fused
 
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
+    cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
-    index = build_csc_fused(q, k, cfg, layout=lay)
-    assert index.col_nnz.shape == (1, 2, lay.total_blocks)
-    assert index.num_blocks == lay.total_blocks
-    assert int(index.col_nnz.sum()) == int(
-        (gate_select(q, block_representatives_triton(k, cfg, layout=lay),
-                     cfg, layout=lay) >= 0).sum())
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    assert index.col_nnz.shape == (4, 2, 5)     # B, H_kv, NB
+    assert index.num_blocks == 5
+
+    for b, (lo, n) in enumerate(zip(CU[:-1], LENS)):
+        for kv in range(2):
+            for blk in range(index.num_blocks):
+                cnt = int(index.col_nnz[b, kv, blk])
+                if cnt == 0:
+                    continue
+                off = int(index.col_offsets[b, kv, blk])
+                rows = index.row_indices[b, kv, off:off + cnt]
+                assert bool(((rows >= lo) & (rows < lo + n)).all()), (
+                    f"column ({b}, {kv}, {blk}) holds a foreign query")
 
 
-def test_every_column_holds_only_its_own_sequence_s_queries(device):
-    """Blocks are per sequence, so a column's queries must be too."""
+def test_index_round_trips_to_the_gate_under_packing(device):
+    from moba.kernels.index import csc_to_mask
     from moba.kernels.index_fused import build_csc_fused
 
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
+    cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
-    index = build_csc_fused(q, k, cfg, layout=lay)
-
-    for kv in range(2):
-        for blk in range(lay.total_blocks):
-            lo = int(index.col_offsets[0, kv, blk])
-            cnt = int(index.col_nnz[0, kv, blk])
-            rows = index.row_indices[0, kv, lo:lo + cnt]
-            seq = int(lay.seq_of_block[blk])
-            assert bool(((rows >= lay.cu_seqlens[seq])
-                         & (rows < lay.cu_seqlens[seq + 1])).all()), (
-                f"column {blk} (sequence {seq}) holds a foreign query"
-            )
+    index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    got = csc_to_mask(index, TOTAL)
+    assert got.shape == (1, 2, TOTAL, 5)
+    assert int(got.sum()) == int(index.col_nnz.sum())
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Expected: `TypeError` on the `layout` keyword.
+- [ ] **Step 3: Give the transpose kernels a batch from the grid**
 
-- [ ] **Step 3: Thread `layout` through, changing nothing else**
+`_count_columns` and `_scatter_pairs` gain `CuSeqlens`, `T`, `H_KV`, `VARLEN`.
+In packed mode they launch `(cdiv(max_seqlen, BLOCK_M), B * H_q)`; each derives
+`b` and `hq`, reads `bos`/`eos`, early-returns past the sequence, and addresses
+`BlockIdx` at the packed token `bos + local`. The column base becomes
+`(b * H_KV + hq // Q_PER_KV) * N_BLOCKS`, and `RowIdx`/`HeadIdx`/`SlotIdx` are
+based at `(b * H_KV + kv) * T_col`.
 
-`build_csc_fused(q, k, cfg, layout=None)` passes the layout to
-`block_representatives_triton` and `gate_select`, then calls
-`build_csc_from_indices` with `num_blocks=layout.total_blocks`. The three
-transpose kernels are **not modified**: block ids are already global and
-`B = 1`.
+`_offsets_and_order` launches `(B * H_kv,)` and its **body is unchanged**. Note
+that `N_BLOCKS` here is `NB` — one sequence's block count, not the batch's.
+That is what keeps its `static_range(N_BLOCKS)` reduction the size it is in the
+padded path; global block numbering would have multiplied it by the batch
+(D-VL-6, and Risks).
 
-Add `layout` to `CSCIndex` (default `None`) so consumers can reach the block
-ranges without a second argument everywhere.
+`row_indices` stores the **packed token index**, so the attention kernel can
+address `Q` directly and the causal comparison stays a raw position compare.
 
-- [ ] **Step 4: Add a packed `csc_to_mask`**
+- [ ] **Step 4: `csc_to_mask` packed form and `CSCIndex` fields**
 
-When `index.layout` is set, return `[1, H_q, T, max_blocks_in_any_sequence]`
-with **sequence-local** columns, matching the oracle's convention from Task 1
-Step 8. Document the conversion — `global = cu_blocks[seq] + local` — in one
-place.
+Returns `[1, H_q, T, NB]` with sequence-local ids — the convention Task 1
+established for `moba_selection`. `CSCIndex` carries `cu_seqlens` and
+`max_seqlen` so the backward needs no extra argument.
 
 - [ ] **Step 5: Run**
 
@@ -1115,7 +877,7 @@ Run: `uv run pytest tests/test_index.py tests/test_index_fused.py tests/test_var
 
 ```bash
 git add src/moba/kernels/index.py src/moba/kernels/index_fused.py tests/test_varlen.py
-git commit -m "feat: CSC index over a packed batch, unchanged transpose"
+git commit -m "feat: CSC index over a packed batch, padded per sequence"
 ```
 
 ---
@@ -1123,61 +885,54 @@ git commit -m "feat: CSC index over a packed batch, unchanged transpose"
 ## Task 5: Forward attention over a packed batch
 
 **Files:**
-- Modify: `src/moba/kernels/moba_fwd.py` — `_moba_attn_fwd`, `_validate`,
-  `attend_partials`, `moba_forward`
+- Modify: `src/moba/kernels/moba_fwd.py`
 - Test: `tests/test_varlen.py`
 
 **Interfaces:**
 - Produces: `moba_forward(q, k, v, cfg, index=None, causal=True,
-  partials_dtype=None, cu_seqlens=None)`.
+  partials_dtype=None, cu_seqlens=None, max_seqlen=None)`.
 - **Not produced, deliberately:** any change to `_moba_combine` (D-VL-8).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 @pytest.mark.parametrize("gate", [(4, 3), (8, 4)])
 def test_forward_matches_running_each_sequence_alone(device, gate):
-    """Bitwise per sequence: the packed run must reproduce the sliced runs.
-
-    Not `allclose`. Slicing gives the same inputs in the same order, and the
-    kernel's per-(query, slot) addressing is order-independent, so anything but
-    equality is a boundary bug.
-    """
+    """Bitwise per sequence. Slicing gives identical inputs in identical order,
+    and the kernel addresses output per (query, slot) rather than by position,
+    so anything but equality is a boundary bug."""
     from moba.kernels.moba_fwd import moba_forward
 
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
+    cu = _cu(device)
     q, k, v = _packed(device, torch.bfloat16)
 
-    packed = moba_forward(q, k, v, cfg, cu_seqlens=cu)
+    packed = moba_forward(q, k, v, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
     lo = 0
     for n in LENS:
         piece = moba_forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
                              v[:, :, lo:lo + n], cfg)
-        assert torch.equal(packed[:, :, lo:lo + n], piece), (
-            f"sequence starting at {lo} differs"
-        )
+        assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
 
 
 def test_packed_forward_matches_the_oracle(device):
     """Routing held fixed, so this measures arithmetic and not gate flips."""
+    from moba.kernels.index import csc_to_mask
     from moba.kernels.index_fused import build_csc_fused
     from moba.kernels.moba_fwd import moba_forward
     from moba.ref.naive import moba_attention_naive
     from moba.tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
-    from moba.kernels.index import csc_to_mask
 
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    lay = SeqLayout.from_cu_seqlens(cu, cfg.block_size, tile=32)
+    cu = _cu(device)
     q64, k64, v64 = _packed(device, torch.float64)
     qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
 
-    index = build_csc_fused(qb, kb, cfg, layout=lay)
-    selected = csc_to_mask(index, lay.total_tokens)
+    index = build_csc_fused(qb, kb, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    selected = csc_to_mask(index, TOTAL)
 
     truth = moba_attention_naive(q64, k64, v64, cfg, selected=selected,
                                  cu_seqlens=cu)
@@ -1195,51 +950,64 @@ def test_packed_input_with_batch_above_one_is_rejected(device):
     cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
     q = torch.randn(2, 2, 16, 16, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="batch 1"):
+        moba_forward(q, q, q, cfg, cu_seqlens=cu, max_seqlen=8)
+
+
+def test_max_seqlen_is_required_when_packing(device):
+    """Not derivable without a host synchronization, so it is an argument."""
+    from moba.kernels.moba_fwd import moba_forward
+    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
+    q = torch.randn(1, 2, 16, 16, dtype=torch.bfloat16, device=device)
+    with pytest.raises(ValueError, match="max_seqlen"):
         moba_forward(q, q, q, cfg, cu_seqlens=cu)
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Give the attention kernel a block range**
+- [ ] **Step 3: Patch `_moba_attn_fwd`**
 
-Add `BlockStart, BlockEnd` and `VARLEN: tl.constexpr`, and replace the key
-range. This is the **only** change to `_moba_attn_fwd`:
+Four branched sites, per the table above. Add `CuSeqlens`, `T`, `VARLEN`:
 
 ```python
     if VARLEN:
-        # A block's extent is looked up, not computed, because blocks are cut
-        # per sequence and the last of each is short. Two scalar loads.
-        lo_k = tl.load(BlockStart + blk)
-        hi_k = tl.load(BlockEnd + blk)
+        b = pid_bh // H_KV
+        bos = tl.load(CuSeqlens + b)
+        eos = tl.load(CuSeqlens + b + 1)
+        q_base = 0                      # the tensor's batch axis is 1
+        q_part_base = 0
+        kv_base = (pid_bh % H_KV) * T * D
+        lo_k = bos + blk * BLOCK_SIZE
+        hi_k = tl.minimum(lo_k + BLOCK_SIZE, eos)
+        q_span = T
     else:
+        pid_b = pid_bh // H_KV
+        q_base = pid_b * H_Q * S * D
+        q_part_base = pid_b * H_Q * S * K_SLOTS
+        kv_base = pid_bh * S * D
         lo_k = blk * BLOCK_SIZE
         hi_k = S
+        q_span = S
+
     key_pos = lo_k + tl.arange(0, BLOCK_SIZE)
     key_ok = key_pos < hi_k
 ```
 
-`kv_base`, the gathered Q load, `q_row`, the additive masks, `tl.dot`, the
-online softmax and every store are **untouched**. In particular the causal mask
-stays
-
-```python
-        qk += tl.where(key_pos[None, :] <= rows[:, None], 0.0, float("-inf"))
-```
-
-with a comment pointing at D-VL-7 and at
+and `q_row = heads * q_span + rows`. **The causal mask is not touched** —
+comment it with a pointer to D-VL-7 and to
 `test_no_selected_block_crosses_a_sequence_boundary`.
 
 - [ ] **Step 4: Validation and plumbing**
 
-`_validate` gains `cu_seqlens`; when set it requires `q.shape[0] == 1` and
-`cu_seqlens[-1] == q.shape[2]`. `attend_partials` and `moba_forward` accept
-`cu_seqlens` and build the layout once (or take `index.layout` when an index is
-passed). Extend `_GROUP_CACHE`'s key with `bool(varlen)`.
+`_validate` gains `cu_seqlens`/`max_seqlen` and calls `validate_cu_seqlens`;
+missing `max_seqlen` with a given `cu_seqlens` raises. `attend_partials` and
+`moba_forward` accept both and take them from `index` when an index is passed.
+Extend `_GROUP_CACHE`'s key with `bool(varlen)`.
 
 - [ ] **Step 5: Run the full suite**
 
 Run: `uv run pytest -q`
-Expected: 379 existing pass unchanged, plus the new ones. **A pre-existing
+Expected: 379 existing pass unchanged plus the new ones. **A pre-existing
 failure means the padded path moved — stop.**
 
 - [ ] **Step 6: Commit**
@@ -1253,7 +1021,7 @@ git commit -m "feat: forward attention over a packed batch"
 
 ## Task 6: Backward over a packed batch
 
-Mirrors Task 5. Same two loads, same untouched everything-else.
+Mirrors Task 5; five branched sites instead of four.
 
 **Files:**
 - Modify: `src/moba/kernels/moba_bwd.py`, `src/moba/kernels/autograd.py`
@@ -1261,7 +1029,7 @@ Mirrors Task 5. Same two loads, same untouched everything-else.
 
 **Interfaces:**
 - Produces: `moba_attention(q, k, v, cfg, index=None, causal=True,
-  cu_seqlens=None)` differentiable end to end over a packed batch.
+  cu_seqlens=None, max_seqlen=None)`, differentiable over a packed batch.
 - **Not produced, deliberately:** changes to `_moba_dq_reduce`,
   `_moba_bwd_preprocess`, `compute_delta`, `reduce_dq` (D-VL-8).
 
@@ -1284,14 +1052,13 @@ def test_gradients_match_running_each_sequence_alone(device):
     from moba.kernels.autograd import moba_attention
 
     cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
-    cu = torch.tensor(CU, dtype=torch.int32, device=device)
-    q, k, v = _packed(device, torch.bfloat16)
-    gen = torch.Generator(device=device).manual_seed(5)
+    cu = _cu(device)
+    q, k, v = _packed(device, torch.bfloat16, seed=4)
     g = torch.randn_like(q) * 0.1
 
     pq, pk, pv = _grads(
-        lambda a, x, y: moba_attention(a, x, y, cfg, cu_seqlens=cu), q, k, v, g)
-
+        lambda a, x, y: moba_attention(a, x, y, cfg, cu_seqlens=cu,
+                                       max_seqlen=MAXLEN), q, k, v, g)
     lo = 0
     for n in LENS:
         sq, sk, sv = _grads(
@@ -1300,32 +1067,29 @@ def test_gradients_match_running_each_sequence_alone(device):
             g[:, :, lo:lo + n])
         for name, a, b in [("dq", pq, sq), ("dk", pk, sk), ("dv", pv, sv)]:
             assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
-                                  rtol=2e-2, atol=1e-3), (
-                f"{name} differs for the sequence starting at {lo}")
+                                  rtol=2e-2, atol=1e-3), f"{name} at {lo}"
         lo += n
 ```
 
-- [ ] **Step 2–4: Run, patch `_moba_bwd`, plumb**
+- [ ] **Step 2: Run to verify it fails**
 
-Identical treatment to Task 5 Step 3: `BlockStart`/`BlockEnd` plus `VARLEN`,
-replacing only
+- [ ] **Step 3: Patch `_moba_bwd`**
 
-```python
-    key_pos = blk * BLOCK_SIZE + sub * KEY_TILE + tl.arange(0, KEY_TILE)
-    key_ok = key_pos < S
-```
-
-with the looked-up range, keeping the sub-tile offset:
+Same treatment: `q_base`, `q_lin`, `kv_base`, the `DQPart` base and `kv_out`,
+plus the key range keeping its sub-tile offset:
 
 ```python
-    lo_k = tl.load(BlockStart + blk) if VARLEN else blk * BLOCK_SIZE
-    hi_k = tl.load(BlockEnd + blk) if VARLEN else S
     key_pos = lo_k + sub * KEY_TILE + tl.arange(0, KEY_TILE)
     key_ok = key_pos < hi_k
 ```
 
-`moba_backward` takes the layout from `index.layout`. `autograd.py` plumbs
-`cu_seqlens` into `forward` and stores the index as it already does.
+where `hi_k` is `tl.minimum(lo_k + BLOCK_SIZE, eos)` packed and `S` padded.
+
+- [ ] **Step 4: Plumb**
+
+`moba_backward` takes `cu_seqlens`/`max_seqlen` off `index`; `autograd.py`
+plumbs them into `forward`. Extend `_BWD_GROUP_CACHE`'s key with
+`bool(varlen)`.
 
 - [ ] **Step 5: Run the full suite**
 
@@ -1341,42 +1105,37 @@ git commit -m "feat: backward over a packed batch"
 ## Task 7: Baseline, measurement, documentation
 
 **Files:**
-- Modify: `src/moba/backends/sdpa_dense.py`, `bench/suite.py`
+- Modify: `src/moba/backends/sdpa_dense.py`, `bench/suite.py`, `CLAUDE.md`
 - Create: `bench/varlen_sweep.py`, `docs/varlen-measurements.md`
-- Modify: `CLAUDE.md` status line
 
-- [ ] **Step 1: Give the dense baseline varlen**
+- [ ] **Step 1: Give the dense baseline a packed path**
 
-`torch` supports it without kernel work, verified on this box: a
-`torch.nested.nested_tensor(..., layout=torch.jagged)` passed to
-`scaled_dot_product_attention` runs on the `FLASH_ATTENTION` backend, and
-`MATH` *refuses* with "no viable backend" — proving it dispatches to the fused
-varlen kernel rather than silently padding.
+Verified on this box: `torch.nested.nested_tensor(..., layout=torch.jagged)`
+passed to `scaled_dot_product_attention` runs on the `FLASH_ATTENTION` backend
+while `MATH` *refuses* with "no viable backend" — proof it dispatches to the
+fused varlen kernel rather than silently padding.
 
-This matters for honesty: the current padded benchmark compares us against a
-baseline that is also wasting work on padding. A packed comparison is the fair
-one.
+This matters for honesty: today's benchmark compares us against a baseline that
+is *also* wasting work on padding. A packed comparison is the fair one.
 
 - [ ] **Step 2: Benchmark, with allocation excluded**
 
-Reuse the lesson from `docs/gqa-measurements.md`: preallocate partials with
-`empty_partials` and pass `partials=`, and take medians. Timing
-`moba_forward` directly measures the WDDM allocator, not the kernel.
+Reuse the lesson from `docs/gqa-measurements.md`: preallocate with
+`empty_partials` and pass `partials=`, and take medians. Timing `moba_forward`
+directly measures the WDDM allocator, not the kernel — that mistake produced
+incoherent numbers once already.
 
-Measure, at `H_q=8, H_kv=2, block_size=128, top_k=8`:
-- a realistic ragged batch (e.g. lengths sampled 256–2048) packed vs padded to
-  max
-- tokens saved, `part_acc` bytes saved
-- grid size, packed vs padded — this should *rise*, which per
-  `docs/gqa-measurements.md` is worth more on 20 SMs than the byte saving
-- against nested-tensor dense SDPA on the same ragged batch
+At `H_q=8, H_kv=2, block_size=128, top_k=8`, on a ragged batch (lengths sampled
+256–2048), measure: tokens saved, `part_acc` bytes saved, **grid size packed vs
+padded**, and time against nested-tensor dense SDPA.
 
-- [ ] **Step 3: Write `docs/varlen-measurements.md`**
+- [ ] **Step 3: Write `docs/varlen-measurements.md`, prediction first**
 
-Structured like `docs/gqa-measurements.md`. State the prediction **before** the
-numbers: padding waste is `1 - mean(len)/max(len)`, so the gain is entirely a
-function of how ragged the batch is and should be ~0% on a uniform batch. Say
-so first, then measure.
+State before the numbers: padding waste is `1 - mean(len)/max(len)`, so the gain
+is a property of the *data*, not the kernel, and is ~0% on a uniform batch. Then
+measure. Also predict that the grid *grows* — a ragged batch yields more real
+blocks than a padded one yields useful ones — which per
+`docs/gqa-measurements.md` may be worth more on 20 SMs than the bytes saved.
 
 - [ ] **Step 4: Update the status line, then commit**
 
@@ -1389,24 +1148,30 @@ git commit -m "bench: packed batches against a packed dense baseline"
 
 ## Risks
 
-**A block or a tile straddling a boundary does not crash.** It produces finite,
-plausible numbers of the right shape and the model quietly attends across
-documents. Every task therefore compares against *per-sequence slices* rather
-than checking shapes, and Tasks 1 and 3 assert the boundary property directly.
+**A boundary crossing does not crash.** It produces finite, plausible numbers of
+the right shape and the model quietly attends across documents. Every task
+compares against per-sequence slices rather than checking shapes, and Task 3
+asserts the boundary property directly.
 
-**`N_BLOCKS` now means two things in the gate** — the stride of `Kbar` (total
-blocks) and, formerly, the candidate range (now `n_seq_blocks`). Conflating them
-is the most likely bug in Task 3 and would show as queries ranking against
-another sequence's representatives.
+**`N_BLOCKS` means two things in the gate** — the stride of `Kbar`, and the
+candidate range (now `n_cand`). Conflating them is the likeliest bug in Task 3
+and would appear as queries ranking against another sequence's representatives.
 
-**`_offsets_and_order` is O(N²) in a single program.** It does a
-`static_range(N_BLOCKS)` of full-vector reductions, one program per
-`(batch, kv_head)`. Packing raises `N_BLOCKS` from "blocks in one sequence" to
-"blocks in the whole batch", so a batch of 32 sequences multiplies it by ~32.
-This is a **pre-existing** scaling limit that packing makes reachable sooner.
-Measure it in Task 7 before assuming it is fine; if it dominates, the fix is a
-multi-block scan, which is its own piece of work and not in this plan.
+**Over-launched programs must be inert.** The per-sequence grid launches
+`cdiv(max_seqlen, ·)` programs for every sequence including short ones. Each
+must return before writing anything.
+`test_short_sequences_get_programs_that_return_immediately` checks the gate
+side; the attention kernel's existing `if n == 0: return` covers the block side.
 
-**Memory.** Packing removes padding from `part_acc`, the largest buffer, so
-packed should use *less* memory than padded at equal token count. If it does
-not, the layout is wrong somewhere.
+**Padded-index memory.** `row_indices` is `[B, H_kv, G·max_seqlen·top_k]`; its
+padding waste is the same raggedness ratio as the data's, but on metadata. At
+`B=32, H_kv=2, G=4, max_seqlen=2048, top_k=8` that is ~16 MB. Acceptable, but
+measure it in Task 7 rather than assume; the exact-sized alternative is a scan,
+which is separate work.
+
+**`_offsets_and_order` scaling is unchanged, deliberately.** It runs
+`static_range(N_BLOCKS)` full-vector reductions in a single program. Because
+block ids stay sequence-local (D-VL-6), `N_BLOCKS` is `NB` — one sequence's
+block count — exactly as in the padded path. Global numbering would have
+multiplied it by the batch. If a future change reintroduces global ids, this
+becomes O(N²) over the whole batch.
