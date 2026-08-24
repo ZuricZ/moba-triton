@@ -276,3 +276,57 @@ def test_gate_rejects_indivisible_head_counts(device):
     kbar = torch.randn(1, 3, 4, 64, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="divisible"):
         gate_select(q, kbar, cfg)
+
+
+def test_block_representatives_are_pooled_per_sequence(device):
+    """A block averages its own sequence's keys and stops at the boundary.
+
+    The bug this catches is a block straddling two sequences: its mean would mix
+    documents, every downstream stage would accept it, and the numbers stay
+    finite. Compared against per-sequence pooling of the same keys, bitwise --
+    the inputs are identical, so rounding cannot explain a difference.
+    """
+    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
+    gen = torch.Generator(device=device).manual_seed(0)
+    k = torch.randn(1, 2, 48, 16, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+
+    got = block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=20)
+    assert got.shape == (3, 2, 5, 16)      # B=3, H_kv=2, NB=cdiv(20,4)=5
+
+    lo = 0
+    for i, n in enumerate([20, 12, 16]):
+        want = block_representatives_triton(k[:, :, lo:lo + n], cfg)
+        nb = want.shape[2]
+        assert torch.equal(got[i:i + 1, :, :nb], want), f"sequence {i}"
+        lo += n
+
+
+def test_a_short_final_block_divides_by_its_real_occupancy(device):
+    """Every sequence now has a tail, not just the batch.
+
+    A sequence of 6 with block_size 4 ends in a 2-key block. Dividing that by 4
+    would shrink its representative toward zero and make it almost never
+    selected -- the bug the padded path already guards against, now arising once
+    per sequence rather than once per batch.
+    """
+    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float32)
+    cu = torch.tensor([0, 6, 10], dtype=torch.int32, device=device)
+    k = torch.ones(1, 1, 10, 8, device=device, dtype=torch.float32)
+    k[0, 0, 4] = 3.0
+    k[0, 0, 5] = 5.0            # sequence 0's tail block holds 3 and 5
+
+    got = block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=6)
+    assert got.shape == (2, 1, 2, 8)
+    assert torch.allclose(got[0, 0, 1], torch.full((8,), 4.0, device=device)), (
+        f"tail block averaged to {got[0, 0, 1, 0].item()}, expected 4.0"
+    )
+
+
+def test_packed_representatives_reject_a_real_batch_axis(device):
+    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
+    k = torch.randn(2, 2, 16, 16, device=device, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="batch 1"):
+        block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=8)
