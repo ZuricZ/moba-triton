@@ -83,6 +83,26 @@ never asks which mode it is in. *Rejected:* `if VARLEN:` branches scattered
 through six kernels. The difference must live in one place or it will be got
 wrong in six.
 
+**D-VL-3b — `SeqLayout` is built on the CPU and transferred once.**
+`from_cu_seqlens` takes a **CPU** tensor or a plain list of ints, does every
+`int()` extraction and every derivation there, and moves the four device-side
+arrays over in one transfer. *Rejected:* building it from a CUDA `cu_seqlens`.
+That reads `int(cu[-1])`, `int(cu_blocks[-1])` and `int(lengths.max())` off the
+device — **three host synchronizations**, measured at ~230 us each on this WSL
+box (`index_fused.py` module docstring), against a 2280 us forward. Roughly 30%
+of the pass, reintroducing precisely what the fused index builder was written to
+remove.
+
+This is not a workaround. `cu_seqlens` *originates* on the host: the data loader
+knows the lengths before it packs anything. Keeping the layout there is the same
+rule that puts it in PyTorch rather than Triton -- **work that scales with the
+number of sequences belongs on the host; work that scales with tokens belongs on
+the device.** A `SeqLayout` is also then cacheable across calls with the same
+batch shape.
+
+If a caller only has a CUDA `cu_seqlens`, they pay one sync to move it and are
+told so by the docstring, rather than paying three silently.
+
 **D-VL-4 — Blocks are cut per sequence; a block never straddles a boundary.**
 Not a preference. Cutting on the packed buffer would put tokens from two
 documents in one block, and a query selecting it would attend across the
@@ -321,6 +341,23 @@ def test_a_sequence_shorter_than_one_block_gets_one_short_block(device):
     assert lay.block_end.tolist() == [1]
 
 
+def test_building_a_layout_does_not_synchronize_with_the_host(device):
+    """Every scalar must come from CPU data, never off the device.
+
+    Reading `int(cu[-1])` from a CUDA tensor costs ~230 us on this box, and
+    there are three such reads to make. `index_fused` was written specifically
+    to remove synchronizations of that kind; reintroducing them here would cost
+    about 30% of a forward pass and look like a kernel regression.
+    """
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        SeqLayout.from_cu_seqlens([0, 20, 32, 48], block_size=4, tile=32,
+                                  device=device)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+
 @pytest.mark.parametrize("bad", [
     [1, 5],          # does not start at zero
     [0, 5, 3],       # not monotone
@@ -420,18 +457,27 @@ class SeqLayout:
 
     @classmethod
     def from_cu_seqlens(
-        cls, cu_seqlens: torch.Tensor, block_size: int, tile: int
+        cls, cu_seqlens: torch.Tensor | list[int], block_size: int, tile: int,
+        device=None,
     ) -> "SeqLayout":
         """Derives the full layout from cumulative sequence lengths.
 
+        Everything is computed on the CPU and the device arrays are transferred
+        once; see D-VL-3b. Passing a CUDA `cu_seqlens` costs one synchronization
+        to bring it back, which is one instead of the three that reading scalars
+        off it would cost.
+
         Args:
-            cu_seqlens: Cumulative token counts, [num_sequences + 1]. Must start
-                at zero, be strictly increasing, and hold no empty sequence.
+            cu_seqlens: Cumulative token counts, [num_sequences + 1], on the CPU
+                or as a plain list. Must start at zero, be strictly increasing,
+                and hold no empty sequence.
             block_size: Keys per MoBA block.
             tile: Queries per gate program, so the tile map can be built.
+            device: Where the four device-side arrays should live. Defaults to
+                CPU, which is what the unit tests want.
 
         Returns:
-            A populated SeqLayout on `cu_seqlens`' device.
+            A populated SeqLayout with its arrays on `device`.
 
         Raises:
             ValueError: If `cu_seqlens` is malformed or the sizes are not
@@ -456,7 +502,6 @@ class SeqLayout:
                 f"got lengths {lengths.tolist()}"
             )
 
-        device = cu_seqlens.device
         n_seq = lengths.numel()
         blocks_per = (lengths + block_size - 1) // block_size
         cu_blocks = torch.zeros(n_seq + 1, dtype=torch.int64, device=device)
@@ -492,7 +537,7 @@ class SeqLayout:
             block_start=block_start.to(i32),
             block_end=block_end.to(i32),
             seq_of_block=seq_of_block.to(i32),
-            tile_map=tile_map.to(i32).contiguous(),
+            tile_map=tile_map.to(i32).contiguous().to(device),
             tile=tile,
             total_tokens=int(cu[-1]),
             total_blocks=total_blocks,
