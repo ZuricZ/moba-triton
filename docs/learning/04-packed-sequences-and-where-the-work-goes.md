@@ -133,13 +133,24 @@ Anything that scales with 32 is not worth a kernel launch, and worse, putting it
 on the device means fetching scalars back off it. The fetch is the expensive
 part, never the arithmetic.
 
-The same rule explains a second decision. A **query tile** covers 32 queries,
-and a tile spanning two sequences would have lanes with different candidate
-ranges -- but a Triton program has one loop bound for all its lanes. Rather than
-mask that per element on every iteration, a small CPU-built map says which
-sequence each tile belongs to, so tiles never straddle. Ragged work is cheaper
-to fix on the CPU than in the kernel. Borrowed from fla-org's NSA, whose
-`token_indices` array does exactly this.
+The same rule decides a second question. A **query tile** covers 32 queries, and
+a tile spanning two sequences would give its lanes different candidate ranges --
+but a Triton program has one loop bound for all its lanes. So tiles must never
+straddle a boundary.
+
+> **Superseded, 2026-08-24.** This note originally described a CPU-built
+> tile-to-sequence map, borrowed from NSA's `token_indices`. It is no longer
+> needed. If the caller passes `max_seqlen` -- which FlashAttention already
+> requires, for exactly the CPU-waits-for-GPU reason above -- the grid can be
+> shaped `(cdiv(max_seqlen, BLOCK_M), batch, heads)` and every program learns
+> its sequence from its own program id. Tiles cannot straddle because the grid
+> is per-sequence by construction. Sequences shorter than the longest get a few
+> programs that return immediately, which on a card measured as grid-starved
+> (`docs/gqa-measurements.md`) is not the thing to economise on.
+>
+> The rule survives its own example: the raggedness is still resolved outside
+> the kernel, just by the grid's shape rather than by an array. The plan is
+> being rewritten accordingly, and this note will be revised with it.
 
 ## The invariant that keeps the causal mask untouched
 
@@ -173,15 +184,19 @@ property directly rather than hoping a downstream comparison notices.
 | address arithmetic inside the kernels | | | **same** |
 | how a block finds its keys | `blk * BLOCK_SIZE`, `< S` | `BlockStart[blk]`, `< BlockEnd[blk]` | two lookups |
 | which blocks the gate may offer | all past blocks | this sequence's past blocks | one offset |
-| how query tiles are assigned | `pid * BLOCK_M` | a small CPU-built map | new array |
+| how query tiles are assigned | `pid * BLOCK_M` | a per-sequence grid dimension | grid shape |
 
 Shapes keep four dimensions with the batch pinned to 1, so `[1, H, T, D]` holds
 every token of every sequence. That is deliberate: the kernels address queries
 as `pid_bh * S * D + row * D`, and with batch 1 that already reads
-`head * T * D + token * D` -- correct, character for character. FlashAttention's
-`[T, H, D]` convention is the better public interface and the wrong internal
-one for us; adopting it would rewrite six kernels' pointer arithmetic to buy
-nothing.
+`head * T * D + token * D` -- correct, character for character.
+
+FlashAttention's `[T, H, D]` is arguably the better *public* interface, and
+switching would cost less than it first appears: about a dozen address
+expressions, all of the same shape. We keep head-major because 379 tests and
+every benchmark number speak it, not because switching is hard. That is a
+provisional choice with a condition attached -- see `docs/deferred-decisions.md`,
+DD-1.
 
 ## Where each piece lives in the plan
 
@@ -214,8 +229,14 @@ than a padded one produces useful blocks, so the launch grid grows. On this
 20-SM card, `docs/gqa-measurements.md` measured grid starvation costing up to
 2x -- a bigger grid may be worth more here than the bytes saved.
 
+Head-major is what fla-org's NSA calls `head_first=True`, and it supports both
+orderings from one kernel -- the layout is invisible where the compute happens.
+Keeping ours is a provisional choice with a condition attached for revisiting
+it; see `docs/deferred-decisions.md`, DD-1.
+
 ## See also
 
+* `docs/deferred-decisions.md` — DD-1, why head-major and when to reconsider.
 * `docs/learning/03-gqa-and-the-column-merge.md` — the previous change to the
   same index, with the same "what did not change" discipline.
 * `docs/gqa-measurements.md` — the grid-size effect on this card.
