@@ -426,3 +426,145 @@ def test_forward_requires_max_seqlen_when_packing(device):
     q = torch.randn(1, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="max_seqlen"):
         moba_forward(q, q, q, cfg, cu_seqlens=cu)
+
+
+def _grads(fn, q, k, v, g):
+    """Runs `fn` and returns the input gradients."""
+    q, k, v = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
+    (fn(q, k, v) * g).sum().backward()
+    return q.grad, k.grad, v.grad
+
+
+def test_gradients_match_running_each_sequence_alone(device):
+    """Gradient must not leak across a boundary.
+
+    dK and dV are reductions down a column -- every query that selected a block
+    adds into that block's key gradient. If a column ever held a query from
+    another sequence, that query's gradient would be summed into this
+    document's keys: finite, plausible, and wrong.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, v = _packed(device, torch.bfloat16, seed=11)
+    g = torch.randn_like(q) * 0.1
+
+    pq, pk, pv = _grads(
+        lambda a, x, y: moba_attention(a, x, y, cfg, cu_seqlens=cu,
+                                       max_seqlen=MAXLEN), q, k, v, g)
+    assert pq.shape == q.shape and pk.shape == k.shape
+
+    lo = 0
+    for n in LENS:
+        sq, sk, sv = _grads(
+            lambda a, x, y: moba_attention(a, x, y, cfg),
+            q[:, :, lo:lo + n], k[:, :, lo:lo + n], v[:, :, lo:lo + n],
+            g[:, :, lo:lo + n])
+        for name, a, b in [("dq", pq, sq), ("dk", pk, sk), ("dv", pv, sv)]:
+            assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
+                                  rtol=2e-2, atol=1e-3), (
+                f"{name} differs for the sequence at {lo}: max "
+                f"{(a[:, :, lo:lo + n].float() - b.float()).abs().max():.3e}")
+        lo += n
+
+
+def test_packed_gradients_match_the_oracle(device):
+    """Routing held fixed, so this measures arithmetic and not gate flips."""
+    from moba.kernels.autograd import moba_attention
+    from moba.kernels.index import csc_to_mask
+    from moba.kernels.index_fused import build_csc_fused
+    from moba.ref.naive import moba_attention_naive
+    from moba.tolerance import (
+        TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q64, k64, v64 = _packed(device, torch.float64, seed=12)
+    qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
+    gen = torch.Generator(device=device).manual_seed(13)
+    g = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.float64) * 0.1
+
+    index = build_csc_fused(qb, kb, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    selected = csc_to_mask(index, TOTAL)
+
+    def oracle(a, x, y):
+        return moba_attention_naive(a, x, y, cfg, selected=selected,
+                                    cu_seqlens=cu)
+
+    def kernel(a, x, y):
+        return moba_attention(a, x, y, cfg, index=index)
+
+    tq, tk, tv = _grads(oracle, q64, k64, v64, g)
+    rq, rk, rv = _grads(oracle, qb, kb, vb, g)
+    dq, dk, dv = _grads(kernel, qb, kb, vb, g)
+
+    for name, ours, ref, truth in [("dq", dq, rq, tq), ("dk", dk, rk, tk),
+                                   ("dv", dv, rv, tv)]:
+        cap = max(TOLERANCE_FACTOR * max_abs_error(ref, truth),
+                  TOLERANCE_FLOOR)
+        err = max_abs_error(ours, truth)
+        assert err <= cap, f"{name} error {err:.3e} exceeds {cap:.3e}"
+
+
+def test_padded_index_slots_get_no_gradient(device):
+    """dK and dV for keys past a short sequence's end must stay zero.
+
+    The backward writes dK and dV for every block its grid launches, and the
+    grid is sized by the *longest* sequence. A program for a block that does
+    not exist would write into the next document's keys.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, v = _packed(device, torch.bfloat16, seed=14)
+    g = torch.randn_like(q) * 0.1
+
+    _, dk, dv = _grads(
+        lambda a, x, y: moba_attention(a, x, y, cfg, cu_seqlens=cu,
+                                       max_seqlen=MAXLEN), q, k, v, g)
+
+    assert bool(torch.isfinite(dk).all()) and bool(torch.isfinite(dv).all())
+    # Every packed key belongs to some sequence and was selected by at least
+    # its own block's queries, so no real key may be left at exactly zero.
+    per_key = dv.abs().amax(dim=(0, 1, 3))
+    assert bool((per_key > 0).all()), (
+        f"key(s) {(per_key == 0).nonzero().flatten().tolist()} got no gradient"
+    )
+
+
+def test_packed_backward_under_gqa(device):
+    """Packing, head sharing and the chain rule must compose.
+
+    dK for a shared key/value head is the sum over the query heads consuming
+    it; packing changes which rows those are. Nothing tests the product unless
+    a test uses both.
+    """
+    from moba.kernels.autograd import moba_attention
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    gen = torch.Generator(device=device).manual_seed(15)
+    q = torch.randn(1, 4, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    v = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    g = torch.randn_like(q) * 0.1
+
+    pq, pk, pv = _grads(
+        lambda a, x, y: moba_attention(a, x, y, cfg, cu_seqlens=cu,
+                                       max_seqlen=MAXLEN), q, k, v, g)
+    lo = 0
+    for n in LENS:
+        sq, sk, sv = _grads(
+            lambda a, x, y: moba_attention(a, x, y, cfg),
+            q[:, :, lo:lo + n], k[:, :, lo:lo + n], v[:, :, lo:lo + n],
+            g[:, :, lo:lo + n])
+        for name, a, b in [("dq", pq, sq), ("dk", pk, sk), ("dv", pv, sv)]:
+            assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
+                                  rtol=3e-2, atol=2e-3), f"{name} at {lo}"
+        lo += n

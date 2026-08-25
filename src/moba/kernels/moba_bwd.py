@@ -125,13 +125,13 @@ def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
 @triton.jit
 def _moba_bwd(
     Q, K, V, DO, Lse, Delta,
-    RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order,
+    RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
     DK, DV, DQPart,
-    S, T, softmax_scale, sm_scale, num_blocks,
+    S, T, TOKENS, softmax_scale, sm_scale, num_blocks,
     BLOCK_SIZE: tl.constexpr, KEY_TILE: tl.constexpr, GROUP: tl.constexpr,
     D: tl.constexpr, K_SLOTS: tl.constexpr, DQ_SLOTS: tl.constexpr,
     H_Q: tl.constexpr, H_KV: tl.constexpr,
-    CAUSAL: tl.constexpr,
+    CAUSAL: tl.constexpr, VARLEN: tl.constexpr,
 ):
     """One program per (key sub-tile, batch, key/value head).
 
@@ -149,6 +149,11 @@ def _moba_bwd(
     on how many queries feed them; and the program still owns a disjoint key
     range, because grouped-query attention removed competing programs rather
     than adding them.
+
+    Packed mode changes only the key range and the query-side bases, exactly as
+    in the forward. Every key this program owns belongs to one sequence, so its
+    dK and dV cannot receive another document's gradient -- provided no foreign
+    query ever entered its column, which the gate guarantees.
     """
     pid = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -156,8 +161,16 @@ def _moba_bwd(
     # Keys are shared, queries are not. See `_moba_attn_fwd` -- the same split,
     # and at H_Q == H_KV both reduce to `pid_bh` exactly.
     pid_b = pid_bh // H_KV
-    q_base = pid_b * H_Q * S * D
-    q_lin = pid_b * H_Q * S
+    if VARLEN:
+        # The query-side tensors carry a pinned batch of 1, so there is no batch
+        # stride; the sequence enters only through the key range below.
+        q_base = 0
+        q_lin = 0
+        q_span = TOKENS
+    else:
+        q_base = pid_b * H_Q * S * D
+        q_lin = pid_b * H_Q * S
+        q_span = S
 
     tiles: tl.constexpr = BLOCK_SIZE // KEY_TILE
     # Longest-first dispatch is preserved: the block index still comes from
@@ -168,9 +181,20 @@ def _moba_bwd(
     lo = tl.load(ColOffsets + pid_bh * (num_blocks + 1) + blk)
 
     offs_d = tl.arange(0, D)
-    key_pos = blk * BLOCK_SIZE + sub * KEY_TILE + tl.arange(0, KEY_TILE)
-    key_ok = key_pos < S
-    kv_base = pid_bh * S * D
+
+    if VARLEN:
+        bos = tl.load(CuSeqlens + pid_b)
+        eos = tl.load(CuSeqlens + pid_b + 1)
+        lo_k = bos + blk * BLOCK_SIZE
+        hi_k = tl.minimum(lo_k + BLOCK_SIZE, eos)
+        kv_base = (pid_bh % H_KV) * TOKENS * D
+    else:
+        lo_k = blk * BLOCK_SIZE
+        hi_k = S
+        kv_base = pid_bh * S * D
+
+    key_pos = lo_k + sub * KEY_TILE + tl.arange(0, KEY_TILE)
+    key_ok = key_pos < hi_k
 
     k = tl.load(K + kv_base + key_pos[:, None] * D + offs_d[None, :],
                 mask=key_ok[:, None], other=0.0)
@@ -197,7 +221,7 @@ def _moba_bwd(
 
         # `rows` stays a raw position so the causal compare below is untouched;
         # the head rides alongside it. Same trade as the forward.
-        q_row = heads * S + rows
+        q_row = heads * q_span + rows
 
         q = tl.load(Q + q_base + q_row[:, None] * D + offs_d[None, :],
                     mask=live[:, None], other=0.0)
@@ -253,13 +277,17 @@ def _moba_bwd(
         dq = tl.dot(ds.to(k.dtype), k) * softmax_scale
         dst = q_row * DQ_SLOTS + slots * (BLOCK_SIZE // KEY_TILE) + sub
         tl.store(
-            DQPart + pid_b * H_Q * S * DQ_SLOTS * D + dst[:, None] * D
+            DQPart + q_lin * DQ_SLOTS * D + dst[:, None] * D
             + offs_d[None, :],
             dq.to(DQPart.dtype.element_ty),
             mask=live[:, None],
         )
 
-    kv_out = pid_bh * S * D + key_pos[:, None] * D + offs_d[None, :]
+    # `kv_base`, not `pid_bh * S * D`: under packing the grid enumerates
+    # `n_seq * H_KV` while the tensor holds one pinned batch, so the program id
+    # is not a stride into it. Getting this wrong writes past the end of dK and
+    # dV -- which does not fault, it corrupts whatever the allocator put next.
+    kv_out = kv_base + key_pos[:, None] * D + offs_d[None, :]
     tl.store(DK + kv_out, dk.to(DK.dtype.element_ty), mask=key_ok[:, None])
     tl.store(DV + kv_out, dv.to(DV.dtype.element_ty), mask=key_ok[:, None])
 
@@ -383,7 +411,9 @@ def moba_backward(
         part_m: Forward per-slot maxima [B, H, S, K], the written-marker.
         cfg: Configuration.
         index: The CSC index the forward used. Routing is not differentiated,
-            so this is the same fixed sparsity pattern, not a rebuilt one.
+            so this is the same fixed sparsity pattern, not a rebuilt one. It
+            also carries `cu_seqlens` when the batch is packed, so the backward
+            needs no separate argument and cannot be run in the wrong mode.
         causal: Whether the forward applied causal masking.
 
     Returns:
@@ -398,6 +428,8 @@ def moba_backward(
     h_kv = k.shape[1]
     head_group_size(h_q, h_kv)
     slots = index.max_slots
+    varlen = index.cu_seqlens is not None
+    n_seq = index.col_nnz.shape[0]
     q, k, v, dout = (t.contiguous() for t in (q, k, v, dout))
 
     delta = compute_delta(out, dout)
@@ -414,7 +446,7 @@ def moba_backward(
     # gathers one, so a chunk height the forward accepts may not compile. The
     # compiler is the authority either way.
     key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
-           torch.cuda.get_device_capability(q.device))
+           varlen, torch.cuda.get_device_capability(q.device))
     cached = _BWD_GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
                   else [g for g in group_candidates(
@@ -423,16 +455,17 @@ def moba_backward(
 
     for group in candidates:
         try:
-            _moba_bwd[(index.num_blocks * tiles, b * h_kv)](
+            _moba_bwd[(index.num_blocks * tiles, n_seq * h_kv)](
                 q, k, v, dout, lse, delta,
                 index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,
+                index.cu_seqlens if varlen else q,
                 dk, dv, dq_part,
-                s, index.row_indices.shape[-1],
+                s, index.row_indices.shape[-1], s,
                 d ** -0.5, d ** -0.5 * LOG2_E, index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, KEY_TILE=key_tile, GROUP=group,
                 D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles,
-                H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
+                H_Q=h_q, H_KV=h_kv, CAUSAL=causal, VARLEN=varlen,
                 num_warps=BWD_WARPS, num_stages=BWD_STAGES,
             )
         except OutOfResources:

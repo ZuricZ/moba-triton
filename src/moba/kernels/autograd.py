@@ -45,12 +45,15 @@ class _MoBAAttention(torch.autograd.Function):
     """Differentiable MoBA attention over the Triton kernels."""
 
     @staticmethod
-    def forward(ctx, q, k, v, cfg, index, causal):
+    def forward(ctx, q, k, v, cfg, index, causal, cu_seqlens, max_seqlen):
         """Runs the three forward stages and saves the backward's inputs."""
-        _validate(q, k, v, cfg)
+        if index is not None:
+            cu_seqlens, max_seqlen = index.cu_seqlens, index.max_seqlen
+        _validate(q, k, v, cfg, cu_seqlens, max_seqlen)
         q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
         if index is None:
-            index = build_csc_fused(q, k, cfg)
+            index = build_csc_fused(q, k, cfg, cu_seqlens=cu_seqlens,
+                                    max_seqlen=max_seqlen)
 
         part_m, part_l, part_acc = attend_partials(
             q, k, v, cfg, index, causal=causal
@@ -76,8 +79,8 @@ class _MoBAAttention(torch.autograd.Function):
             dout, q, k, v, out, lse, part_m, ctx.cfg, ctx.index,
             causal=ctx.causal,
         )
-        # cfg, index and causal are not differentiable.
-        return dq, dk, dv, None, None, None
+        # cfg, index, causal and the packing metadata are not differentiable.
+        return dq, dk, dv, None, None, None, None, None
 
 
 def moba_attention(
@@ -87,6 +90,8 @@ def moba_attention(
     cfg: MoBAConfig,
     index: CSCIndex | None = None,
     causal: bool = True,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention with gradient support.
 
@@ -101,10 +106,18 @@ def moba_attention(
         index: Precomputed CSC index; built with the fused device-side gate
             when omitted. Passing one holds routing fixed while inputs vary.
         causal: Whether to apply causal masking within the query's own block.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
+            given, the inputs hold one packed batch shaped [1, H, T, D] and each
+            sequence attends -- and receives gradient -- independently. Ignored
+            when `index` is supplied, which carries its own.
+        max_seqlen: Longest sequence, required with `cu_seqlens`. Deriving it
+            would cost a host synchronization, so it is an argument, as in
+            FlashAttention's `max_seqlen_q`.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`. `k` and `v`
         receive gradients with their own `H_kv` heads, each already summed over
         the query heads that shared it.
     """
-    return _MoBAAttention.apply(q, k, v, cfg, index, causal)
+    return _MoBAAttention.apply(q, k, v, cfg, index, causal, cu_seqlens,
+                                max_seqlen)
