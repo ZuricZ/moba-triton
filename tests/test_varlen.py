@@ -19,16 +19,22 @@ import torch
 from moba.config import MoBAConfig
 from moba.kernels.gate import block_representatives_triton, gate_select
 
-# Deliberately awkward: a length that is not a block multiple (20 at block 4 is,
-# 5 is not), a sequence shorter than one tile, and a longest-first ordering that
-# is not the natural one.
-LENS = [20, 12, 16, 5]
-CU = [0, 20, 32, 48, 53]
-MAXLEN = 20
-TOTAL = 53
+# Deliberately awkward at block_size 16: 80 divides evenly, 48 and 64 do too,
+# and 20 does not -- so one sequence ends in a 4-key block. The last sequence is
+# also shorter than one 32-query gate tile, and the lengths are not sorted.
+#
+# head_dim 64 and block_size 16 are floors, not preferences: the attention
+# kernel rejects a head_dim whose row is below a 128-byte cache line, and a
+# block_size below `tl.dot`'s 16-row minimum. The gate enforces neither, which
+# is why its own tests could run smaller.
+LENS = [80, 48, 64, 20]
+CU = [0, 80, 128, 192, 212]
+MAXLEN = 80
+TOTAL = 212
+BLOCK = 16
 
 
-def _packed(device, dtype, heads=2, d=16, seed=0):
+def _packed(device, dtype, heads=2, d=64, seed=0):
     """Three tensors shaped [1, heads, TOTAL, d] -- one packed batch."""
     gen = torch.Generator(device=device).manual_seed(seed)
 
@@ -60,7 +66,7 @@ def test_no_selected_block_crosses_a_sequence_boundary(device):
     that sequence's own block count: a block that does not exist for the query
     but does address a real, padded index slot belonging to a longer sequence.
     """
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
@@ -87,7 +93,7 @@ def test_gate_matches_running_each_sequence_alone(device):
     is the whole point of keeping ids local: the comparison is `torch.equal`
     with nothing in between.
     """
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
@@ -110,7 +116,7 @@ def test_every_query_selects_its_own_block(device):
     wrong in every other one -- exactly the shape of bug a single-sequence test
     would miss.
     """
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=1)
 
@@ -135,7 +141,7 @@ def test_short_sequences_leave_no_out_of_range_ids(device):
     tiles have nothing to do. They must write nothing, and no id anywhere may
     address past the padded index.
     """
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=2)
 
@@ -151,7 +157,7 @@ def test_a_sequence_shorter_than_one_tile_is_gated(device):
     The early return that makes over-launched programs cheap must not swallow
     the one program that does have work.
     """
-    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=3)
 
@@ -162,20 +168,20 @@ def test_a_sequence_shorter_than_one_tile_is_gated(device):
 
 
 def test_packed_gate_rejects_a_real_batch_axis(device):
-    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(2, 2, TOTAL, 16, device=device, dtype=torch.bfloat16)
-    kbar = torch.randn(4, 2, 5, 16, device=device, dtype=torch.bfloat16)
+    q = torch.randn(2, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    kbar = torch.randn(4, 2, 5, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="batch 1"):
         gate_select(q, kbar, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
 
 
 def test_max_seqlen_is_required_when_packing(device):
     """Not derivable without a host synchronization, so it is an argument."""
-    cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(1, 2, TOTAL, 16, device=device, dtype=torch.bfloat16)
-    kbar = torch.randn(4, 2, 5, 16, device=device, dtype=torch.bfloat16)
+    q = torch.randn(1, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    kbar = torch.randn(4, 2, 5, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="max_seqlen"):
         gate_select(q, kbar, cfg, cu_seqlens=cu)
 
@@ -191,7 +197,7 @@ def test_columns_keep_a_batch_axis_and_hold_only_their_sequence(device):
     """
     from moba.kernels.index_fused import build_csc_fused
 
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16)
 
@@ -223,7 +229,7 @@ def test_no_column_exists_past_a_sequences_own_block_count(device):
     """
     from moba.kernels.index_fused import build_csc_fused
 
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=5)
     index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
@@ -247,7 +253,7 @@ def test_index_round_trips_to_the_gate_under_packing(device):
     from moba.kernels.index_fused import build_csc_fused
     from moba.ref.naive import moba_selection
 
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=6)
 
@@ -269,7 +275,7 @@ def test_slots_stay_unique_per_query_under_packing(device):
     """
     from moba.kernels.index_fused import build_csc_fused
 
-    cfg = MoBAConfig(block_size=4, top_k=3, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     q, k, _ = _packed(device, torch.bfloat16, seed=7)
     index = build_csc_fused(q, k, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
@@ -287,3 +293,136 @@ def test_slots_stay_unique_per_query_under_packing(device):
                     assert key not in seen, f"duplicate (head, query, slot): {key}"
                     seen.add(key)
                     assert key[2] < cfg.top_k, "slot outside the budget"
+
+
+# Both at or above `tl.dot`'s 16-row minimum; 32 also exercises a block
+# size that does not divide every sequence length.
+@pytest.mark.parametrize("gate", [(BLOCK, 3), (32, 4)])
+def test_forward_matches_running_each_sequence_alone(device, gate):
+    """Bitwise per sequence.
+
+    Slicing gives identical inputs in identical order, and the kernel addresses
+    its output by (query, slot) rather than by position, so anything but
+    equality is a boundary bug -- not rounding, not summation order.
+    """
+    from moba.kernels.moba_fwd import moba_forward
+
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, v = _packed(device, torch.bfloat16)
+
+    packed = moba_forward(q, k, v, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    assert packed.shape == q.shape
+
+    lo = 0
+    for n in LENS:
+        piece = moba_forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
+                             v[:, :, lo:lo + n], cfg)
+        assert torch.equal(packed[:, :, lo:lo + n], piece), (
+            f"sequence at {lo} (length {n}) differs"
+        )
+        lo += n
+
+
+def test_packed_forward_matches_the_oracle(device):
+    """Routing held fixed, so this measures arithmetic and not gate flips.
+
+    The gate is discontinuous in its inputs -- a ranking -- so a near-tie can
+    swap under a dtype change and send a query to entirely different keys.
+    Passing the kernel's own selection to the oracle removes that from the
+    measurement; see `moba.tolerance`.
+    """
+    from moba.kernels.index import csc_to_mask
+    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.moba_fwd import moba_forward
+    from moba.ref.naive import moba_attention_naive
+    from moba.tolerance import (
+        TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q64, k64, v64 = _packed(device, torch.float64, seed=8)
+    qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
+
+    index = build_csc_fused(qb, kb, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    selected = csc_to_mask(index, TOTAL)
+
+    truth = moba_attention_naive(q64, k64, v64, cfg, selected=selected,
+                                 cu_seqlens=cu)
+    ref = moba_attention_naive(qb, kb, vb, cfg, selected=selected,
+                               cu_seqlens=cu)
+    ours = moba_forward(qb, kb, vb, cfg, index=index)
+
+    cap = max(TOLERANCE_FACTOR * max_abs_error(ref, truth), TOLERANCE_FLOOR)
+    err = max_abs_error(ours, truth)
+    assert err <= cap, f"forward error {err:.3e} exceeds {cap:.3e}"
+
+
+def test_no_output_token_is_left_unwritten(device):
+    """Every packed token must be produced by exactly one program.
+
+    `attend_partials` allocates uninitialized and relies on that. If the
+    over-launched programs of a short sequence returned too eagerly, or a
+    sequence's tokens were addressed with the wrong base, some outputs would
+    hold whatever the allocator had -- finite, plausible, silent.
+    """
+    from moba.kernels.moba_fwd import moba_forward
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q, k, v = _packed(device, torch.bfloat16, seed=9)
+
+    out = moba_forward(q, k, v, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    assert bool(torch.isfinite(out).all()), "a token is non-finite"
+    per_token = out.abs().amax(dim=(0, 1, 3))
+    assert bool((per_token > 0).all()), (
+        f"token(s) {(per_token == 0).nonzero().flatten().tolist()} are all zero"
+    )
+
+
+def test_packed_forward_under_gqa(device):
+    """Packing and head sharing must compose, not merely coexist.
+
+    They touch the same addressing: GQA splits the head axis, packing pins the
+    batch axis and moves the row index. Nothing tests the product of the two
+    unless a test uses both.
+    """
+    from moba.kernels.moba_fwd import moba_forward
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    cu = _cu(device)
+    gen = torch.Generator(device=device).manual_seed(10)
+    q = torch.randn(1, 4, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    k = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+    v = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+                    dtype=torch.bfloat16)
+
+    packed = moba_forward(q, k, v, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+    lo = 0
+    for n in LENS:
+        piece = moba_forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
+                             v[:, :, lo:lo + n], cfg)
+        assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
+        lo += n
+
+
+def test_packed_forward_rejects_a_real_batch_axis(device):
+    from moba.kernels.moba_fwd import moba_forward
+    cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q = torch.randn(2, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="batch 1"):
+        moba_forward(q, q, q, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
+
+
+def test_forward_requires_max_seqlen_when_packing(device):
+    """Not derivable without a host synchronization, so it is an argument."""
+    from moba.kernels.moba_fwd import moba_forward
+    cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
+    cu = _cu(device)
+    q = torch.randn(1, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="max_seqlen"):
+        moba_forward(q, q, q, cfg, cu_seqlens=cu)

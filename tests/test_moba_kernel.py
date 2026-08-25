@@ -345,7 +345,7 @@ def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
     # The head-group size is part of the key; 1 here, since `make_qkv` gives
     # q, k and v the same head count.
     key = (block_size, head_dim, q.element_size(), index.max_slots, True, 1,
-           torch.cuda.get_device_capability(q.device))
+           False, torch.cuda.get_device_capability(q.device))
     used = _GROUP_CACHE[key]
 
     kernel = _compile_attn(q, k, v, cfg, index, used)
@@ -370,9 +370,30 @@ def _compile_attn(q, k, v, cfg, index, group):
     part_m.fill_(float("-inf"))
     return _moba_attn_fwd[(index.num_blocks, b * h_kv)](
         q, k, v, index.row_indices, index.head_indices, index.slot_of_pair,
-        index.col_offsets,
-        index.col_nnz, index.order, part_m, part_l, part_acc,
-        s, index.row_indices.shape[-1], d ** -0.5 * 1.4426950408889634,
+        index.col_offsets, index.col_nnz, index.order, q,
+        part_m, part_l, part_acc,
+        s, index.row_indices.shape[-1], s, d ** -0.5 * 1.4426950408889634,
         index.num_blocks, BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
         K_SLOTS=index.max_slots, H_Q=h_q, H_KV=h_kv, CAUSAL=True,
+        VARLEN=False,
     )
+
+
+@pytest.mark.parametrize("block_size,top_k", [(16, 3), (16, 5), (32, 3),
+                                              (64, 7), (128, 8)])
+def test_every_chunk_height_offered_is_a_power_of_two(block_size, top_k, device):
+    """`tl.arange(0, GROUP)` is illegal otherwise, and the launch will not compile.
+
+    `group_candidates` used to round `top_k * block_size` up to a multiple of
+    TENSOR_CORE_TILE, which is not the same thing. Every configuration in the
+    sweep happened to land on a power of two -- block_size 32 and above with
+    top_k 4 and above gives at least 128, which MAX_GROUP caps -- so the defect
+    was unreachable until a varlen test used top_k 3 at block_size 16 and got
+    48.
+    """
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    for group in group_candidates(cfg, 64, 2, device):
+        assert group & (group - 1) == 0, (
+            f"chunk height {group} at block_size {block_size}, top_k {top_k} "
+            f"is not a power of two"
+        )

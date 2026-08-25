@@ -46,17 +46,18 @@ from moba.device import (
 )
 from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
+from moba.packing import validate_cu_seqlens
 from moba.kernels.index_fused import build_csc_fused
 
 
 @triton.jit
 def _moba_attn_fwd(
-    Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order,
+    Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
     PartM, PartL, PartAcc,
-    S, T, sm_scale, num_blocks,
+    S, T, TOKENS, sm_scale, num_blocks,
     BLOCK_SIZE: tl.constexpr, GROUP: tl.constexpr, D: tl.constexpr,
     K_SLOTS: tl.constexpr, H_Q: tl.constexpr, H_KV: tl.constexpr,
-    CAUSAL: tl.constexpr,
+    CAUSAL: tl.constexpr, VARLEN: tl.constexpr,
 ):
     """One program per (KV block, batch, key/value head).
 
@@ -69,6 +70,15 @@ def _moba_attn_fwd(
     queries streamed through it come from every query head sharing this
     key/value head, so the query side is addressed by an explicit
     (head, position) pair carried in the column rather than by the program id.
+
+    Packed mode changes only where a block's keys start and where the query
+    tensors are based. Blocks are cut per sequence, so the range is computed
+    from `cu_seqlens` using the batch the grid already carries. Row indices are
+    packed token indices, which is why the causal comparison below needs no
+    change: within a sequence, packed order *is* position order, and a query is
+    never offered another sequence's block. That last part is guaranteed by the
+    gate, not here -- see the varlen plan's D-VL-7 and
+    `test_no_selected_block_crosses_a_sequence_boundary`.
     """
     pid_col = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -78,8 +88,16 @@ def _moba_attn_fwd(
     # by the head each entry names. At H_Q == H_KV this reduces to `pid_bh`
     # exactly, which is why the multi-head path is untouched.
     pid_b = pid_bh // H_KV
-    q_base = pid_b * H_Q * S * D
-    q_part_base = pid_b * H_Q * S * K_SLOTS
+    if VARLEN:
+        # The query tensors carry a pinned batch of 1, so there is no batch
+        # stride to add; the sequence enters only through the key range below.
+        q_base = 0
+        q_part_base = 0
+        q_span = TOKENS
+    else:
+        q_base = pid_b * H_Q * S * D
+        q_part_base = pid_b * H_Q * S * K_SLOTS
+        q_span = S
 
     # Longest-first dispatch (D8). Only the block id changes -- results are
     # written to query addresses, which never depended on the program id, so
@@ -92,10 +110,20 @@ def _moba_attn_fwd(
     lo = tl.load(ColOffsets + pid_bh * (num_blocks + 1) + blk)
 
     offs_d = tl.arange(0, D)
-    key_pos = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    key_ok = key_pos < S
 
-    kv_base = pid_bh * S * D
+    if VARLEN:
+        bos = tl.load(CuSeqlens + pid_b)
+        eos = tl.load(CuSeqlens + pid_b + 1)
+        lo_k = bos + blk * BLOCK_SIZE
+        hi_k = tl.minimum(lo_k + BLOCK_SIZE, eos)
+        kv_base = (pid_bh % H_KV) * TOKENS * D
+    else:
+        lo_k = blk * BLOCK_SIZE
+        hi_k = S
+        kv_base = pid_bh * S * D
+
+    key_pos = lo_k + tl.arange(0, BLOCK_SIZE)
+    key_ok = key_pos < hi_k
 
     # The single HBM trip this whole design exists to amortize.
     k = tl.load(K + kv_base + key_pos[:, None] * D + offs_d[None, :],
@@ -120,7 +148,7 @@ def _moba_attn_fwd(
         #
         # `rows` deliberately stays a raw position, so the causal comparison
         # below needs no change and no runtime integer modulo appears here.
-        q_row = heads * S + rows
+        q_row = heads * q_span + rows
 
         # Gathered rows (D7). One row is D*itemsize bytes -- exactly one
         # 128-byte cache line at D=64 bf16 -- so this costs the same
@@ -313,8 +341,16 @@ def group_candidates(
             and V tiles alone exceed shared memory.
     """
     budget = shared_memory_budget(device)
+
+    # A power of two, not merely a multiple of TENSOR_CORE_TILE. `tl.arange`
+    # requires a power-of-two range, and the kernel calls `tl.arange(0, GROUP)`.
+    # Rounding to a multiple of 16 was enough for every configuration tested
+    # until now only by accident: block_size 32 and above with top_k 4 and above
+    # gives a product of at least 128, which MAX_GROUP caps to a power of two.
+    # top_k 3 at block_size 16 gives 48, and the launch fails to compile.
     group = min(MAX_GROUP,
-                round_up_to_tensor_core_tile(cfg.top_k * cfg.block_size))
+                max(TENSOR_CORE_TILE,
+                    triton.next_power_of_2(cfg.top_k * cfg.block_size)))
 
     out = []
     while group >= TENSOR_CORE_TILE:
@@ -584,7 +620,9 @@ def combine_partials(
 
 
 def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-              cfg: MoBAConfig) -> None:
+              cfg: MoBAConfig,
+              cu_seqlens: torch.Tensor | None = None,
+              max_seqlen: int | None = None) -> None:
     """Checks shapes and configuration before any launch.
 
     Args:
@@ -607,6 +645,17 @@ def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     # the group size is H_q // H_kv and there is nowhere else it could be
     # stated. Raises if the counts do not divide.
     head_group_size(q.shape[1], k.shape[1])
+
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"packed input must have batch 1, got {q.shape[0]}; every "
+                f"sequence lives on the token axis and cu_seqlens says where"
+            )
+        if max_seqlen is None:
+            raise ValueError("max_seqlen is required when cu_seqlens is given")
+        validate_cu_seqlens(cu_seqlens, total_tokens=q.shape[2],
+                            max_seqlen=max_seqlen)
     ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
     if not ok:
         raise ValueError(reason)
@@ -714,6 +763,8 @@ def attend_partials(
     b, h_q, s, d = q.shape
     h_kv = k.shape[1]
     slots = index.max_slots
+    varlen = index.cu_seqlens is not None
+    n_seq = index.col_nnz.shape[0]
 
     if partials_dtype is None:
         partials_dtype = q.dtype
@@ -741,7 +792,7 @@ def attend_partials(
     # The head group is in the key even though it changes no allocation: a
     # stale entry would be very hard to diagnose, and the key is free.
     key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
-           torch.cuda.get_device_capability(q.device))
+           varlen, torch.cuda.get_device_capability(q.device))
     cached = _GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
                   else group_candidates(cfg, d, q.element_size(), q.device))
@@ -752,16 +803,18 @@ def attend_partials(
     # loads, which is the whole gain.
     for group in candidates:
         try:
-            _moba_attn_fwd[(index.num_blocks, b * h_kv)](
+            _moba_attn_fwd[(index.num_blocks, n_seq * h_kv)](
                 q, k, v,
                 index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,
+                index.cu_seqlens if varlen else q,
                 part_m, part_l, part_acc,
-                s, index.row_indices.shape[-1],
+                s, index.row_indices.shape[-1], s,
                 d ** -0.5 * LOG2_E,
                 index.num_blocks,
                 BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
                 K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
+                VARLEN=varlen,
             )
         except OutOfResources:
             continue
@@ -783,6 +836,8 @@ def moba_forward(
     index: CSCIndex | None = None,
     causal: bool = True,
     partials_dtype: torch.dtype | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> torch.Tensor:
     """Computes MoBA attention with the KV-block-major kernel.
 
@@ -799,6 +854,13 @@ def moba_forward(
         partials_dtype: Storage dtype for the per-slot accumulators. Defaults
             to `q.dtype`, which halves the largest memory term in the pass;
             see `attend_partials`.
+        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
+            given, the inputs hold one packed batch shaped [1, H, T, D] and each
+            sequence attends independently. Ignored when `index` is supplied,
+            which carries its own.
+        max_seqlen: Longest sequence, required with `cu_seqlens`. Deriving it
+            would cost a host synchronization, so it is an argument -- the same
+            reason FlashAttention takes `max_seqlen_q`.
 
     Returns:
         Attention output shaped [B, H, S, D], same dtype as `q`.
@@ -807,10 +869,13 @@ def moba_forward(
         ValueError: If shapes disagree, or head_dim or block_size is
             unsupported.
     """
-    _validate(q, k, v, cfg)
+    if index is not None:
+        cu_seqlens, max_seqlen = index.cu_seqlens, index.max_seqlen
+    _validate(q, k, v, cfg, cu_seqlens, max_seqlen)
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     if index is None:
-        index = build_csc_fused(q, k, cfg)
+        index = build_csc_fused(q, k, cfg, cu_seqlens=cu_seqlens,
+                                max_seqlen=max_seqlen)
 
     part_m, part_l, part_acc = attend_partials(
         q, k, v, cfg, index, causal=causal, partials_dtype=partials_dtype
