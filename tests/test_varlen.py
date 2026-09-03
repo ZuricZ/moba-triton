@@ -568,3 +568,64 @@ def test_packed_backward_under_gqa(device):
             assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
                                   rtol=3e-2, atol=2e-3), f"{name} at {lo}"
         lo += n
+
+
+def test_packed_dense_baseline_matches_running_each_sequence_alone(device):
+    """The baseline the varlen benchmark compares against.
+
+    Without this the comparison is dishonest in our favour: a padded baseline
+    wastes the same padding we removed, so its cost would be charged to dense
+    attention rather than to raggedness.
+    """
+    from moba.backends.base import get_backend
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    backend = get_backend("sdpa_dense")
+    q, k, v = _packed(device, torch.bfloat16, heads=2)
+
+    packed = backend.forward_packed(q, k, v, cfg, _cu(device))
+    assert packed.shape == q.shape
+
+    lo = 0
+    for n in LENS:
+        piece = backend.forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
+                                v[:, :, lo:lo + n], cfg)
+        assert torch.allclose(packed[:, :, lo:lo + n].float(), piece.float(),
+                              rtol=1e-3, atol=1e-3), f"at {lo}"
+        lo += n
+
+
+def test_packed_dense_baseline_really_uses_the_variable_length_kernel(device):
+    """Proof the baseline is not padding behind our back.
+
+    A nested tensor that SDPA quietly widened into a rectangle would look like
+    a packed baseline and cost like a padded one. `MATH` refusing this exact
+    call -- "Nested tensors for query / key are not supported when
+    is_causal=True" -- is the evidence that only the fused variable-length
+    kernel can serve it.
+    """
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    from moba.backends.base import get_backend
+
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    backend = get_backend("sdpa_dense")
+    q, k, v = _packed(device, torch.bfloat16, heads=2)
+    cu = _cu(device)
+
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        backend.forward_packed(q, k, v, cfg, cu)
+    with pytest.raises(RuntimeError, match="No viable backend"):
+        with sdpa_kernel(SDPBackend.MATH):
+            backend.forward_packed(q, k, v, cfg, cu)
+
+
+def test_packed_dense_baseline_rejects_a_real_batch_axis(device):
+    cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
+    from moba.backends.base import get_backend
+
+    backend = get_backend("sdpa_dense")
+    q = torch.randn(2, 2, 16, 64, device=device, dtype=torch.bfloat16)
+    cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
+    with pytest.raises(ValueError, match=r"\[1, H, T, D\]"):
+        backend.forward_packed(q, q, q, cfg, cu)
