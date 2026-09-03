@@ -176,4 +176,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward, backward and grouped-query attention all done; 379 tests green. Forward 2.18x over dense SDPA at S=8192; backward 2.58x. GQA is correct and costs no registers or shared memory, but on 20 SMs at batch 1 it *loses* a few percent -- it shrinks the launch grid, and the penalty vanishes by ~128 programs (`docs/gqa-measurements.md`). Next: varlen, then a real head-to-head on rented sm_80/90.
+> Status: Forward, backward, grouped-query attention and variable-length (packed) batches all done; 429 tests green. Forward 2.18x over dense SDPA at S=8192; backward 2.58x. Varlen costs 1% on a uniform batch and pays *superlinearly* on a ragged one -- 8.5x at 82% padding, against 5.6x fewer tokens, because padding manufactures blocks for `top_k` to select (`docs/varlen-measurements.md`). Next: a real head-to-head on rented sm_80/90, then DD-1 (layout).

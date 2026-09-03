@@ -1108,7 +1108,7 @@ git commit -m "feat: backward over a packed batch"
 - Modify: `src/moba/backends/sdpa_dense.py`, `bench/suite.py`, `CLAUDE.md`
 - Create: `bench/varlen_sweep.py`, `docs/varlen-measurements.md`
 
-- [ ] **Step 1: Give the dense baseline a packed path**
+- [x] **Step 1: Give the dense baseline a packed path**
 
 Verified on this box: `torch.nested.nested_tensor(..., layout=torch.jagged)`
 passed to `scaled_dot_product_attention` runs on the `FLASH_ATTENTION` backend
@@ -1118,7 +1118,7 @@ fused varlen kernel rather than silently padding.
 This matters for honesty: today's benchmark compares us against a baseline that
 is *also* wasting work on padding. A packed comparison is the fair one.
 
-- [ ] **Step 2: Benchmark, with allocation excluded**
+- [x] **Step 2: Benchmark, with allocation excluded**
 
 Reuse the lesson from `docs/gqa-measurements.md`: preallocate with
 `empty_partials` and pass `partials=`, and take medians. Timing `moba_forward`
@@ -1129,7 +1129,7 @@ At `H_q=8, H_kv=2, block_size=128, top_k=8`, on a ragged batch (lengths sampled
 256–2048), measure: tokens saved, `part_acc` bytes saved, **grid size packed vs
 padded**, and time against nested-tensor dense SDPA.
 
-- [ ] **Step 3: Write `docs/varlen-measurements.md`, prediction first**
+- [x] **Step 3: Write `docs/varlen-measurements.md`, prediction first**
 
 State before the numbers: padding waste is `1 - mean(len)/max(len)`, so the gain
 is a property of the *data*, not the kernel, and is ~0% on a uniform batch. Then
@@ -1137,7 +1137,14 @@ measure. Also predict that the grid *grows* — a ragged batch yields more real
 blocks than a padded one yields useful ones — which per
 `docs/gqa-measurements.md` may be worth more on 20 SMs than the bytes saved.
 
-- [ ] **Step 4: Update the status line, then commit**
+**Outcome: that prediction was wrong, and the doc says so.** The grid is
+*identical*, because we pack the data and pad the index; `num_blocks` is
+`cdiv(max_seqlen, block_size)` either way. Packing empties programs rather
+than removing them. The gain prediction was also wrong, in our favour: it is
+superlinear in the tokens saved, because padding manufactures blocks for
+`top_k` to select. See `docs/varlen-measurements.md`.
+
+- [x] **Step 4: Update the status line, then commit**
 
 ```bash
 git add src/moba/backends/sdpa_dense.py bench/varlen_sweep.py bench/suite.py docs/varlen-measurements.md CLAUDE.md
