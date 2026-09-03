@@ -92,13 +92,13 @@ class TritonMoBABackend:
         supposed to expose.
 
         Args:
-            q: Queries shaped [B, H, S, D].
-            k: Keys shaped [B, H, S, D].
-            v: Values shaped [B, H, S, D].
+            q: Queries shaped [B, S, H, D].
+            k: Keys shaped [B, S, H, D].
+            v: Values shaped [B, S, H, D].
             cfg: Configuration.
 
         Returns:
-            Output shaped [B, H, S, D], same dtype as `q`.
+            Output shaped [B, S, H, D], same dtype as `q`.
 
         Raises:
             RuntimeError: If this backend is not available for `cfg`.
@@ -121,14 +121,14 @@ class TritonMoBABackend:
         (D11), this becomes a genuine routing check with no edit here.
 
         Args:
-            q: Queries shaped [B, H, S, D].
-            k: Keys shaped [B, H, S, D].
+            q: Queries shaped [B, S, H, D].
+            k: Keys shaped [B, S, H, D].
             cfg: Configuration.
 
         Returns:
             Boolean selection mask shaped [B, H, S, num_blocks].
         """
-        return csc_to_mask(build_csc(q, k, cfg), q.shape[2])
+        return csc_to_mask(build_csc(q, k, cfg), q.shape[1])
 
 
 register(TritonMoBABackend())

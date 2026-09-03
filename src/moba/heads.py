@@ -46,23 +46,34 @@ def head_group_size(num_query_heads: int, num_kv_heads: int) -> int:
     return num_query_heads // num_kv_heads
 
 
-def expand_kv(t: torch.Tensor, num_query_heads: int) -> torch.Tensor:
+def expand_kv(t: torch.Tensor, num_query_heads: int, dim: int = 2) -> torch.Tensor:
     """Repeats each key/value head across the query heads that share it.
 
     Test and oracle support only; see the module docstring.
 
+    The axis is an argument because this codebase holds two conventions on
+    purpose, split on a clean line: tensors crossing the API boundary are
+    token-major `[B, S, H, D]`, so their head axis is 2, while buffers we
+    allocate for ourselves -- block representatives, selection masks, partials,
+    every `CSCIndex` field -- stayed head-major, where it is 1. Nothing outside
+    the project reads the latter, so moving them would have been churn with no
+    beneficiary. This function is the only one that sees both.
+
     Args:
-        t: Tensor shaped [B, H_kv, S, D].
+        t: Tensor whose head axis is `dim`, shaped [B, S, H_kv, D] by default.
         num_query_heads: Target head count.
+        dim: Axis holding the key/value heads. 2 for token-major inputs, 1 for
+            the head-major buffers named above.
 
     Returns:
-        Tensor shaped [B, num_query_heads, S, D]. Returns `t` itself when the
-        head counts already match, so the multi-head path copies nothing.
+        The same shape with `H_kv` replaced by `num_query_heads`. Returns `t`
+        itself when the head counts already match, so the multi-head path
+        copies nothing.
 
     Raises:
         ValueError: If the head counts are incompatible.
     """
-    group = head_group_size(num_query_heads, t.shape[1])
+    group = head_group_size(num_query_heads, t.shape[dim])
     if group == 1:
         return t
 
@@ -70,4 +81,4 @@ def expand_kv(t: torch.Tensor, num_query_heads: int) -> torch.Tensor:
     # so the copies of one source head have to be adjacent. `repeat` would tile
     # the whole head axis instead, mapping head g to g % H_kv -- a permutation
     # that is wrong in a way no shape check can see.
-    return t.repeat_interleave(group, dim=1)
+    return t.repeat_interleave(group, dim=dim)

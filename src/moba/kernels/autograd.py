@@ -96,8 +96,8 @@ def moba_attention(
     """Computes MoBA attention with gradient support.
 
     Args:
-        q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+        q: Queries shaped [B, S, H, D].
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`. Fewer
             key/value heads than query heads is grouped-query attention; the
             kernel shares a K/V tile by owning it for the whole group, never by
             materializing copies.
@@ -107,7 +107,7 @@ def moba_attention(
             when omitted. Passing one holds routing fixed while inputs vary.
         causal: Whether to apply causal masking within the query's own block.
         cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
-            given, the inputs hold one packed batch shaped [1, H, T, D] and each
+            given, the inputs hold one packed batch shaped [1, T, H, D] and each
             sequence attends -- and receives gradient -- independently. Ignored
             when `index` is supplied, which carries its own.
         max_seqlen: Longest sequence, required with `cu_seqlens`. Deriving it
@@ -115,7 +115,7 @@ def moba_attention(
             FlashAttention's `max_seqlen_q`.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`. `k` and `v`
+        Attention output shaped [B, S, H, D], same dtype as `q`. `k` and `v`
         receive gradients with their own `H_kv` heads, each already summed over
         the query heads that shared it.
     """

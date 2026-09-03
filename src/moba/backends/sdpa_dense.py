@@ -47,8 +47,16 @@ class SdpaDenseBackend:
         v: torch.Tensor,
         cfg: MoBAConfig,
     ) -> torch.Tensor:
-        """Ignores cfg's gate parameters by design: this attends to everything."""
-        return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        """Ignores cfg's gate parameters by design: this attends to everything.
+
+        Transposes because torch SDPA is head-major and our inputs are not.
+        This is not migration scaffolding: SDPA's signature is fixed, so the
+        conversion is permanent and belongs to the baseline. It is inside the
+        timed region, which is correct -- a caller using SDPA would pay it too.
+        """
+        q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return out.transpose(1, 2)
 
     def forward_packed(
         self,
@@ -62,10 +70,9 @@ class SdpaDenseBackend:
 
         A jagged nested tensor is our packed form plus `cu_seqlens`, so the
         conversion is a relabelling of the same bytes: `nested_tensor_from_jagged`
-        takes the [T, H, D] values and the offsets and returns [B, j, H, D]. The
-        transposes into and out of head-major are the concrete cost of DD-1 at
-        this boundary; both are copies, and both are inside the timed region so
-        the baseline is not flattered.
+        takes the [T, H, D] values and the offsets and returns [B, j, H, D].
+        Since the move to token-major that really is all it is -- no transpose
+        and no copy, where head-major needed both.
 
         Causality is per sequence, enforced by the layout rather than by a mask.
         Verified on this box: SDPA runs this on `FLASH_ATTENTION` and refuses it
@@ -78,35 +85,36 @@ class SdpaDenseBackend:
         parameter that exists only for symmetry.
 
         Args:
-            q: Packed queries shaped [1, H, T, D].
+            q: Packed queries shaped [1, T, H, D].
             k: Packed keys, same shape.
             v: Packed values, same shape.
             cfg: Configuration. Unused, as in `forward`.
             cu_seqlens: Cumulative token counts, [num_sequences + 1] int32.
 
         Returns:
-            Packed output shaped [1, H, T, D], same dtype as `q`.
+            Packed output shaped [1, T, H, D], same dtype as `q`.
 
         Raises:
             ValueError: If the inputs are not a packed batch.
         """
         if q.ndim != 4 or q.shape[0] != 1:
             raise ValueError(
-                f"packed inputs must be [1, H, T, D], got {tuple(q.shape)}"
+                f"packed inputs must be [1, T, H, D], got {tuple(q.shape)}"
             )
         offsets = cu_seqlens.to(torch.int64)
 
         def jag(t: torch.Tensor) -> torch.Tensor:
-            # [1, H, T, D] -> [T, H, D] -> nested [B, j, H, D] -> [B, H, j, D].
-            values = t[0].transpose(0, 1).contiguous()
-            return nested_tensor_from_jagged(values, offsets=offsets).transpose(
+            # [1, T, H, D] -> [T, H, D] -> nested [B, j, H, D] -> [B, H, j, D].
+            # Token-major is exactly what `nested_tensor_from_jagged` wants, so
+            # the transpose-and-copy this needed under head-major is gone.
+            return nested_tensor_from_jagged(t[0], offsets=offsets).transpose(
                 1, 2
             )
 
         out = F.scaled_dot_product_attention(
             jag(q), jag(k), jag(v), is_causal=True
         )
-        return out.transpose(1, 2).values().transpose(0, 1).unsqueeze(0)
+        return out.transpose(1, 2).values().unsqueeze(0)
 
 
 register(SdpaDenseBackend())

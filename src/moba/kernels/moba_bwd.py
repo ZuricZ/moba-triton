@@ -40,6 +40,7 @@ import triton
 import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
+from moba._layout_shim import to_head_major, to_token_major
 from moba.config import MoBAConfig
 from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
@@ -424,6 +425,11 @@ def moba_backward(
     Raises:
         ValueError: If no chunk height compiles within shared memory.
     """
+    # TEMPORARY: token-major in and out, head-major kernels. `lse` and
+    # `part_m` are ours and are already head-major, so they are not converted.
+    # See `moba._layout_shim`. This runs before the shapes are read, so
+    # everything below sees head-major.
+    q, k, v, dout, out = to_head_major(q, k, v, dout, out)
     b, h_q, s, d = q.shape
     h_kv = k.shape[1]
     head_group_size(h_q, h_kv)
@@ -471,7 +477,9 @@ def moba_backward(
         except OutOfResources:
             continue
         _BWD_GROUP_CACHE[key] = group
-        return reduce_dq(dq_part, part_m, q.dtype), dk, dv
+        # TEMPORARY: gradients go back out in the caller's layout.
+        dq = reduce_dq(dq_part, part_m, q.dtype)
+        return (to_token_major(dq), to_token_major(dk), to_token_major(dv))
 
     raise ValueError(
         f"no chunk height in {candidates} compiles for the backward at "

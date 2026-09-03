@@ -79,7 +79,7 @@ def padded_batch(lens, seed=0):
     b = len(lens)
 
     def mk(h):
-        return torch.randn(b, h, MAXLEN, D, generator=gen, device="cuda",
+        return torch.randn(b, MAXLEN, h, D, generator=gen, device="cuda",
                            dtype=DTYPE)
 
     mask = torch.zeros(b, MAXLEN, dtype=torch.int32, device="cuda")
@@ -146,7 +146,7 @@ for b in (4, 8, 16):
             pair_pk = int(i_pk.col_nnz.sum()) * CFG.block_size
 
             def acc_mb(t, idx):
-                return (t.shape[0] * H_Q * t.shape[2] * idx.max_slots * D
+                return (t.shape[0] * H_Q * t.shape[1] * idx.max_slots * D
                         * t.element_size() / 2**20)
 
             t_pad, t_pk = moba(q, k, v, i_pad), moba(pq, pk_, pv, i_pk)
@@ -157,7 +157,7 @@ for b in (4, 8, 16):
             del ek, ev
 
             print(f"{kind:>8} {b:>3} {waste:>5.0%} | "
-                  f"{b * MAXLEN:>8} {pq.shape[2]:>8} "
+                  f"{b * MAXLEN:>8} {pq.shape[1]:>8} "
                   f"{acc_mb(q, i_pad):>7.1f}M {acc_mb(pq, i_pk):>7.1f}M | "
                   f"{grid:>6} {live_pad:>8} {live_pk:>8} "
                   f"{pair_pad / 1e6:>7.1f}M {pair_pk / 1e6:>7.1f}M | "

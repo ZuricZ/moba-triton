@@ -32,23 +32,28 @@ def block_representatives(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
     `block_size`, shrinking its representative toward zero and making it
     almost never selected -- a bug invisible whenever seq_len divides evenly.
 
+    The input is token-major but the output is not. Block representatives are
+    an internal buffer -- nothing outside this project reads them -- so they
+    keep the head-major shape the gate kernels and tests already expect. See
+    `moba.heads.expand_kv` for where that split is drawn.
+
     Args:
-        k: Keys shaped [B, H, S, D].
+        k: Keys shaped [B, S, H, D].
         cfg: Configuration supplying `block_size`.
 
     Returns:
         Block representatives shaped [B, H, num_blocks, D].
     """
-    b, h, s, d = k.shape
+    b, s, h, d = k.shape
     bk = cfg.block_size
     num_blocks = cfg.num_blocks(s)
     pad = num_blocks * bk - s
 
     # Pad the sequence axis so the reshape below is well-formed. F.pad's
-    # padding spec runs last-axis-first, so (0, 0, 0, pad) pads D by nothing
-    # and S by `pad` on the right.
-    k_padded = F.pad(k, (0, 0, 0, pad))
-    sums = k_padded.view(b, h, num_blocks, bk, d).sum(dim=3)
+    # padding spec runs last-axis-first, so (0, 0, 0, 0, 0, pad) pads D and H
+    # by nothing and S -- now axis 1 -- by `pad` on the right.
+    k_padded = F.pad(k, (0, 0, 0, 0, 0, pad))
+    sums = k_padded.view(b, num_blocks, bk, h, d).sum(dim=2).transpose(1, 2)
 
     # Divide by the real occupancy of each block, not by bk.
     counts = torch.full((num_blocks,), bk, device=k.device, dtype=k.dtype)
@@ -76,7 +81,7 @@ def select_blocks(
     must answer this directly.
 
     Args:
-        q: Queries shaped [B, H, S, D].
+        q: Queries shaped [B, S, H, D].
         kbar: Block representatives shaped [B, H_kv, num_blocks, D],
             where `H_kv` divides `H`.
         cfg: Configuration supplying `block_size`, `top_k`, and semantics flags.
@@ -84,7 +89,7 @@ def select_blocks(
     Returns:
         Boolean selection mask shaped [B, H, S, num_blocks].
     """
-    b, h, s, _ = q.shape
+    b, s, h, _ = q.shape
     num_blocks = kbar.shape[2]
     device = q.device
 
@@ -93,12 +98,15 @@ def select_blocks(
     # is the oracle's whole job -- the kernel gets to be clever, this does not.
     # Each query head still ranks blocks independently; only the thing being
     # ranked is shared.
-    kbar = expand_kv(kbar, h)
+    # dim=1: kbar is one of the head-major internal buffers, unlike q.
+    kbar = expand_kv(kbar, h, dim=1)
 
     # Gate scores. Deliberately unscaled: softmax's 1/sqrt(D) is a positive
     # monotone transform, and a monotone transform cannot reorder a ranking.
     # Applying it here would be arithmetic that changes no decision.
-    scores = torch.einsum("bhsd,bhnd->bhsn", q, kbar)
+    # q is token-major (b s h d), kbar head-major (b h n d); the output mask
+    # is head-major, matching `csc_to_mask`.
+    scores = torch.einsum("bshd,bhnd->bhsn", q, kbar)
 
     pos = torch.arange(s, device=device)
     own_block = pos // cfg.block_size                       # [S]
@@ -147,8 +155,8 @@ def moba_selection(
     """Convenience wrapper: pools keys and returns the block selection mask.
 
     Args:
-        q: Queries shaped [B, H, S, D], or [1, H, T, D] when packed.
-        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`.
+        q: Queries shaped [B, S, H, D], or [1, T, H, D] when packed.
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`.
         cfg: Configuration.
         cu_seqlens: Cumulative token counts, [num_sequences + 1]. When given,
             `q` and `k` hold one packed batch and `B` must be 1.
@@ -171,10 +179,12 @@ def moba_selection(
     bounds = cu_seqlens.tolist()
     spans = list(zip(bounds[:-1], bounds[1:]))
     width = max(cfg.num_blocks(hi - lo) for lo, hi in spans)
-    out = torch.zeros(1, q.shape[1], q.shape[2], width, dtype=torch.bool,
+    # The mask stays head-major [1, H, T, width]; only the inputs moved, so
+    # the slices below differ on q and k but not on `out`.
+    out = torch.zeros(1, q.shape[2], q.shape[1], width, dtype=torch.bool,
                       device=q.device)
     for lo, hi in spans:
-        piece = moba_selection(q[:, :, lo:hi], k[:, :, lo:hi], cfg)
+        piece = moba_selection(q[:, lo:hi], k[:, lo:hi], cfg)
         out[:, :, lo:hi, :piece.shape[-1]] = piece
     return out
 
@@ -214,8 +224,8 @@ def _packed_naive(q, k, v, cfg, cu_seqlens, selected, query_chunk):
         piece = None
         if selected is not None:
             piece = selected[:, :, lo:hi, :cfg.num_blocks(hi - lo)]
-        out[:, :, lo:hi] = moba_attention_naive(
-            q[:, :, lo:hi], k[:, :, lo:hi], v[:, :, lo:hi], cfg,
+        out[:, lo:hi] = moba_attention_naive(
+            q[:, lo:hi], k[:, lo:hi], v[:, lo:hi], cfg,
             selected=piece, query_chunk=query_chunk,
         )
     return out
@@ -246,8 +256,8 @@ def moba_attention_naive(
     flips. See `moba.tolerance`.
 
     Args:
-        q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+        q: Queries shaped [B, S, H, D].
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`. Fewer
             key/value heads than query heads is grouped-query attention.
         v: Values, same shape as `k`.
         cfg: Configuration.
@@ -270,12 +280,12 @@ def moba_attention_naive(
             and they would agree while both were wrong.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`.
+        Attention output shaped [B, S, H, D], same dtype as `q`.
     """
     if cu_seqlens is not None:
         return _packed_naive(q, k, v, cfg, cu_seqlens, selected, query_chunk)
 
-    b, h, s, d = q.shape
+    b, s, h, d = q.shape
     scale = d ** -0.5
 
     # See `select_blocks`. Materializing the shared heads is exactly the memory
@@ -299,6 +309,7 @@ def moba_attention_naive(
         # Expand block-level selection to token-level visibility. Indexing the
         # block axis with a per-token block id broadcasts each block's
         # decision across all of its keys.
+        # `selected` is head-major, so this slice is unchanged by the move.
         visible = selected[:, :, start:stop][..., block_of_token]  # [B,H,rows,S]
 
         # Causal masking. Strictly, only the current block needs it -- every
@@ -308,9 +319,11 @@ def moba_attention_naive(
         causal = pos[start:stop].view(-1, 1) >= pos.view(1, -1)    # [rows, S]
         mask = visible & causal.view(1, 1, rows, s)
 
-        logits = torch.einsum("bhid,bhjd->bhij", q[:, :, start:stop], k) * scale
+        # i and j are query and key positions; both q and v carry them on
+        # axis 1 now, while the logits stay head-major to match `mask`.
+        logits = torch.einsum("bihd,bjhd->bhij", q[:, start:stop], k) * scale
         logits = logits.masked_fill(~mask, float("-inf"))
         probs = torch.softmax(logits, dim=-1)
-        out[:, :, start:stop] = torch.einsum("bhij,bhjd->bhid", probs, v)
+        out[:, start:stop] = torch.einsum("bhij,bjhd->bihd", probs, v)
 
     return out

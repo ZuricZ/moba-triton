@@ -81,7 +81,7 @@ def test_gate_emits_ascending_ids_with_padding_last(device, gate):
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1024, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1024, 2, 128), dtype=torch.bfloat16, device=device)
 
     idx = gate_select(q, block_representatives(k, cfg), cfg)
     valid = idx >= 0
@@ -107,7 +107,7 @@ def test_gate_breaks_ties_toward_the_lower_block_index(device):
     never produces -- so without constructing them the tie-break is untested.
     """
     cfg = MoBAConfig(block_size=64, top_k=2, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 1, 512, 64), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 512, 1, 64), dtype=torch.bfloat16, device=device)
     kbar = block_representatives(k, cfg)
 
     # Every block gets the same representative, so all scores tie exactly and
@@ -131,7 +131,7 @@ def test_gate_matches_the_oracle_when_the_budget_exceeds_the_blocks(device):
     what exists rather than padding with a repeated or bogus id.
     """
     cfg = MoBAConfig(block_size=128, top_k=12, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 512, 64), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 512, 2, 64), dtype=torch.bfloat16, device=device)
     kbar = block_representatives(k, cfg)          # only 4 blocks exist
 
     idx = gate_select(q, kbar, cfg)
@@ -157,7 +157,7 @@ def test_gate_handles_more_blocks_than_a_single_tile_could_hold(device):
     shape at seq_len 2048 or below missed.
     """
     cfg = MoBAConfig(block_size=32, top_k=8, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 1, 16384, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 16384, 1, 128), dtype=torch.bfloat16, device=device)
     kbar = block_representatives(k, cfg)
     assert kbar.shape[2] == 512, "expected 512 blocks for this configuration"
 
@@ -182,7 +182,7 @@ def test_gate_respects_the_budget_when_capacity_is_not_a_power_of_two(device):
     seq_len 8192 caught it originally.
     """
     cfg = MoBAConfig(block_size=128, top_k=12, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 1, 8192, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 8192, 1, 128), dtype=torch.bfloat16, device=device)
     kbar = block_representatives(k, cfg)
     assert kbar.shape[2] > GATE_BLOCK_N, "needs more than one streamed chunk"
 
@@ -215,9 +215,9 @@ def test_gate_scores_each_query_head_against_its_shared_representatives(device):
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
     b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
     gen = torch.Generator(device=device).manual_seed(0)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
     kbar = block_representatives_triton(k, cfg)
@@ -234,9 +234,9 @@ def test_gate_agrees_with_the_pytorch_oracle_under_gqa(device):
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
     b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
     gen = torch.Generator(device=device).manual_seed(1)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
     kbar = block_representatives(k, cfg)
@@ -256,9 +256,9 @@ def test_every_query_head_is_gated_under_gqa(device):
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
     b, h_q, h_kv, s, d = 1, 8, 2, 256, 64
     gen = torch.Generator(device=device).manual_seed(2)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
     idx = gate_select(q, block_representatives_triton(k, cfg), cfg)
@@ -272,7 +272,7 @@ def test_every_query_head_is_gated_under_gqa(device):
 
 def test_gate_rejects_indivisible_head_counts(device):
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
-    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
+    q = torch.randn(1, 256, 8, 64, dtype=torch.bfloat16, device=device)
     kbar = torch.randn(1, 3, 4, 64, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="divisible"):
         gate_select(q, kbar, cfg)
@@ -289,7 +289,7 @@ def test_block_representatives_are_pooled_per_sequence(device):
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
     cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
     gen = torch.Generator(device=device).manual_seed(0)
-    k = torch.randn(1, 2, 48, 16, generator=gen, device=device,
+    k = torch.randn(1, 48, 2, 16, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
     got = block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=20)
@@ -297,7 +297,7 @@ def test_block_representatives_are_pooled_per_sequence(device):
 
     lo = 0
     for i, n in enumerate([20, 12, 16]):
-        want = block_representatives_triton(k[:, :, lo:lo + n], cfg)
+        want = block_representatives_triton(k[:, lo:lo + n], cfg)
         nb = want.shape[2]
         assert torch.equal(got[i:i + 1, :, :nb], want), f"sequence {i}"
         lo += n
@@ -313,9 +313,9 @@ def test_a_short_final_block_divides_by_its_real_occupancy(device):
     """
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float32)
     cu = torch.tensor([0, 6, 10], dtype=torch.int32, device=device)
-    k = torch.ones(1, 1, 10, 8, device=device, dtype=torch.float32)
-    k[0, 0, 4] = 3.0
-    k[0, 0, 5] = 5.0            # sequence 0's tail block holds 3 and 5
+    k = torch.ones(1, 10, 1, 8, device=device, dtype=torch.float32)
+    k[0, 4, 0] = 3.0
+    k[0, 5, 0] = 5.0            # sequence 0's tail block holds 3 and 5
 
     got = block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=6)
     assert got.shape == (2, 1, 2, 8)
@@ -327,6 +327,6 @@ def test_a_short_final_block_divides_by_its_real_occupancy(device):
 def test_packed_representatives_reject_a_real_batch_axis(device):
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.bfloat16)
     cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
-    k = torch.randn(2, 2, 16, 16, device=device, dtype=torch.bfloat16)
+    k = torch.randn(2, 16, 2, 16, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="batch 1"):
         block_representatives_triton(k, cfg, cu_seqlens=cu, max_seqlen=8)

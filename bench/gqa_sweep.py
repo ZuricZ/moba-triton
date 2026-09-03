@@ -36,11 +36,11 @@ CFG = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
 
 def make(s, h_kv, seed=0):
     gen = torch.Generator(device="cuda").manual_seed(seed)
-    q = torch.randn(1, H_Q, s, D, generator=gen, device="cuda",
+    q = torch.randn(1, s, H_Q, D, generator=gen, device="cuda",
                     dtype=torch.bfloat16)
-    k = torch.randn(1, h_kv, s, D, generator=gen, device="cuda",
+    k = torch.randn(1, s, h_kv, D, generator=gen, device="cuda",
                     dtype=torch.bfloat16)
-    v = torch.randn(1, h_kv, s, D, generator=gen, device="cuda",
+    v = torch.randn(1, s, h_kv, D, generator=gen, device="cuda",
                     dtype=torch.bfloat16)
     return q, k, v
 

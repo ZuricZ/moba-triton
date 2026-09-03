@@ -32,7 +32,7 @@ def test_csc_round_trips_to_the_oracle_mask(device, shape, gate):
 
     expected = moba_selection(q, k, cfg)
     index = build_csc(q, k, cfg)
-    actual = csc_to_mask(index, shape[2])
+    actual = csc_to_mask(index, shape[1])   # token-major: seq_len is axis 1
 
     assert torch.equal(actual, expected), (
         "CSC does not round-trip; the index and the routing disagree"
@@ -42,7 +42,7 @@ def test_csc_round_trips_to_the_oracle_mask(device, shape, gate):
 def test_col_offsets_is_a_valid_exclusive_prefix_sum(device):
     """Offsets must start at zero and step by exactly each column's count."""
     cfg = MoBAConfig(block_size=32, top_k=4, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 4, 512, 64), dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 4, 64), dtype=torch.bfloat16)
     ix = build_csc(q, k, cfg)
 
     assert torch.equal(
@@ -61,7 +61,7 @@ def test_row_indices_ascend_within_every_column(device):
     pessimistic bound; keeping columns sorted costs nothing to produce.
     """
     cfg = MoBAConfig(block_size=32, top_k=4, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 512, 64), dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 2, 64), dtype=torch.bfloat16)
     ix = build_csc(q, k, cfg)
 
     for bi in range(ix.col_nnz.shape[0]):
@@ -82,7 +82,7 @@ def test_slots_are_dense_and_unique_per_query(device):
     if slots were sparse the combine pass would read uninitialised entries.
     """
     cfg = MoBAConfig(block_size=32, top_k=4, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 512, 64), dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 2, 64), dtype=torch.bfloat16)
     ix = build_csc(q, k, cfg)
     mask = moba_selection(q, k, cfg)
 
@@ -108,7 +108,7 @@ def test_slots_are_dense_and_unique_per_query(device):
 def test_order_is_longest_first(device):
     """Dispatch order must put the heaviest columns first (spec D8)."""
     cfg = MoBAConfig(block_size=16, top_k=2, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 4, 512, 64), dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 4, 64), dtype=torch.bfloat16)
     ix = build_csc(q, k, cfg)
 
     sorted_counts = torch.gather(ix.col_nnz, -1, ix.order.long())
@@ -120,7 +120,7 @@ def test_order_is_longest_first(device):
 def test_total_pairs_matches_the_mask(device):
     """Nothing may be dropped or duplicated in the transpose."""
     cfg = MoBAConfig(block_size=16, top_k=2, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 4, 512, 64), dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 4, 64), dtype=torch.bfloat16)
     ix = build_csc(q, k, cfg)
     mask = moba_selection(q, k, cfg)
 
@@ -130,11 +130,11 @@ def test_total_pairs_matches_the_mask(device):
 def _gqa_qkv(device, b=1, h_q=8, h_kv=2, s=512, d=64, seed=0):
     """Returns (q, k, v) with fewer key/value heads than query heads."""
     gen = torch.Generator(device=device).manual_seed(seed)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.float32)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.float32)
-    v = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    v = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.float32)
     return q, k, v
 

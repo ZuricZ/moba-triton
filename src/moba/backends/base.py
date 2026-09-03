@@ -60,13 +60,13 @@ class Backend(Protocol):
         """Computes MoBA attention.
 
         Args:
-            q: Queries shaped [B, H, S, D].
-            k: Keys shaped [B, H, S, D].
-            v: Values shaped [B, H, S, D].
+            q: Queries shaped [B, S, H, D].
+            k: Keys shaped [B, S, H, D].
+            v: Values shaped [B, S, H, D].
             cfg: Configuration.
 
         Returns:
-            Output shaped [B, H, S, D], same dtype as `q`.
+            Output shaped [B, S, H, D], same dtype as `q`.
         """
         ...
 

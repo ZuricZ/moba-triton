@@ -79,7 +79,7 @@ def test_naive_and_sdpa_agree_when_top_k_covers_all_blocks():
     b, h, s, d = 1, 2, 64, 32
     g = torch.Generator(device="cuda").manual_seed(0)
     q, k, v = (
-        torch.randn(b, h, s, d, generator=g, device="cuda", dtype=torch.float64)
+        torch.randn(b, s, h, d, generator=g, device="cuda", dtype=torch.float64)
         for _ in range(3)
     )
     cfg = MoBAConfig(block_size=16, top_k=s // 16, dtype=torch.float64)
@@ -96,14 +96,14 @@ def test_backends_preserve_shape_and_dtype():
     # 128-byte cache line. `is_available` sees a config, not a shape, so it
     # cannot report that -- the shape has to be one every available backend
     # can actually run.
-    b, h, s, d = 1, 2, 64, 64
+    b, s, h, d = 1, 64, 2, 64
     cfg = MoBAConfig(block_size=16, top_k=2, dtype=torch.bfloat16)
     q, k, v = (
-        torch.randn(b, h, s, d, device="cuda", dtype=torch.bfloat16) for _ in range(3)
+        torch.randn(b, s, h, d, device="cuda", dtype=torch.bfloat16) for _ in range(3)
     )
     for backend in available_backends(cfg):
         out = backend.forward(q, k, v, cfg)
-        assert out.shape == (b, h, s, d), backend.name
+        assert out.shape == (b, s, h, d), backend.name
         assert out.dtype is torch.bfloat16, backend.name
 
 
@@ -172,7 +172,7 @@ def test_our_triton_backend_routing_matches_the_oracle():
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     g = torch.Generator(device="cuda").manual_seed(0)
     q, k = (
-        torch.randn(1, 2, 256, 64, generator=g, device="cuda", dtype=torch.bfloat16)
+        torch.randn(1, 256, 2, 64, generator=g, device="cuda", dtype=torch.bfloat16)
         for _ in range(2)
     )
 

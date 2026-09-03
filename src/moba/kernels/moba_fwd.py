@@ -36,6 +36,7 @@ import triton
 import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
+from moba._layout_shim import to_head_major, to_token_major
 from moba.config import MoBAConfig
 from moba.device import (
     TENSOR_CORE_TILE,
@@ -616,6 +617,10 @@ def combine_partials(
         K_SLOTS=slots, D=d, BLOCK_M=block_m, WRITE_LSE=return_lse,
         num_warps=warps,
     )
+    # TEMPORARY: the partials are ours and stay head-major, but `out` crosses
+    # the API boundary. `lse` does not, so it is returned unchanged.
+    # See `moba._layout_shim`.
+    out = to_token_major(out)
     return (out, lse) if return_lse else out
 
 
@@ -626,8 +631,8 @@ def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     """Checks shapes and configuration before any launch.
 
     Args:
-        q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`. Fewer
+        q: Queries shaped [B, S, H, D].
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`. Fewer
             key/value heads than query heads is grouped-query attention.
         v: Values, same shape as `k`.
         cfg: Configuration.
@@ -638,13 +643,16 @@ def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     """
     if k.shape != v.shape:
         raise ValueError(f"key/value shape mismatch: {k.shape}, {v.shape}")
-    if q.shape[0] != k.shape[0] or q.shape[2:] != k.shape[2:]:
+    # Token-major: batch, sequence and head_dim must agree; only the head
+    # count may differ, and only by a whole group.
+    if (q.shape[0] != k.shape[0] or q.shape[1] != k.shape[1]
+            or q.shape[3] != k.shape[3]):
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
 
     # Grouped-query attention is a shape property, not a configuration one:
     # the group size is H_q // H_kv and there is nowhere else it could be
     # stated. Raises if the counts do not divide.
-    head_group_size(q.shape[1], k.shape[1])
+    head_group_size(q.shape[2], k.shape[2])
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -654,7 +662,7 @@ def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
             )
         if max_seqlen is None:
             raise ValueError("max_seqlen is required when cu_seqlens is given")
-        validate_cu_seqlens(cu_seqlens, total_tokens=q.shape[2],
+        validate_cu_seqlens(cu_seqlens, total_tokens=q.shape[1],
                             max_seqlen=max_seqlen)
     ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
     if not ok:
@@ -739,8 +747,8 @@ def attend_partials(
     precision the whole merge pivots on.
 
     Args:
-        q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H_kv, S, D], contiguous, where `H_kv` divides `H`.
+        q: Queries shaped [B, S, H, D], contiguous.
+        k: Keys shaped [B, S, H_kv, D], contiguous, where `H_kv` divides `H`.
         v: Values, same shape as `k`.
         cfg: Configuration.
         index: Precomputed CSC index.
@@ -760,6 +768,8 @@ def attend_partials(
         units; `combine_partials` expects that and no other consumer
         exists.
     """
+    # TEMPORARY: token-major in, head-major kernels. See `moba._layout_shim`.
+    q, k, v = to_head_major(q, k, v)
     b, h_q, s, d = q.shape
     h_kv = k.shape[1]
     slots = index.max_slots
@@ -842,8 +852,8 @@ def moba_forward(
     """Computes MoBA attention with the KV-block-major kernel.
 
     Args:
-        q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H_kv, S, D], contiguous, where `H_kv` divides `H`.
+        q: Queries shaped [B, S, H, D], contiguous.
+        k: Keys shaped [B, S, H_kv, D], contiguous, where `H_kv` divides `H`.
         v: Values, same shape as `k`.
         cfg: Configuration.
         index: Precomputed CSC index; built from `q` and `k` when omitted
@@ -855,7 +865,7 @@ def moba_forward(
             to `q.dtype`, which halves the largest memory term in the pass;
             see `attend_partials`.
         cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
-            given, the inputs hold one packed batch shaped [1, H, T, D] and each
+            given, the inputs hold one packed batch shaped [1, T, H, D] and each
             sequence attends independently. Ignored when `index` is supplied,
             which carries its own.
         max_seqlen: Longest sequence, required with `cu_seqlens`. Deriving it
@@ -863,7 +873,7 @@ def moba_forward(
             reason FlashAttention takes `max_seqlen_q`.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`.
+        Attention output shaped [B, S, H, D], same dtype as `q`.
 
     Raises:
         ValueError: If shapes disagree, or head_dim or block_size is

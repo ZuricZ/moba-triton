@@ -50,6 +50,7 @@ import torch
 import triton
 import triton.language as tl
 
+from moba._layout_shim import to_head_major
 from moba.config import MoBAConfig
 from moba.heads import head_group_size
 from moba.packing import validate_cu_seqlens
@@ -320,7 +321,7 @@ def gate_select(
     """Selects blocks for every query, returning ids rather than a dense mask.
 
     Args:
-        q: Queries shaped [B, H, S, D], contiguous.
+        q: Queries shaped [B, S, H, D], contiguous.
         kbar: Block representatives shaped [B, H_kv, num_blocks, D],
             contiguous, where `H_kv` divides `H`. Fewer representative heads
             than query heads is grouped-query attention: the group shares what
@@ -343,6 +344,10 @@ def gate_select(
             if packed input has a batch axis above 1, or if `max_seqlen` is
             missing.
     """
+    # TEMPORARY: q is token-major, kbar is one of our own head-major buffers,
+    # so only q converts. This must run before any shape is read.
+    # See `moba._layout_shim`.
+    (q,) = to_head_major(q)
     b, h, s, d = q.shape
     block_m = max(TENSOR_CORE_TILE, GATE_BLOCK_M)
     varlen = cu_seqlens is not None
@@ -487,7 +492,7 @@ def block_representatives_triton(
     """Mean-pools each block's keys into one representative.
 
     Args:
-        k: Keys shaped [B, H, S, D], contiguous, or [1, H, T, D] when packed.
+        k: Keys shaped [B, S, H, D], contiguous, or [1, T, H, D] when packed.
         cfg: Configuration supplying `block_size`.
         cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
             given, `k` holds one packed batch and `B` must be 1.
@@ -506,6 +511,9 @@ def block_representatives_triton(
         ValueError: If packed input has a batch axis above 1, or `max_seqlen`
             is missing.
     """
+    # TEMPORARY: token-major in, head-major kernel. This must run before any
+    # shape is read. See `moba._layout_shim`.
+    (k,) = to_head_major(k)
     b, h, s, d = k.shape
     k = k.contiguous()
 

@@ -27,9 +27,9 @@ from moba.tolerance import (
 DEVICE = "cuda"
 
 
-def make_qkv(b, h, s, d, dtype=torch.float64, seed=0):
+def make_qkv(b, s, h, d, dtype=torch.float64, seed=0):
     g = torch.Generator(device=DEVICE).manual_seed(seed)
-    shape = (b, h, s, d)
+    shape = (b, s, h, d)
     return tuple(
         torch.randn(shape, generator=g, device=DEVICE, dtype=dtype) for _ in range(3)
     )
@@ -55,7 +55,7 @@ def test_max_abs_error_promotes_before_comparing():
 
 
 def test_reference_error_is_positive_and_sane_for_bf16():
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     truth, ref_err = reference_error(q, k, v, cfg)
 
@@ -72,7 +72,7 @@ def test_reference_error_measures_arithmetic_not_routing_flips():
     to ~0.9, which made the budget both unstable and uselessly loose.
     """
     for seq_len in (128, 512, 1024):
-        q, k, v = make_qkv(1, 2, seq_len, 64)
+        q, k, v = make_qkv(1, seq_len, 2, 64)
         cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
         _, ref_err = reference_error(q, k, v, cfg)
         assert ref_err < 0.05, (
@@ -88,7 +88,7 @@ def test_bf16_is_less_precise_than_fp16():
     fp32's exponent range. If this ordering inverted, the methodology would be
     measuring something other than format precision.
     """
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     _, err_bf16 = reference_error(
         q, k, v, MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     )
@@ -104,7 +104,7 @@ def test_bf16_is_less_precise_than_fp16():
 
 
 def test_correct_bf16_implementation_passes():
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     truth, ref_err = reference_error(q, k, v, cfg)
 
@@ -114,7 +114,7 @@ def test_correct_bf16_implementation_passes():
 
 def test_a_more_precise_implementation_passes():
     """An fp32 implementation, routed identically, is well inside a bf16 budget."""
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     truth, ref_err = reference_error(q, k, v, cfg)
 
@@ -136,7 +136,7 @@ def test_floor_saves_the_degenerate_case():
 
 
 def test_perturbed_implementation_is_rejected():
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     truth, ref_err = reference_error(q, k, v, cfg)
 
@@ -149,7 +149,7 @@ def test_perturbed_implementation_is_rejected():
 
 def test_wrong_top_k_is_rejected():
     """A semantic bug, not a numeric one, must also be caught."""
-    q, k, v = make_qkv(1, 2, 256, 32)
+    q, k, v = make_qkv(1, 256, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     truth, ref_err = reference_error(q, k, v, cfg)
 
@@ -178,7 +178,7 @@ def test_failure_message_reports_the_numbers():
 
 
 def test_identical_routing_passes():
-    q, k, _ = make_qkv(1, 2, 256, 32)
+    q, k, _ = make_qkv(1, 256, 2, 32)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     sel = moba_selection(q.to(cfg.dtype), k.to(cfg.dtype), cfg)
     assert_selection_matches(sel, sel.clone(), name="self")
@@ -187,10 +187,10 @@ def test_identical_routing_passes():
 def test_different_tie_break_is_caught_as_a_routing_bug():
     """The subtlest semantics flag surfaces as a routing failure, not a
     tolerance failure -- which is the diagnosis a reader actually needs."""
-    b, h, s, d = 1, 1, 256, 32
+    b, s, h, d = 1, 256, 1, 32
     g = torch.Generator(device=DEVICE).manual_seed(0)
-    q = torch.randn(b, h, s, d, generator=g, device=DEVICE, dtype=torch.float64)
-    k = torch.ones(b, h, s, d, device=DEVICE, dtype=torch.float64)
+    q = torch.randn(b, s, h, d, generator=g, device=DEVICE, dtype=torch.float64)
+    k = torch.ones(b, s, h, d, device=DEVICE, dtype=torch.float64)
 
     low = MoBAConfig(block_size=32, top_k=2, tie_break_low_index=True)
     high = MoBAConfig(block_size=32, top_k=2, tie_break_low_index=False)

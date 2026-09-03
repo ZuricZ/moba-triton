@@ -69,7 +69,7 @@ def test_analytic_sparsity_matches_the_oracle(seq_len, block_size, top_k, device
     kernel never had -- which would corrupt every derived number.
     """
     cfg = MoBAConfig(block_size=block_size, top_k=top_k)
-    q, k, _ = make_qkv((1, 2, seq_len, 32), dtype=torch.float64, device=device)
+    q, k, _ = make_qkv((1, seq_len, 2, 32), dtype=torch.float64, device=device)
     sel = moba_selection(q, k, cfg)
 
     pos = torch.arange(seq_len, device=sel.device)

@@ -60,7 +60,7 @@ class FlashMoBABackend:
 
         from flash_moba import flash_moba_attn_varlen_func  # type: ignore
 
-        b, h, s, d = q.shape
+        b, s, h, d = q.shape        # token-major
         out = flash_moba_attn_varlen_func(
             to_varlen(q),
             to_varlen(k),

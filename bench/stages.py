@@ -48,7 +48,8 @@ DEFAULT_GATE = (128, 8)
 # The seq_len range matters more than any single point: the gate's cost is
 # expected to be flat in S (launch-bound) while the kernel's grows linearly,
 # so their ratio is only meaningful as a trend.
-DEFAULT_SHAPES = [(1, 4, s, 128) for s in (1024, 2048, 4096, 8192)]
+# (batch, seq_len, heads, head_dim) -- token-major.
+DEFAULT_SHAPES = [(1, s, 4, 128) for s in (1024, 2048, 4096, 8192)]
 
 # Share of total runtime above which the gate is worth further work. The fused
 # gate sits below this from S=2048 up; at S=1024 it is still above, because
@@ -134,7 +135,7 @@ def time_stages(
     torch.cuda.empty_cache()
 
     return {
-        "seq_len": shape[2],
+        "seq_len": shape[1],
         "head_dim": shape[3],
         "block_size": block_size,
         "top_k": top_k,
@@ -158,7 +159,7 @@ def time_stages(
 # outputs alive beside the timing buffers pushed a 4 GiB card into allocator
 # thrash, and a thrashing allocator on WDDM reports a 26x slowdown in a stage
 # that never touched the buffers.
-ACCURACY_SHAPE = (1, 2, 1024, 128)
+ACCURACY_SHAPE = (1, 1024, 2, 128)
 
 
 def partials_accuracy(

@@ -37,6 +37,7 @@ import torch
 import triton
 import triton.language as tl
 
+from moba._layout_shim import to_head_major, to_token_major
 from moba.device import TENSOR_CORE_TILE
 
 
@@ -161,15 +162,15 @@ def fa2_forward(
     """Runs the minimal FA-2 forward kernel.
 
     Args:
-        q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H, S, D], contiguous.
-        v: Values shaped [B, H, S, D], contiguous.
+        q: Queries shaped [B, S, H, D], contiguous.
+        k: Keys shaped [B, S, H, D], contiguous.
+        v: Values shaped [B, S, H, D], contiguous.
         causal: Whether to apply causal masking.
         block_m: Query rows per program instance.
         block_n: Key rows per inner-loop step.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`.
+        Attention output shaped [B, S, H, D], same dtype as `q`.
 
     Raises:
         ValueError: If shapes disagree or the head dimension is unsupported.
@@ -177,6 +178,9 @@ def fa2_forward(
     if not (q.shape == k.shape == v.shape):
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
 
+    # TEMPORARY: token-major in and out, head-major kernel.
+    # See `moba._layout_shim`.
+    q, k, v = to_head_major(q, k, v)
     b, h, s, d = q.shape
     # Dense attention reads Q contiguously, so it is not subject to the
     # cache-line floor that `check_gathered_head_dim` imposes on the gathered
@@ -203,4 +207,4 @@ def fa2_forward(
         D=d,
         CAUSAL=causal,
     )
-    return out
+    return to_token_major(out)

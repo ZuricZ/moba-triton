@@ -92,9 +92,9 @@ def run(
     rows = []
     for s in seq_lens:
         g = torch.Generator(device="cuda").manual_seed(seed)
-        q = torch.randn(1, heads, s, head_dim, generator=g,
+        q = torch.randn(1, s, heads, head_dim, generator=g,
                         device="cuda", dtype=dtype)
-        k = torch.randn(1, heads, s, head_dim, generator=g,
+        k = torch.randn(1, s, heads, head_dim, generator=g,
                         device="cuda", dtype=dtype)
         for bk in block_sizes:
             for tk in top_ks:

@@ -23,7 +23,7 @@ from moba.kernels.index_fused import build_csc_fused
 from moba.ref.naive import moba_attention_naive
 from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
 
-SHAPES = [(1, 2, 512, 64), (1, 2, 1024, 128)]
+SHAPES = [(1, 512, 2, 64), (1, 1024, 2, 128)]
 
 
 def _oracle_grads(q, k, v, cfg, selected, g):
@@ -53,7 +53,7 @@ def test_gradients_are_within_the_precision_budget(device, shape, gate):
     g = torch.randn(shape, device=device, dtype=torch.float64) * 0.1
 
     index = build_csc_fused(qb, kb, cfg)
-    selected = csc_to_mask(index, shape[2])
+    selected = csc_to_mask(index, shape[1])
 
     _, tq, tk, tv = _oracle_grads(q, k, v, cfg, selected, g)
     _, rq, rk, rv = _oracle_grads(qb, kb, vb, cfg, selected, g)
@@ -84,7 +84,7 @@ def test_every_key_receives_gradient_including_unselected_blocks(device, gate):
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    shape = (1, 2, 1024, 64)
+    shape = (1, 1024, 2, 64)
     q, k, v = make_qkv(shape, dtype=torch.bfloat16, device=device)
     g = torch.randn(shape, device=device, dtype=torch.bfloat16) * 0.1
 
@@ -97,7 +97,7 @@ def test_every_key_receives_gradient_including_unselected_blocks(device, gate):
 
     for b, h, blk in empty.nonzero().tolist():
         lo = blk * cfg.block_size
-        hi = min(lo + cfg.block_size, shape[2])
+        hi = min(lo + cfg.block_size, shape[1])
         assert not bool(dk[b, h, lo:hi].any()), (
             f"unselected block {blk} has a nonzero dk"
         )
@@ -126,13 +126,13 @@ def test_rebuilding_the_index_changes_gradients_only_by_summation_order(
     former.
     """
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
-    shape = (1, 2, 512, 64)
+    shape = (1, 512, 2, 64)
     q, k, v = make_qkv(shape, dtype=torch.bfloat16, device=device)
     g = torch.randn(shape, device=device, dtype=torch.bfloat16) * 0.1
 
     first, second = build_csc_fused(q, k, cfg), build_csc_fused(q, k, cfg)
-    assert torch.equal(csc_to_mask(first, shape[2]),
-                       csc_to_mask(second, shape[2])), "routing is unstable"
+    assert torch.equal(csc_to_mask(first, shape[1]),
+                       csc_to_mask(second, shape[1])), "routing is unstable"
 
     _, aq, ak, av = _kernel_grads(q, k, v, cfg, first, g)
     _, bq, bk, bv = _kernel_grads(q, k, v, cfg, second, g)
@@ -156,7 +156,7 @@ def test_backward_is_deterministic(device):
     exactly the property the gate's tie-break rule exists to protect.
     """
     cfg = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
-    shape = (1, 2, 1024, 128)
+    shape = (1, 1024, 2, 128)
     q, k, v = make_qkv(shape, dtype=torch.bfloat16, device=device)
     g = torch.randn(shape, device=device, dtype=torch.bfloat16) * 0.1
     index = build_csc_fused(q, k, cfg)

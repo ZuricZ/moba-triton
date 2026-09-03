@@ -53,7 +53,7 @@ def validate_cu_seqlens(
 
     Args:
         cu_seqlens: Cumulative token counts, [num_sequences + 1] int32.
-        total_tokens: `q.shape[2]`. The last entry must equal this, and the
+        total_tokens: `q.shape[1]`. The last entry must equal this, and the
             caller knows it without a transfer.
         max_seqlen: Longest sequence in the batch, as a plain int. Required
             rather than derived for the reason FlashAttention requires it:
@@ -122,20 +122,20 @@ def pack(
     on the hot path.
 
     Args:
-        x: Padded tensor shaped [B, H, S, D].
+        x: Padded tensor shaped [B, S, H, D].
         attention_mask: Shaped [B, S], nonzero where a token is real.
 
     Returns:
         A tuple of (packed, cu_seqlens, max_seqlen), where `packed` is
-        [1, H, T, D] contiguous, `cu_seqlens` is [B + 1] int32 on `x`'s device,
+        [1, T, H, D] contiguous, `cu_seqlens` is [B + 1] int32 on `x`'s device,
         and `max_seqlen` is a plain int.
 
     Raises:
         ValueError: If the shapes disagree.
     """
     if x.ndim != 4:
-        raise ValueError(f"x must be [B, H, S, D], got {tuple(x.shape)}")
-    b, _, s, _ = x.shape
+        raise ValueError(f"x must be [B, S, H, D], got {tuple(x.shape)}")
+    b, s, _, _ = x.shape
     if attention_mask.shape != (b, s):
         raise ValueError(
             f"attention_mask must be [B, S] = {(b, s)}, got "
@@ -147,13 +147,12 @@ def pack(
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     max_seqlen = int(lengths.max())         # the one synchronization
 
-    # Advanced indexing on dims 0 and 2 with a slice between them puts the
-    # gathered axis first, giving [T, H, D]; the permute then puts it back into
-    # head-major. Both steps copy. See the module docstring for why this cannot
-    # be FlashAttention's single row gather.
+    # A row gather, and nothing else: indexing the two leading axes with 1-D
+    # index tensors yields a contiguous [T, H, D], because one token's H*D
+    # elements are already adjacent. This is FlashAttention's `unpad_input`
+    # written out. Under head-major it needed a permute and a second copy.
     b_idx, s_idx = mask.nonzero(as_tuple=True)
-    packed = x[b_idx, :, s_idx]                       # [T, H, D]
-    packed = packed.permute(1, 0, 2).unsqueeze(0).contiguous()
+    packed = x[b_idx, s_idx].unsqueeze(0)             # [1, T, H, D]
     return packed, cu_seqlens, max_seqlen
 
 
@@ -170,22 +169,22 @@ def unpack(
     plausible garbage.
 
     Args:
-        packed: Packed tensor shaped [1, H, T, D].
+        packed: Packed tensor shaped [1, T, H, D].
         cu_seqlens: Cumulative token counts, [batch + 1] int32.
         batch: Sequence count of the rectangle to rebuild.
         seq_len: Padded length of the rectangle to rebuild.
 
     Returns:
-        Padded tensor shaped [batch, H, seq_len, D].
+        Padded tensor shaped [batch, seq_len, H, D].
 
     Raises:
         ValueError: If the shapes disagree.
     """
     if packed.ndim != 4 or packed.shape[0] != 1:
         raise ValueError(
-            f"packed must be [1, H, T, D], got {tuple(packed.shape)}"
+            f"packed must be [1, T, H, D], got {tuple(packed.shape)}"
         )
-    _, h, t, d = packed.shape
+    _, t, h, d = packed.shape
     if cu_seqlens.numel() != batch + 1:
         raise ValueError(
             f"cu_seqlens has {cu_seqlens.numel()} entries, expected "
@@ -196,10 +195,10 @@ def unpack(
     positions = torch.arange(seq_len, device=packed.device)
     mask = positions[None, :] < lengths[:, None]      # [batch, seq_len]
 
-    out = torch.zeros(batch, h, seq_len, d, device=packed.device,
+    out = torch.zeros(batch, seq_len, h, d, device=packed.device,
                       dtype=packed.dtype)
     b_idx, s_idx = mask.nonzero(as_tuple=True)
-    out[b_idx, :, s_idx] = packed[0].permute(1, 0, 2)  # [T, H, D]
+    out[b_idx, s_idx] = packed[0]                      # [T, H, D], a row scatter
     return out
 
 
@@ -207,9 +206,10 @@ def from_nested(nt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Unwraps a jagged nested tensor into our packed form.
 
     A jagged nested tensor is already packed plus `cu_seqlens`: `nt.values()` is
-    the packed data as [T, H, D] and `nt.offsets()` *is* `cu_seqlens`. The only
-    work is the transpose into head-major, which is a copy -- the concrete cost
-    of DD-1 at this boundary.
+    the packed data as [T, H, D] and `nt.offsets()` *is* `cu_seqlens`. In
+    token-major that is our packed form exactly, so the only work is a rank
+    change -- no transpose and no copy. Head-major needed one, which was the
+    concrete cost of DD-1 at this boundary.
 
     Args:
         nt: A nested tensor with `layout=torch.jagged`, ragged over the token
@@ -233,5 +233,5 @@ def from_nested(nt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
     offsets = nt.offsets()
     lengths = offsets[1:] - offsets[:-1]
     max_seqlen = int(lengths.max())          # the one synchronization
-    packed = values.permute(1, 0, 2).unsqueeze(0).contiguous()
+    packed = values.unsqueeze(0).contiguous()
     return packed, offsets.to(torch.int32), max_seqlen

@@ -64,7 +64,7 @@ def disagreement_matrix(q, k, v, cfg):
 def test_report_disagreements(device, capsys):
     """Prints the matrix. Run with -s to see it."""
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.float32)
-    q, k, v = make_qkv((1, 4, 512, 64), dtype=cfg.dtype, device=device)
+    q, k, v = make_qkv((1, 512, 4, 64), dtype=cfg.dtype, device=device)
 
     with capsys.disabled():
         print(
@@ -89,7 +89,7 @@ def test_known_agreements_still_hold(top_k, device):
     docs/semantics-crosscheck.md needs revisiting.
     """
     cfg = MoBAConfig(block_size=32, top_k=top_k, dtype=torch.float32)
-    q, k, v = make_qkv((1, 2, 256, 64), dtype=cfg.dtype, device=device)
+    q, k, v = make_qkv((1, 256, 2, 64), dtype=cfg.dtype, device=device)
 
     matrix = disagreement_matrix(q, k, v, cfg)
     checked = 0
@@ -115,7 +115,7 @@ def test_every_pair_in_the_matrix_is_accounted_for(device):
     avoid.
     """
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.float32)
-    q, k, v = make_qkv((1, 2, 256, 64), dtype=cfg.dtype, device=device)
+    q, k, v = make_qkv((1, 256, 2, 64), dtype=cfg.dtype, device=device)
 
     for pair, err in disagreement_matrix(q, k, v, cfg).items():
         if pair in EXPECTED_AGREEMENT:
