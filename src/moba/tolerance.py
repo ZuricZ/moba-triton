@@ -79,9 +79,9 @@ def reference_error(
     exactly, by `assert_selection_matches`.
 
     Args:
-        q: Queries shaped [B, H, S, D], float64.
-        k: Keys shaped [B, H, S, D], float64.
-        v: Values shaped [B, H, S, D], float64.
+        q: Queries shaped [B, S, H, D], float64.
+        k: Keys shaped [B, S, H, D], float64.
+        v: Values shaped [B, S, H, D], float64.
         cfg: Configuration; `cfg.dtype` is the precision being characterized.
         query_chunk: Passed through to the oracle to bound peak memory. Does
             not change results at realistic sizes.

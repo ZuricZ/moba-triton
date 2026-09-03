@@ -36,7 +36,6 @@ import triton
 import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
-from moba._layout_shim import to_head_major, to_token_major
 from moba.config import MoBAConfig
 from moba.device import (
     TENSOR_CORE_TILE,
@@ -94,11 +93,13 @@ def _moba_attn_fwd(
         # stride to add; the sequence enters only through the key range below.
         q_base = 0
         q_part_base = 0
-        q_span = TOKENS
+        part_span = TOKENS
     else:
+        # Unchanged by the move: the batch stride is H_Q*S*D head-major and
+        # S*H_Q*D token-major, which is the same number.
         q_base = pid_b * H_Q * S * D
         q_part_base = pid_b * H_Q * S * K_SLOTS
-        q_span = S
+        part_span = S
 
     # Longest-first dispatch (D8). Only the block id changes -- results are
     # written to query addresses, which never depended on the program id, so
@@ -117,19 +118,19 @@ def _moba_attn_fwd(
         eos = tl.load(CuSeqlens + pid_b + 1)
         lo_k = bos + blk * BLOCK_SIZE
         hi_k = tl.minimum(lo_k + BLOCK_SIZE, eos)
-        kv_base = (pid_bh % H_KV) * TOKENS * D
+        kv_base = (pid_bh % H_KV) * D
     else:
         lo_k = blk * BLOCK_SIZE
         hi_k = S
-        kv_base = pid_bh * S * D
+        kv_base = pid_b * S * H_KV * D + (pid_bh % H_KV) * D
 
     key_pos = lo_k + tl.arange(0, BLOCK_SIZE)
     key_ok = key_pos < hi_k
 
     # The single HBM trip this whole design exists to amortize.
-    k = tl.load(K + kv_base + key_pos[:, None] * D + offs_d[None, :],
+    k = tl.load(K + kv_base + key_pos[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=key_ok[:, None], other=0.0)
-    v = tl.load(V + kv_base + key_pos[:, None] * D + offs_d[None, :],
+    v = tl.load(V + kv_base + key_pos[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=key_ok[:, None], other=0.0)
 
     for start in range(0, n, GROUP):
@@ -149,12 +150,23 @@ def _moba_attn_fwd(
         #
         # `rows` deliberately stays a raw position, so the causal comparison
         # below needs no change and no runtime integer modulo appears here.
-        q_row = heads * q_span + rows
+        #
+        # Two different things used to be one expression. `part_row` says
+        # *which query this is*, addressing our own head-major partial buffers;
+        # the load below says *where that query lives*, in the caller's
+        # token-major tensor. Head-major let them coincide. Re-fusing them
+        # would look like a head permutation in the output.
+        part_row = heads * part_span + rows
 
         # Gathered rows (D7). One row is D*itemsize bytes -- exactly one
         # 128-byte cache line at D=64 bf16 -- so this costs the same
         # transaction count as a contiguous read. Measured at 1.03x.
-        q = tl.load(Q + q_base + q_row[:, None] * D + offs_d[None, :],
+        #
+        # Token-major: tokens are H_Q*D apart and heads D apart. Neither stride
+        # contains the sequence length, which is why this one expression serves
+        # the packed and padded cases alike.
+        q = tl.load(Q + q_base + rows[:, None] * (H_Q * D)
+                    + heads[:, None] * D + offs_d[None, :],
                     mask=live[:, None], other=0.0)
 
         # Masks are *added* into a zeroed accumulator before the matmul, not
@@ -209,7 +221,7 @@ def _moba_attn_fwd(
         # Fixed-slot destination (D10). Task 1 guarantees each (query, slot)
         # pair is written by exactly one program, so these scattered stores
         # never collide.
-        dst = q_row * K_SLOTS + slots
+        dst = part_row * K_SLOTS + slots
         tl.store(PartM + q_part_base + dst, m, mask=live)
         tl.store(PartL + q_part_base + dst, l, mask=live)
         tl.store(
@@ -475,7 +487,7 @@ def _moba_combine(
     PartM, PartL, PartAcc, Out, Lse,
     S,
     K_SLOTS: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
-    WRITE_LSE: tl.constexpr,
+    H_Q: tl.constexpr, WRITE_LSE: tl.constexpr,
 ):
     """Merges each query's partial softmaxes into its final output.
 
@@ -544,7 +556,11 @@ def _moba_combine(
     # value here would hide an index bug behind a plausible number.
     out = acc / l[:, None]
 
-    tl.store(Out + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
+    # The partials above are ours and head-major; `Out` crosses the API
+    # boundary and is token-major, so `pid_bh` has to split into a batch and a
+    # head. `Lse` below is ours and does not.
+    tl.store(Out + (pid_bh // H_Q) * S * H_Q * D + (pid_bh % H_Q) * D
+             + offs_m[:, None] * (H_Q * D) + offs_d[None, :],
              out.to(Out.dtype.element_ty), mask=live[:, None])
 
     if WRITE_LSE:
@@ -584,7 +600,7 @@ def combine_partials(
             are reduced together.
 
     Returns:
-        Attention output shaped [B, H, S, D], or a tuple of it and the
+        Attention output shaped [B, S, H, D], or a tuple of it and the
         log-sum-exp shaped [B, H, S] when `return_lse` is set.
 
     Raises:
@@ -607,20 +623,16 @@ def combine_partials(
     part_m, part_l, part_acc = (
         t.contiguous() for t in (part_m, part_l, part_acc)
     )
-    out = torch.empty((b, h, s, d), device=part_m.device, dtype=out_dtype)
+    out = torch.empty((b, s, h, d), device=part_m.device, dtype=out_dtype)
     lse = (torch.empty((b, h, s), device=part_m.device, dtype=torch.float32)
            if return_lse else out)
     block_m, warps = choose_combine_tile(d, block_m)
 
     _moba_combine[(triton.cdiv(s, block_m), b * h)](
         part_m, part_l, part_acc, out, lse, s,
-        K_SLOTS=slots, D=d, BLOCK_M=block_m, WRITE_LSE=return_lse,
+        K_SLOTS=slots, D=d, BLOCK_M=block_m, H_Q=h, WRITE_LSE=return_lse,
         num_warps=warps,
     )
-    # TEMPORARY: the partials are ours and stay head-major, but `out` crosses
-    # the API boundary. `lse` does not, so it is returned unchanged.
-    # See `moba._layout_shim`.
-    out = to_token_major(out)
     return (out, lse) if return_lse else out
 
 
@@ -686,8 +698,14 @@ def empty_partials(
     and reuse it. `attend_partials` resets whatever it is given, so uninitialized
     memory here is safe.
 
+    The argument is the *query* shape, token-major, because every caller has a
+    query to hand. The buffers themselves are head-major: they are ours, no
+    consumer outside this module reads them, and `part_row` in the attention
+    kernel addresses them as `heads * S + position`. So this function is where
+    the two conventions meet, and it transposes the axes rather than the data.
+
     Args:
-        shape: (batch, heads, seq_len, head_dim).
+        shape: The query shape, (batch, seq_len, heads, head_dim).
         slots: Partial slots per query.
         device: CUDA device.
         partials_dtype: Storage dtype for the accumulator. Callers that want
@@ -695,9 +713,9 @@ def empty_partials(
             read it from, so it does not guess.
 
     Returns:
-        A tuple of (part_m, part_l, part_acc), uninitialized.
+        A tuple of (part_m, part_l, part_acc), uninitialized and head-major.
     """
-    b, h, s, d = shape
+    b, s, h, d = shape
     return (
         torch.empty((b, h, s, slots), device=device, dtype=torch.float32),
         torch.empty((b, h, s, slots), device=device, dtype=torch.float32),
@@ -768,10 +786,8 @@ def attend_partials(
         units; `combine_partials` expects that and no other consumer
         exists.
     """
-    # TEMPORARY: token-major in, head-major kernels. See `moba._layout_shim`.
-    q, k, v = to_head_major(q, k, v)
-    b, h_q, s, d = q.shape
-    h_kv = k.shape[1]
+    b, s, h_q, d = q.shape
+    h_kv = k.shape[2]
     slots = index.max_slots
     varlen = index.cu_seqlens is not None
     n_seq = index.col_nnz.shape[0]

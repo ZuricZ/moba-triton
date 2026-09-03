@@ -1,12 +1,10 @@
 """Converting between a padded batch and the packed form, in our layout.
 
 FlashAttention ships `unpad_input`/`pad_input` for this
-(`references/flash-moba/flash_moba/bert_padding.py:98`), but they cannot be
-lifted verbatim: they gather *rows*, which works because FA's token axis is
-outermost. Ours is head-major, so one token's data is `H` separate runs of `D`
-rather than a contiguous block, and packing gathers along the sequence axis
-instead. Same idea, different index arithmetic, slightly worse memory pattern --
-recorded in `docs/deferred-decisions.md`, DD-1.
+(`references/flash-moba/flash_moba/bert_padding.py:98`), and since the move to
+token-major we do the same thing it does: one token is a contiguous `H*D` run,
+so packing is a row gather. Under head-major it was `H` short transactions per
+token -- the concrete cost DD-1 recorded, now retired.
 
 `validate_cu_seqlens` is the part that runs on every forward call, so it is
 tested for what it must *not* do as well as what it must: no host

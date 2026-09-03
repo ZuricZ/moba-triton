@@ -4,7 +4,7 @@ Two problems this module solves.
 
 **Layout.** Every reference uses FlashAttention's `varlen` convention:
 q/k/v packed as [total_tokens, H, D] with a `cu_seqlens` offset tensor,
-rather than our [B, H, S, D]. For uniform sequence lengths the conversion is
+rather than our [B, S, H, D]. For uniform sequence lengths the conversion is
 a permute and a reshape.
 
 **Name collision.** `references/MoBA/moba/` is a package named `moba` -- the

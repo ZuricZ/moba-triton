@@ -32,7 +32,7 @@ def _load():
 
 
 class MoonshotBackend:
-    """MoonshotAI's naive MoBA, adapted from varlen to [B, H, S, D]."""
+    """MoonshotAI's naive MoBA, adapted from varlen to [B, S, H, D]."""
 
     name = "moonshot"
     vendored = True

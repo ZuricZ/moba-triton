@@ -262,7 +262,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     part_m = torch.zeros((1, 2, s, slots), device=device)
     part_l = torch.ones((1, 2, s, slots), device=device)
     part_acc = torch.zeros((1, 2, s, slots, head_dim), device=device)
-    out = torch.empty((1, 2, s, head_dim), device=device)
+    out = torch.empty((1, s, 2, head_dim), device=device)
 
     lse = torch.empty((1, 2, s), device=device)
 
@@ -272,7 +272,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     for write_lse in (False, True):
         kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
             part_m, part_l, part_acc, out, lse, s,
-            K_SLOTS=slots, D=head_dim, BLOCK_M=block_m,
+            K_SLOTS=slots, D=head_dim, BLOCK_M=block_m, H_Q=2,
             WRITE_LSE=write_lse, num_warps=warps,
         )
 

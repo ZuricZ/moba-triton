@@ -6,17 +6,16 @@ module is the boundary between that representation and the rectangular one, and
 holds nothing else: the kernels take `cu_seqlens` directly and derive everything
 they need from their own `program_id`.
 
-WHY NOT FLASHATTENTION'S HELPERS. FA ships `unpad_input`/`pad_input`
-(`references/flash-moba/flash_moba/bert_padding.py:98`) which do exactly this,
-and they cannot be lifted verbatim. They gather *rows* -- `torch.gather` along
-axis 0 of a `(b s) ...`-flattened tensor -- which works because FA's token axis
-is outermost, so one token is one contiguous `H*D`-byte run. Ours is head-major
-`[B, H, S, D]`, where a token's data is `H` separate runs of `D` elements, `S*D`
-apart. The gather is therefore strided: `H` short transactions per token instead
-of one long one. That cost is recorded in `docs/deferred-decisions.md`, DD-1,
-along with the condition that would make us reconsider the layout.
+WHY WE STILL SHIP OUR OWN. FA's `unpad_input`/`pad_input`
+(`references/flash-moba/flash_moba/bert_padding.py:98`) now do exactly what
+these do, in the same layout: since the move to token-major `[B, S, H, D]`, one
+token's `H*D` elements are contiguous, so packing is a plain row gather on both
+sides. DD-1 recorded the head-major version as a *strided* gather -- `H` short
+transactions per token rather than one long one -- and that cost is gone.
 
-It is a once-per-batch cost at data-prep time, not a per-forward one.
+What remains is a dependency argument, not a correctness one. FA's helpers carry
+an autograd `Function` and the rest of `bert_padding`, for an operation that is
+three lines of advanced indexing. Reimplementing is cheaper than importing.
 
 WHAT MAY SYNCHRONIZE, AND WHAT MAY NOT. `pack` and `from_nested` run once when a
 batch is built, and both must read a scalar -- the longest sequence -- so they

@@ -29,7 +29,7 @@ _RELATIVE_PATH = "Triton-MoBA/triton_moba/triton_moba.py"
 
 
 class TritonMoBABackend:
-    """Community Triton port of MoBA, adapted from varlen to [B, H, S, D]."""
+    """Community Triton port of MoBA, adapted from varlen to [B, S, H, D]."""
 
     name = "triton_moba"
     vendored = True
