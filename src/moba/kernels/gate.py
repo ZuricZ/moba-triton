@@ -50,7 +50,6 @@ import torch
 import triton
 import triton.language as tl
 
-from moba._layout_shim import to_head_major
 from moba.config import MoBAConfig
 from moba.heads import head_group_size
 from moba.packing import validate_cu_seqlens
@@ -133,14 +132,15 @@ def _moba_gate_fwd(
     offs_d = tl.arange(0, D)
     slots = tl.arange(0, K_POW2)
 
+    b = pid_bh // H_Q
+    hq = pid_bh % H_Q
+
     if VARLEN:
         # The batch comes from the grid, so every value here is a scalar.
         # `offs_m` is the *packed* token index, used to address Q and the
         # output; `local` is the position within the sequence, which is what
         # decides the query's own block and the causal horizon. Confusing the
         # two is invisible in the first sequence and wrong in every other one.
-        b = pid_bh // H_Q
-        hq = pid_bh % H_Q
         bos = tl.load(CuSeqlens + b)
         eos = tl.load(CuSeqlens + b + 1)
         seqlen = eos - bos
@@ -154,17 +154,19 @@ def _moba_gate_fwd(
         # them would let a query rank against another sequence's
         # representatives.
         n_cand = tl.cdiv(seqlen, BLOCK_SIZE)
-        q_base = hq * T * D
-        out_base = hq * T * TOP_K
+        q_base = hq * D                     # Q is [1, T, H_q, D]
+        out_base = hq * T * TOP_K           # BlockIdx is ours: [1, H_q, T, K]
     else:
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         local = offs_m
         live = offs_m < S
         n_cand = N_BLOCKS
-        q_base = pid_bh * S * D
-        out_base = pid_bh * S * TOP_K
+        q_base = b * S * H_Q * D + hq * D    # Q is [B, S, H_q, D]
+        out_base = pid_bh * S * TOP_K        # BlockIdx is ours: [B, H_q, S, K]
 
-    q = tl.load(Q + q_base + offs_m[:, None] * D + offs_d[None, :],
+    # Token-major: tokens are H_Q*D apart. `q_base` is the only part that
+    # differs between packed and padded, and it is zero when packed.
+    q = tl.load(Q + q_base + offs_m[:, None] * (H_Q * D) + offs_d[None, :],
                 mask=live[:, None], other=0.0)
 
     own_block = local // BLOCK_SIZE
@@ -344,11 +346,7 @@ def gate_select(
             if packed input has a batch axis above 1, or if `max_seqlen` is
             missing.
     """
-    # TEMPORARY: q is token-major, kbar is one of our own head-major buffers,
-    # so only q converts. This must run before any shape is read.
-    # See `moba._layout_shim`.
-    (q,) = to_head_major(q)
-    b, h, s, d = q.shape
+    b, s, h, d = q.shape
     block_m = max(TENSOR_CORE_TILE, GATE_BLOCK_M)
     varlen = cu_seqlens is not None
 
@@ -441,25 +439,30 @@ def _block_representatives_fwd(
 
     offs_d = tl.arange(0, D)
 
+    # Token-major: heads sit D apart and tokens H_KV*D apart. Neither stride
+    # contains the sequence length, so the packed and padded loads differ only
+    # by a batch term that is zero when packed.
+    b = pid_bh // H_KV
+    h = pid_bh % H_KV
+
     if VARLEN:
-        b = pid_bh // H_KV
-        h = pid_bh % H_KV
         bos = tl.load(CuSeqlens + b)
         eos = tl.load(CuSeqlens + b + 1)
         if blk * BLOCK_SIZE >= eos - bos:
             return          # a padded index slot; this block does not exist
         lo = bos + blk * BLOCK_SIZE
         hi = tl.minimum(lo + BLOCK_SIZE, eos)
-        kbase = h * T * D                       # K is [1, H_kv, T, D]
+        kbase = h * D                           # K is [1, T, H_kv, D]
     else:
         lo = blk * BLOCK_SIZE
         hi = tl.minimum(lo + BLOCK_SIZE, S)
-        kbase = pid_bh * S * D
+        kbase = b * S * H_KV * D + h * D        # K is [B, S, H_kv, D]
 
     rows = lo + tl.arange(0, BLOCK_POW2)
     live = (rows < hi) & (tl.arange(0, BLOCK_POW2) < BLOCK_SIZE)
 
-    k = tl.load(K + kbase + rows[:, None] * D + offs_d[None, :],
+    # `Kbar`, the output, is ours and stays head-major -- see `moba.heads`.
+    k = tl.load(K + kbase + rows[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=live[:, None], other=0.0)
 
     # Accumulate in float32 regardless of input dtype, matching what torch's
@@ -511,10 +514,7 @@ def block_representatives_triton(
         ValueError: If packed input has a batch axis above 1, or `max_seqlen`
             is missing.
     """
-    # TEMPORARY: token-major in, head-major kernel. This must run before any
-    # shape is read. See `moba._layout_shim`.
-    (k,) = to_head_major(k)
-    b, h, s, d = k.shape
+    b, s, h, d = k.shape
     k = k.contiguous()
 
     if cu_seqlens is None:
