@@ -37,7 +37,8 @@ import triton.language as tl
 
 from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE
-from moba.kernels.gate import pool_blocks, gate_select
+from moba.kernels.gating import gate_select
+from moba.kernels.pooling import pool_blocks
 from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
 from moba.packing import validate_cu_seqlens

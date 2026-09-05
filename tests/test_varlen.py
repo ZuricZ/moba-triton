@@ -17,7 +17,8 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.kernels.gate import pool_blocks, gate_select
+from moba.kernels.gating import gate_select
+from moba.kernels.pooling import pool_blocks
 
 # Deliberately awkward at block_size 16: 80 divides evenly, 48 and 64 do too,
 # and 20 does not -- so one sequence ends in a 4-key block. The last sequence is

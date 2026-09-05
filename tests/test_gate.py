@@ -18,11 +18,8 @@ import torch
 from conftest import GATE_SWEEP, SHAPE_SWEEP, make_qkv
 from moba.config import MoBAConfig
 from moba.heads import expand_kv
-from moba.kernels.gate import (
-    GATE_BLOCK_N,
-    pool_blocks,
-    gate_select,
-)
+from moba.kernels.gating import GATE_BLOCK_N, gate_select
+from moba.kernels.pooling import pool_blocks
 from moba.ref.naive import pool_blocks_naive, gate_select_naive
 
 
