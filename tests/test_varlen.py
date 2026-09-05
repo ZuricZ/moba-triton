@@ -251,7 +251,7 @@ def test_index_round_trips_to_the_gate_under_packing(device):
     returns plausible numbers -- so the round trip is what makes it visible.
     """
     from moba.kernels.routing import csc_to_mask, build_csc_fused
-    from moba.ref.naive import moba_selection
+    from moba.naive import moba_selection
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -335,7 +335,7 @@ def test_packed_forward_matches_the_oracle(device):
     """
     from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.kernels.moba_fwd import moba_forward
-    from moba.ref.naive import moba_attention_naive
+    from moba.naive import moba_attention_naive
     from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
@@ -472,7 +472,7 @@ def test_packed_gradients_match_the_oracle(device):
     """Routing held fixed, so this measures arithmetic and not gate flips."""
     from moba.kernels.autograd import moba_attention
     from moba.kernels.routing import csc_to_mask, build_csc_fused
-    from moba.ref.naive import moba_attention_naive
+    from moba.naive import moba_attention_naive
     from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
@@ -575,7 +575,7 @@ def test_packed_dense_baseline_matches_running_each_sequence_alone(device):
     wastes the same padding we removed, so its cost would be charged to dense
     attention rather than to raggedness.
     """
-    from moba.backends.base import get_backend
+    from backends.base import get_backend
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     backend = get_backend("sdpa_dense")
@@ -604,7 +604,7 @@ def test_packed_dense_baseline_really_uses_the_variable_length_kernel(device):
     """
     from torch.nn.attention import SDPBackend, sdpa_kernel
 
-    from moba.backends.base import get_backend
+    from backends.base import get_backend
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     backend = get_backend("sdpa_dense")
@@ -620,7 +620,7 @@ def test_packed_dense_baseline_really_uses_the_variable_length_kernel(device):
 
 def test_packed_dense_baseline_rejects_a_real_batch_axis(device):
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
-    from moba.backends.base import get_backend
+    from backends.base import get_backend
 
     backend = get_backend("sdpa_dense")
     q = torch.randn(2, 16, 2, 64, device=device, dtype=torch.bfloat16)

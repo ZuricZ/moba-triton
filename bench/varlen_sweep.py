@@ -42,7 +42,7 @@ PARTIAL BUFFERS ARE PREALLOCATED. Same lesson as `bench/gqa_sweep.py`: timing
 import torch
 import triton
 
-from moba.backends.base import get_backend
+from backends.base import get_backend
 from moba.config import MoBAConfig
 from moba.gqa import expand_kv
 from moba.kernels.routing import build_csc_fused

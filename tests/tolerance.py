@@ -27,7 +27,7 @@ differs by the same order of magnitude the format already imposes.
 import torch
 
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_attention_naive, moba_selection
+from moba.naive import moba_attention_naive, moba_selection
 
 # How much worse than a same-dtype reference a backend may be. 2.0 follows
 # FlashAttention's convention: it absorbs differences in accumulation order

@@ -17,7 +17,7 @@ import torch
 from conftest import GATE_SWEEP, SHAPE_SWEEP, case_id, make_qkv
 from moba.config import MoBAConfig
 from moba.kernels.routing import build_csc, csc_to_mask
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 
 _CASES = [(s, g) for s in SHAPE_SWEEP for g in GATE_SWEEP]
 _IDS = [case_id(s, g) for s in SHAPE_SWEEP for g in GATE_SWEEP]

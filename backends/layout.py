@@ -28,14 +28,31 @@ import torch
 def references_dir() -> Path:
     """Returns the directory holding vendored reference checkouts.
 
+    Searches upward for the repo root rather than counting parent directories.
+    A hardcoded depth is correct only for one location of this file, and it
+    fails *open*: a wrong root means `references/` is simply absent, so every
+    vendored backend reports itself unavailable and its tests skip. That is a
+    green suite with less coverage, which is the failure mode this project has
+    now hit three times.
+
     Returns:
         Path to `references/`, overridable with MOBA_REFERENCES_DIR.
+
+    Raises:
+        RuntimeError: If no ancestor directory holds both `pyproject.toml` and
+            `references/`.
     """
     override = os.environ.get("MOBA_REFERENCES_DIR")
     if override:
         return Path(override)
-    # src/moba/backends/layout.py -> repo root is four parents up.
-    return Path(__file__).resolve().parents[3] / "references"
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "references").is_dir():
+            return parent / "references"
+    raise RuntimeError(
+        f"no repo root above {here}: looked for a directory holding both "
+        f"pyproject.toml and references/. Set MOBA_REFERENCES_DIR to override."
+    )
 
 
 _loaded: dict[str, ModuleType] = {}

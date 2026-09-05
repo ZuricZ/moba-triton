@@ -9,7 +9,7 @@ backend produces a results table that looks complete and is not.
 import pytest
 import torch
 
-from moba.backends import (
+from backends import (
     Backend,
     all_backends,
     available_backends,
@@ -109,8 +109,8 @@ def test_backends_preserve_shape_and_dtype():
 
 def test_duplicate_registration_is_rejected():
     """Silent overwrite would make results depend on import order."""
-    from moba.backends.base import register
-    from moba.backends.naive_torch import NaiveTorchBackend
+    from backends.base import register
+    from backends.naive_torch import NaiveTorchBackend
 
     with pytest.raises(ValueError, match="already registered"):
         register(NaiveTorchBackend())
@@ -167,7 +167,7 @@ def test_our_triton_backend_routing_matches_the_oracle():
     part that can be wrong without crashing -- a bad transpose attends to the
     wrong keys and returns entirely plausible numbers.
     """
-    from moba.ref.naive import moba_selection
+    from moba.naive import moba_selection
 
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     g = torch.Generator(device="cuda").manual_seed(0)

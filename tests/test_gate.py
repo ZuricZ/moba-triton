@@ -20,7 +20,7 @@ from moba.config import MoBAConfig
 from moba.gqa import expand_kv
 from moba.kernels.gating import GATE_BLOCK_N, gate_select
 from moba.kernels.pooling import pool_blocks
-from moba.ref.naive import pool_blocks_naive, gate_select_naive
+from moba.naive import pool_blocks_naive, gate_select_naive
 
 
 def indices_to_mask(idx: torch.Tensor, num_blocks: int) -> torch.Tensor:

@@ -37,7 +37,7 @@ import torch
 from moba.config import MoBAConfig
 from moba.device import multiprocessor_count
 from moba.kernels.tuning import choose_group
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 
 # Resident programs per SM. Occupancy is configuration-dependent; 2 is what
 # learning note 02 measured for a comparable tile at head_dim 64. Passed to

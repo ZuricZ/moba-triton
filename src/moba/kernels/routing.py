@@ -60,7 +60,7 @@ from moba.device import TENSOR_CORE_TILE
 from moba.gqa import head_group_size
 from moba.kernels.gating import gate_select
 from moba.kernels.pooling import pool_blocks
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 from moba.varlen import validate_cu_seqlens
 
 # Queries per program for the count and scatter passes. Both are pure
@@ -547,7 +547,7 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
         Boolean mask shaped [B, H_q, seq_len, num_blocks], or
         [1, H_q, T, num_blocks] when the index describes a packed batch --
         rows are packed token indices and block ids are sequence-local, the
-        same convention `moba.ref.naive.moba_selection` produces. Columns are
+        same convention `moba.naive.moba_selection` produces. Columns are
         keyed by kv head, but the mask is per query head, so `head_indices` is
         what routes each entry back.
     """
@@ -556,7 +556,7 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
 
     # Packed: one batch axis of 1, because rows are packed token indices and
     # every sequence shares the token axis. The block axis stays sequence-local
-    # and `n` wide, matching `moba.ref.naive.moba_selection`'s convention.
+    # and `n` wide, matching `moba.naive.moba_selection`'s convention.
     out = torch.zeros(
         1 if packed else b, index.num_query_heads, seq_len, n,
         dtype=torch.bool, device=index.col_nnz.device
