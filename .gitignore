@@ -47,3 +47,7 @@ bench_out/
 # --- Toolchain installers pulled down during setup, never part of the repo ---
 *.deb
 *.run
+
+# Triton perf_report writes this stub beside its plot; the plots go to
+# results/, which is already ignored, but a stray run can drop one here.
+results.html
