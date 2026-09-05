@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
-from moba.packing import validate_cu_seqlens
+from moba.varlen import validate_cu_seqlens
 
 
 @triton.jit
@@ -65,7 +65,7 @@ def pool_blocks_kernel(
     rows = lo + tl.arange(0, BLOCK_POW2)
     live = (rows < hi) & (tl.arange(0, BLOCK_POW2) < BLOCK_SIZE)
 
-    # `Kbar`, the output, is ours and stays head-major -- see `moba.heads`.
+    # `Kbar`, the output, is ours and stays head-major -- see `moba.gqa`.
     k = tl.load(K + kbase + rows[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=live[:, None], other=0.0)
 

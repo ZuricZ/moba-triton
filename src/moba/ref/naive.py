@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from moba.config import MoBAConfig
-from moba.heads import expand_kv
+from moba.gqa import expand_kv
 
 
 def pool_blocks_naive(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
@@ -35,7 +35,7 @@ def pool_blocks_naive(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
     The input is token-major but the output is not. Block representatives are
     an internal buffer -- nothing outside this project reads them -- so they
     keep the head-major shape the gate kernels and tests already expect. See
-    `moba.heads.expand_kv` for where that split is drawn.
+    `moba.gqa.expand_kv` for where that split is drawn.
 
     Args:
         k: Keys shaped [B, S, H, D].
@@ -253,7 +253,7 @@ def moba_attention_naive(
 
     Measuring precision loss therefore requires holding selection fixed, or
     the measurement conflates smooth arithmetic error with discrete routing
-    flips. See `moba.tolerance`.
+    flips. See `tests/tolerance.py`.
 
     Args:
         q: Queries shaped [B, S, H, D].

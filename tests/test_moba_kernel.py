@@ -33,7 +33,7 @@ from moba.kernels.moba_fwd import (
 )
 from moba.kernels.tuning import choose_combine_tile, group_candidates
 from moba.ref.naive import moba_selection
-from moba.tolerance import (
+from tolerance import (
     assert_selection_matches,
     assert_within_tolerance,
     reference_error,

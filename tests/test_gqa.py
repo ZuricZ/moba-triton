@@ -17,11 +17,11 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.heads import expand_kv
-from moba.kernels.routing import csc_to_mask, build_csc_fused
+from moba.gqa import expand_kv
 from moba.kernels.moba_fwd import moba_forward
+from moba.kernels.routing import csc_to_mask, build_csc_fused
 from moba.ref.naive import moba_attention_naive
-from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
+from tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
 
 # (batch, query heads, kv heads, seq_len, head_dim). Small on purpose: 4 GiB of
 # VRAM, and grouped-query attention lengthens every column, so a shape that fit
@@ -53,7 +53,7 @@ def test_forward_matches_the_oracle_under_gqa(device, shape, gate):
     The gate is discontinuous in its inputs -- a ranking, so a near-tie can
     swap under a dtype change and send a query to entirely different keys.
     Passing the kernel's own selection to the oracle removes that from the
-    measurement; see `moba.tolerance`.
+    measurement; see `tests/tolerance.py`.
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)

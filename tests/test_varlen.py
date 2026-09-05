@@ -331,12 +331,12 @@ def test_packed_forward_matches_the_oracle(device):
     The gate is discontinuous in its inputs -- a ranking -- so a near-tie can
     swap under a dtype change and send a query to entirely different keys.
     Passing the kernel's own selection to the oracle removes that from the
-    measurement; see `moba.tolerance`.
+    measurement; see `tests/tolerance.py`.
     """
     from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.kernels.moba_fwd import moba_forward
     from moba.ref.naive import moba_attention_naive
-    from moba.tolerance import (
+    from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
@@ -473,7 +473,7 @@ def test_packed_gradients_match_the_oracle(device):
     from moba.kernels.autograd import moba_attention
     from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.ref.naive import moba_attention_naive
-    from moba.tolerance import (
+    from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)

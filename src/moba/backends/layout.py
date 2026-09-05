@@ -34,7 +34,7 @@ def references_dir() -> Path:
     override = os.environ.get("MOBA_REFERENCES_DIR")
     if override:
         return Path(override)
-    # src/moba/backends/_refs.py -> repo root is four parents up.
+    # src/moba/backends/layout.py -> repo root is four parents up.
     return Path(__file__).resolve().parents[3] / "references"
 
 

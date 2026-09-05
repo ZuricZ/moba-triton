@@ -57,11 +57,11 @@ import triton.language as tl
 
 from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE
-from moba.heads import head_group_size
+from moba.gqa import head_group_size
 from moba.kernels.gating import gate_select
 from moba.kernels.pooling import pool_blocks
-from moba.packing import validate_cu_seqlens
 from moba.ref.naive import moba_selection
+from moba.varlen import validate_cu_seqlens
 
 # Queries per program for the count and scatter passes. Both are pure
 # scatter-with-atomics over `S * top_k` entries, so this only trades program

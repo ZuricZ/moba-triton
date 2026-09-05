@@ -21,7 +21,7 @@ import torch
 from moba.backends import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from moba.ref.naive import moba_selection
-from moba.tolerance import (
+from tolerance import (
     assert_selection_matches,
     assert_within_tolerance,
     reference_error,

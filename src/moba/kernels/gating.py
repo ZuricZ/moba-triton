@@ -5,8 +5,9 @@ to `routing.py`, which turns it into the structure the attention kernel walks.
 
 Fused: the score matrix is never materialized. The PyTorch gate computes an
 `[B, H, S, num_blocks]` score matrix, writes it to HBM, reads it back to mask
-it, writes it again, sorts it, and writes a dense boolean mask. Profiling put ~40% of the gate's GPU time in `aten::copy_` and
-device-to-device memcpy -- moving intermediates, not computing anything.
+it, writes it again, sorts it, and writes a dense boolean mask. Profiling put
+~40% of the gate's GPU time in `aten::copy_` and device-to-device memcpy --
+moving intermediates, not computing anything.
 
 This kernel never lets that matrix exist. It streams the block representatives
 past a resident query tile in chunks, keeps a running top-k on chip, and emits
@@ -54,9 +55,9 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
-from moba.heads import head_group_size
-from moba.packing import validate_cu_seqlens
 from moba.device import TENSOR_CORE_TILE
+from moba.gqa import head_group_size
+from moba.varlen import validate_cu_seqlens
 
 # Queries per gate program. 32 rather than the 16 the one-shot gate used:
 # halving the program count halves how many times the representatives are

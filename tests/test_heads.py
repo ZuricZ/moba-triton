@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.heads import expand_kv, head_group_size
+from moba.gqa import expand_kv, head_group_size
 from moba.ref.naive import moba_attention_naive, moba_selection
 
 

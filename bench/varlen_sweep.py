@@ -44,14 +44,14 @@ import triton
 
 from moba.backends.base import get_backend
 from moba.config import MoBAConfig
-from moba.heads import expand_kv
+from moba.gqa import expand_kv
 from moba.kernels.routing import build_csc_fused
 from moba.kernels.moba_fwd import (
     attend_partials,
     combine_partials,
     empty_partials,
 )
-from moba.packing import pack
+from moba.varlen import pack
 
 H_Q, H_KV, D = 8, 2, 64
 CFG = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)

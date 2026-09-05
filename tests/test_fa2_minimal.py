@@ -8,7 +8,7 @@ CUDA one is a genuinely independent check.
 Tolerance is absolute and generous (2e-2 for fp16). The two implementations
 accumulate in a different order, and reassociating thousands of floating-point
 additions moves the last bits. This kernel is not part of the routing-sensitive
-path, so the strict machinery in `moba.tolerance` -- which exists to separate
+path, so the strict machinery in `tests/tolerance.py` -- which exists to separate
 discrete gate flips from smooth arithmetic error -- does not apply.
 """
 

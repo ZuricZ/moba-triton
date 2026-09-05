@@ -4,7 +4,7 @@ We load `moba_naive.py` directly by path rather than importing their package.
 Their package is also named `moba`, and their `__init__.py` pulls in
 `transformers` and `flash_attn`. The naive module itself imports only torch
 and math, so loading just that file gives us a runnable third-party MoBA with
-no heavy dependencies and no name collision. See `_refs.load_reference_module`.
+no heavy dependencies and no name collision. See `layout.load_reference_module`.
 
 Their efficient path (`moba_efficient.py`) does need flash-attn 2.6.3 and is
 deliberately not wired up here; the naive path is what matters for checking
@@ -13,7 +13,7 @@ semantics against ours.
 
 import torch
 
-from moba.backends._refs import (
+from moba.backends.layout import (
     cu_seqlens_for,
     from_varlen,
     load_reference_module,

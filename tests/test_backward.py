@@ -1,6 +1,6 @@
 """Gradients against the fp64 oracle, under the same policy as the forward.
 
-`moba.tolerance` asks whether our error is comparable to what the number format
+`tests/tolerance.py` asks whether our error is comparable to what the number format
 already costs, rather than whether it is small in absolute terms. That question
 extends to gradients unchanged: run the oracle in fp64 for truth, run the same
 oracle in bfloat16 for the price of the format, and require our kernel to stay
@@ -20,7 +20,7 @@ from moba.config import MoBAConfig
 from moba.kernels.autograd import moba_attention
 from moba.kernels.routing import csc_to_mask, build_csc_fused
 from moba.ref.naive import moba_attention_naive
-from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
+from tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
 
 SHAPES = [(1, 512, 2, 64), (1, 1024, 2, 128)]
 

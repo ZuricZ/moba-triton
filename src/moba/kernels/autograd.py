@@ -31,8 +31,8 @@ pattern.
 import torch
 
 from moba.config import MoBAConfig
-from moba.kernels.routing import CSCIndex, build_csc_fused
 from moba.kernels.moba_bwd import moba_backward
+from moba.kernels.routing import CSCIndex, build_csc_fused
 from moba.kernels.moba_fwd import (
     _validate,
     attend_partials,

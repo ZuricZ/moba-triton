@@ -38,10 +38,10 @@ from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE, check_gathered_head_dim
-from moba.heads import head_group_size
+from moba.gqa import head_group_size
 from moba.kernels.routing import CSCIndex, build_csc_fused
 from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
-from moba.packing import validate_cu_seqlens
+from moba.varlen import validate_cu_seqlens
 
 
 @triton.jit
@@ -498,7 +498,7 @@ def attend_partials(
 
     So the default is the compute dtype, not float32. Storing partials at the
     same width as the inputs halves that 63.4 MB and is worth ~22% end to end.
-    What it costs is judged by `moba.tolerance`, not by a threshold picked to
+    What it costs is judged by `tests/tolerance.py`, not by a threshold picked to
     pass: the policy asks whether our error stays within 2x of what the same
     algorithm in the same dtype already costs, so narrowing storage to the
     input's own precision has to earn its place against that bound.
