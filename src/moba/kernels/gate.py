@@ -486,7 +486,7 @@ def pool_blocks_kernel(
              mean.to(Kbar.dtype.element_ty))
 
 
-def block_representatives_triton(
+def pool_blocks(
     k: torch.Tensor,
     cfg: MoBAConfig,
     cu_seqlens: torch.Tensor | None = None,

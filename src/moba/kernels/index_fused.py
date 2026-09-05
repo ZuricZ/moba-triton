@@ -37,7 +37,7 @@ import triton.language as tl
 
 from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE
-from moba.kernels.gate import block_representatives_triton, gate_select
+from moba.kernels.gate import pool_blocks, gate_select
 from moba.heads import head_group_size
 from moba.kernels.index import CSCIndex
 from moba.packing import validate_cu_seqlens
@@ -333,7 +333,7 @@ def build_csc_fused(
         of one row per sequence while the data stayed packed -- see the varlen
         plan's D-VL-3.
     """
-    kbar = block_representatives_triton(k, cfg, cu_seqlens=cu_seqlens,
+    kbar = pool_blocks(k, cfg, cu_seqlens=cu_seqlens,
                                         max_seqlen=max_seqlen)
     block_idx = gate_select(q, kbar, cfg, cu_seqlens=cu_seqlens,
                             max_seqlen=max_seqlen)

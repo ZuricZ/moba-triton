@@ -41,7 +41,7 @@ from moba.kernels.moba_fwd import (
 )
 
 
-class _MoBAAttention(torch.autograd.Function):
+class MoBAAttentionFunction(torch.autograd.Function):
     """Differentiable MoBA attention over the Triton kernels."""
 
     @staticmethod
@@ -119,5 +119,5 @@ def moba_attention(
         receive gradients with their own `H_kv` heads, each already summed over
         the query heads that shared it.
     """
-    return _MoBAAttention.apply(q, k, v, cfg, index, causal, cu_seqlens,
+    return MoBAAttentionFunction.apply(q, k, v, cfg, index, causal, cu_seqlens,
                                 max_seqlen)

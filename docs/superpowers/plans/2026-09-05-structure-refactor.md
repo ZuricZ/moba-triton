@@ -271,6 +271,37 @@ Two launchers and one class do not follow the tier convention.
 | `_MoBAAttention` | `MoBAAttentionFunction` | The references name this tier `ParallelNSAFunction`, `FlashMobaAttnVarlenFunc`, `MixedAttention`. It is the one class in the package; hiding it behind `_` hides the tier. |
 | `gate_select` | `gate_select` | unchanged -- already correct |
 
+### Plan correction, made during execution
+
+The plan claimed `_triton` "announced device code one tier too high". That was
+wrong. `ref/naive.py` already defines `block_representatives`, so the suffix was
+doing real disambiguation between the oracle and the kernel -- dropping it
+naively would have collided in `tests/test_gate.py`, which imports both by bare
+name.
+
+Looking at all three oracle/kernel pairs showed the actual defect: three pairs,
+three different rules.
+
+| oracle (`ref/naive.py`) | kernel (`kernels/`) | rule |
+|---|---|---|
+| `block_representatives` | `block_representatives_triton` | kernel marked |
+| `select_blocks` | `gate_select` | unrelated names |
+| `moba_attention_naive` | `moba_attention` | oracle marked |
+
+The third is right, and it is the pair that matters most. **The oracle carries
+the marker; the kernel gets the bare name** -- the kernel is the product, the
+reference is the thing qualified against it. So this task also renames the two
+oracle functions, which the plan had listed as untouched:
+
+| old | new |
+|---|---|
+| `ref.naive.block_representatives` | `pool_blocks_naive` |
+| `ref.naive.select_blocks` | `gate_select_naive` |
+| `kernels.gate.block_representatives_triton` | `pool_blocks` |
+
+Fixing one pair and leaving two would have left the codebase with two rules
+instead of three, which is not obviously better than three.
+
 **Which underscores stay, and why.** The `_` prefix is not being removed from
 the codebase; it is being narrowed back to its one Python meaning. After Tasks 1
 and 2 the only `_`-prefixed names left are genuine module-private helpers with

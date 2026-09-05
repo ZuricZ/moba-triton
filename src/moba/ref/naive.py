@@ -20,7 +20,7 @@ from moba.config import MoBAConfig
 from moba.heads import expand_kv
 
 
-def block_representatives(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
+def pool_blocks_naive(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
     """Computes the mean-pooled key representing each block.
 
     This is the gate's whole reason for being cheap. Scoring a query against
@@ -61,7 +61,7 @@ def block_representatives(k: torch.Tensor, cfg: MoBAConfig) -> torch.Tensor:
     return sums / counts.view(1, 1, num_blocks, 1)
 
 
-def select_blocks(
+def gate_select_naive(
     q: torch.Tensor, kbar: torch.Tensor, cfg: MoBAConfig
 ) -> torch.Tensor:
     """Selects which blocks each query attends to.
@@ -173,7 +173,7 @@ def moba_selection(
         ValueError: If `cu_seqlens` is given and the batch axis is not 1.
     """
     if cu_seqlens is None:
-        return select_blocks(q, block_representatives(k, cfg), cfg)
+        return gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     _require_packed(q)
     bounds = cu_seqlens.tolist()
@@ -288,7 +288,7 @@ def moba_attention_naive(
     b, s, h, d = q.shape
     scale = d ** -0.5
 
-    # See `select_blocks`. Materializing the shared heads is exactly the memory
+    # See `gate_select_naive`. Materializing the shared heads is exactly the memory
     # traffic the kernel exists to avoid, and doing it here is what makes the
     # kernel's avoidance of it checkable.
     k, v = expand_kv(k, h), expand_kv(v, h)

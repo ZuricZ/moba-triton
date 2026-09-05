@@ -13,9 +13,9 @@ import torch.nn.functional as F
 
 from moba.config import MoBAConfig
 from moba.ref.naive import (
-    block_representatives,
+    pool_blocks_naive,
     moba_attention_naive,
-    select_blocks,
+    gate_select_naive,
 )
 
 DEVICE = "cuda"
@@ -40,10 +40,10 @@ def make_qkv(b, s, h, d, dtype=torch.float64, seed=0):
 
 
 @pytest.mark.parametrize("seq_len,block_size", [(128, 32), (129, 32), (64, 64)])
-def test_block_representatives_are_block_means(seq_len, block_size):
+def test_pool_blocks_naive_are_block_means(seq_len, block_size):
     _, k, _ = make_qkv(1, seq_len, 2, 16)
     cfg = MoBAConfig(block_size=block_size, top_k=1)
-    kbar = block_representatives(k, cfg)
+    kbar = pool_blocks_naive(k, cfg)
 
     assert kbar.shape == (1, 2, cfg.num_blocks(seq_len), 16)
     # kbar stays head-major; k is token-major, so its blocks live on axis 1.
@@ -60,7 +60,7 @@ def test_short_final_block_is_not_diluted_by_padding():
     """
     _, k, _ = make_qkv(1, 129, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
-    kbar = block_representatives(k, cfg)
+    kbar = pool_blocks_naive(k, cfg)
 
     assert cfg.num_blocks(129) == 5
     torch.testing.assert_close(kbar[:, :, -1], k[:, 128:].mean(dim=1))
@@ -74,7 +74,7 @@ def test_short_final_block_is_not_diluted_by_padding():
 def test_current_block_always_selected():
     q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     pos = torch.arange(128, device=DEVICE)
     assert sel[0, 0, pos, pos // 32].all()
@@ -83,7 +83,7 @@ def test_current_block_always_selected():
 def test_future_blocks_never_selected():
     q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=8)
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     pos = torch.arange(128, device=DEVICE)
     blocks = torch.arange(cfg.num_blocks(128), device=DEVICE)
@@ -95,7 +95,7 @@ def test_selection_count_respects_top_k():
     """Under the default convention top_k counts the query's own block."""
     q, k, _ = make_qkv(1, 256, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=2)
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     # Query 255 sits in block 7; candidates are blocks 0..6. top_k=2 buys the
     # own block plus one past block.
@@ -115,8 +115,8 @@ def test_top_k_convention_flag_changes_the_budget():
     inclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=True)
     exclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=False)
 
-    n_inc = select_blocks(q, block_representatives(k, inclusive), inclusive)
-    n_exc = select_blocks(q, block_representatives(k, exclusive), exclusive)
+    n_inc = gate_select_naive(q, pool_blocks_naive(k, inclusive), inclusive)
+    n_exc = gate_select_naive(q, pool_blocks_naive(k, exclusive), exclusive)
 
     assert n_inc[0, 0, 255].sum().item() == 3
     assert n_exc[0, 0, 255].sum().item() == 4
@@ -126,7 +126,7 @@ def test_top_k_of_one_selects_only_the_current_block():
     """Edge case of the inclusive convention: the budget is entirely spent."""
     q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     pos = torch.arange(128, device=DEVICE)
     assert (sel.sum(-1) == 1).all()
@@ -137,7 +137,7 @@ def test_early_queries_select_all_available_candidates():
     """A query in block 1 has only one past block; top_k=4 cannot invent more."""
     q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=4)
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     assert sel[0, 0, 40].sum().item() == 2  # block 0 + own block 1
     assert sel[0, 0, 0].sum().item() == 1  # block 0 only, it is its own
@@ -153,7 +153,7 @@ def test_ties_resolve_to_lower_block_index():
     # the tie-break decides which one.
     cfg = MoBAConfig(block_size=32, top_k=2)
 
-    sel = select_blocks(q, block_representatives(k, cfg), cfg)
+    sel = gate_select_naive(q, pool_blocks_naive(k, cfg), cfg)
 
     # Query 127 is in block 3; candidates {0,1,2} are perfectly tied.
     assert bool(sel[0, 0, 127, 0]) is True

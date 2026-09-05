@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.kernels.gate import block_representatives_triton, gate_select
+from moba.kernels.gate import pool_blocks, gate_select
 
 # Deliberately awkward at block_size 16: 80 divides evenly, 48 and 64 do too,
 # and 20 does not -- so one sequence ends in a 4-key block. The last sequence is
@@ -50,7 +50,7 @@ def _cu(device):
 
 
 def _kbar(k, cfg, cu):
-    return block_representatives_triton(k, cfg, cu_seqlens=cu,
+    return pool_blocks(k, cfg, cu_seqlens=cu,
                                         max_seqlen=MAXLEN)
 
 
@@ -103,7 +103,7 @@ def test_gate_matches_running_each_sequence_alone(device):
     for n in LENS:
         piece = gate_select(
             q[:, lo:lo + n],
-            block_representatives_triton(k[:, lo:lo + n], cfg), cfg)
+            pool_blocks(k[:, lo:lo + n], cfg), cfg)
         assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
 
