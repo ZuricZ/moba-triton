@@ -120,3 +120,87 @@ def test_rejects_mismatched_shapes(device):
 
     with pytest.raises(ValueError, match="shape mismatch"):
         fa2_forward(q, k, k)
+
+
+# ---------------------------------------------------------------------------
+# Backward
+# ---------------------------------------------------------------------------
+
+
+BWD_SHAPES = [
+    (1, 256, 2, 64),
+    (1, 512, 4, 64),
+    (1, 1000, 2, 64),      # not a multiple of any tile: masked tail
+    (1, 512, 2, 128),      # steps the backward tile down to fit shared memory
+]
+
+
+@pytest.mark.parametrize("shape", BWD_SHAPES, ids=lambda s: "b%ds%dh%dd%d" % s)
+def test_fa2_gradients_match_sdpa(shape, device):
+    """Our backward must add no error beyond what bfloat16 itself imposes.
+
+    Measured against the right floor. Comparing a bf16 kernel to a float32
+    truth and calling 2e-2 "close" says nothing -- bf16 has eight mantissa
+    bits, so 2e-2 may be the format's own error or may be our bug. So torch
+    SDPA is run twice: once in float32 for truth, once in bfloat16 for the
+    floor. We are allowed `TOLERANCE_FACTOR` times the floor.
+
+    At head_dim 128 dq lands at ~1.8x the floor rather than 1.0x, because the
+    backward tile steps down to fit shared memory, so dQ accumulates over twice
+    as many atomic additions and the summation order changes. That is
+    reassociation, not error.
+    """
+    from tolerance import TOLERANCE_FACTOR, max_abs_error
+    from implementations.fa2_minimal import fa2_attention
+
+    b, s, h, d = shape
+    gen = torch.Generator(device=device).manual_seed(0)
+    f32 = [torch.randn(b, s, h, d, generator=gen, device=device,
+                       dtype=torch.float32, requires_grad=True)
+           for _ in range(3)]
+    g = torch.randn(b, s, h, d, generator=gen, device=device,
+                    dtype=torch.float32)
+
+    def sdpa_grads(tensors, grad):
+        qh, kh, vh = (t.transpose(1, 2) for t in tensors)
+        out = F.scaled_dot_product_attention(
+            qh, kh, vh, is_causal=True).transpose(1, 2)
+        out.backward(grad)
+        return [t.grad for t in tensors]
+
+    truth = sdpa_grads(f32, g)
+
+    bf16 = [t.detach().to(torch.bfloat16).requires_grad_(True) for t in f32]
+    floor = sdpa_grads(bf16, g.to(torch.bfloat16))
+
+    ours = [t.detach().to(torch.bfloat16).requires_grad_(True) for t in f32]
+    fa2_attention(*ours, causal=True).backward(g.to(torch.bfloat16))
+
+    for i, name in enumerate(("dq", "dk", "dv")):
+        ref_err = max_abs_error(floor[i].float(), truth[i])
+        our_err = max_abs_error(ours[i].grad.float(), truth[i])
+        budget = max(TOLERANCE_FACTOR * ref_err, 1e-6)
+        assert our_err <= budget, (
+            f"{name} error {our_err:.3e} exceeds {budget:.3e} "
+            f"({TOLERANCE_FACTOR}x the bfloat16 SDPA floor {ref_err:.3e})"
+        )
+
+
+def test_fa2_forward_is_unchanged_by_returning_lse(device):
+    """Adding the log-sum-exp output must not perturb the forward.
+
+    `WRITE_LSE` is a constexpr, so the two forms compile to different kernels;
+    this asserts the store is genuinely additive rather than something the
+    compiler reordered around.
+    """
+    from implementations.fa2_minimal import fa2_forward as fwd
+
+    gen = torch.Generator(device=device).manual_seed(0)
+    q, k, v = (torch.randn(1, 512, 2, 64, generator=gen, device=device,
+                           dtype=torch.bfloat16) for _ in range(3))
+    plain = fwd(q, k, v, causal=True)
+    with_lse, lse = fwd(q, k, v, causal=True, return_lse=True)
+
+    assert torch.equal(plain, with_lse)
+    assert lse.shape == (1, 2, 512)
+    assert torch.isfinite(lse).all()

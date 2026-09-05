@@ -18,6 +18,7 @@ import torch
 from implementations.base import register
 from moba.config import MoBAConfig
 from moba.device import MIN_CAPABILITY, TENSOR_CORE_TILE, supports_dtype
+from moba.kernels.attention import moba_attention
 from moba.kernels.moba_fwd import moba_forward
 from moba.kernels.routing import build_csc, csc_to_mask
 
@@ -77,6 +78,23 @@ class OursBackend:
             )
 
         return True, ""
+
+    def forward_grad(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cfg: MoBAConfig,
+    ) -> torch.Tensor:
+        """Same computation as `forward`, but differentiable.
+
+        `forward` calls `moba_forward`, the bare launcher, which builds no
+        autograd graph -- so a benchmark or test could never reach our backward
+        through this adapter. The Backend protocol has no notion of a backward
+        pass, so this is an extra method rather than a protocol change; a
+        consumer that wants gradients looks for it and falls back to `forward`.
+        """
+        return moba_attention(q, k, v, cfg)
 
     def forward(
         self,
