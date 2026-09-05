@@ -64,7 +64,7 @@ def test_kernel_matches_the_oracle(device, shape, gate):
     actual = moba_forward(ql, kl, vl, cfg)
 
     assert_within_tolerance(
-        actual, truth, ref_err, name=f"moba_triton-blk{block_size}-top{top_k}"
+        actual, truth, ref_err, name=f"ours-blk{block_size}-top{top_k}"
     )
 
 
@@ -79,7 +79,7 @@ def test_kernel_routing_matches_the_oracle_exactly(device, shape, gate):
     expected = moba_selection(ql, kl, cfg)
     actual = csc_to_mask(build_csc(ql, kl, cfg), shape[1])
 
-    assert_selection_matches(actual, expected, name="moba_triton")
+    assert_selection_matches(actual, expected, name="ours")
 
 
 def test_rejects_mismatched_shapes(device):

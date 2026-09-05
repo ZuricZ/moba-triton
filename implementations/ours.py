@@ -28,10 +28,10 @@ from moba.kernels.routing import build_csc, csc_to_mask
 TENSOR_CORE_DTYPES = (torch.bfloat16, torch.float16)
 
 
-class TritonMoBABackend:
+class OursBackend:
     """Adapter for `moba.kernels.moba_fwd.moba_forward`."""
 
-    name = "moba_triton"
+    name = "ours"
     vendored = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
@@ -106,7 +106,7 @@ class TritonMoBABackend:
         """
         ok, reason = self.is_available(cfg)
         if not ok:
-            raise RuntimeError(f"moba_triton backend not available: {reason}")
+            raise RuntimeError(f"ours backend not available: {reason}")
         return moba_forward(q, k, v, cfg)
 
     def selection(
@@ -131,4 +131,4 @@ class TritonMoBABackend:
         return csc_to_mask(build_csc(q, k, cfg), q.shape[1])
 
 
-register(TritonMoBABackend())
+register(OursBackend())

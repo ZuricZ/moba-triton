@@ -131,6 +131,11 @@ against those same baselines.
 
 ## Result
 
+Our kernel was registered as `moba_triton` when these numbers
+were taken; it is `ours` now. The rename was made because `moba_triton`
+and the vendored `triton_moba` are near-anagrams, and the two appear as
+adjacent rows the moment both are available. Same kernel, same numbers.
+
 | S | moba_triton | sdpa_dense | **vs dense** | naive_torch | moonshot | attainment |
 |---:|---:|---:|---:|---:|---:|---:|
 | 1024 | 0.55 ms | 0.20 ms | 0.37x | 2.68 ms | 4.17 ms | 0.365 |

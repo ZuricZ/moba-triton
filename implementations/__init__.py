@@ -20,7 +20,7 @@ from implementations.base import (
 # Imported for side effect: each module registers its backend on import.
 from implementations import naive_torch as _naive_torch  # noqa: F401
 from implementations import sdpa_dense as _sdpa_dense  # noqa: F401
-from implementations import triton_ours as _triton_ours  # noqa: F401
+from implementations import ours as _ours  # noqa: F401
 
 # Vendored references. These register unconditionally and report their own
 # availability, so a missing checkout or an unbuilt extension shows up as a
