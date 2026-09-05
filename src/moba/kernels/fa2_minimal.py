@@ -41,7 +41,7 @@ from moba.device import TENSOR_CORE_TILE
 
 
 @triton.jit
-def _fa2_fwd(
+def fa2_fwd_kernel(
     Q, K, V, Out,
     S,
     sm_scale,
@@ -196,7 +196,7 @@ def fa2_forward(
     # 2-D grid: one program per (query tile, batch-head).
     grid = (triton.cdiv(s, block_m), b * h)
 
-    _fa2_fwd[grid](
+    fa2_fwd_kernel[grid](
         q, k, v, out,
         s,
         d ** -0.5,

@@ -25,8 +25,8 @@ from triton.runtime.errors import OutOfResources
 
 from moba.kernels.moba_fwd import (
     _GROUP_CACHE,
-    _moba_attn_fwd,
-    _moba_combine,
+    moba_fwd_kernel,
+    moba_combine_kernel,
     choose_combine_tile,
     attend_partials,
     group_candidates,
@@ -270,7 +270,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     # and the backward pass always asks for it, so the arm the training path
     # uses has to be the one that is checked.
     for write_lse in (False, True):
-        kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
+        kernel = moba_combine_kernel[(triton.cdiv(s, block_m), 2)](
             part_m, part_l, part_acc, out, lse, s,
             K_SLOTS=slots, D=head_dim, BLOCK_M=block_m, H_Q=2,
             WRITE_LSE=write_lse, num_warps=warps,
@@ -373,7 +373,7 @@ def _compile_attn(q, k, v, cfg, index, group):
     part_m, part_l, part_acc = empty_partials(
         q.shape, index.max_slots, q.device, q.dtype)
     part_m.fill_(float("-inf"))
-    return _moba_attn_fwd[(index.num_blocks, b * h_kv)](
+    return moba_fwd_kernel[(index.num_blocks, b * h_kv)](
         q, k, v, index.row_indices, index.head_indices, index.slot_of_pair,
         index.col_offsets, index.col_nnz, index.order, q,
         part_m, part_l, part_acc,

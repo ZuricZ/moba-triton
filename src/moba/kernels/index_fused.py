@@ -49,7 +49,7 @@ INDEX_BLOCK_M = 128
 
 
 @triton.jit
-def _count_columns(
+def count_columns_kernel(
     BlockIdx, ColNnz, CuSeqlens,
     S, T,
     TOP_K: tl.constexpr, N_BLOCKS: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -99,7 +99,7 @@ def _count_columns(
 
 
 @triton.jit
-def _offsets_and_order(
+def offsets_and_order_kernel(
     ColNnz, ColOffsets, Order,
     N_BLOCKS: tl.constexpr, N_POW2: tl.constexpr,
 ):
@@ -138,7 +138,7 @@ def _offsets_and_order(
 
 
 @triton.jit
-def _scatter_pairs(
+def scatter_pairs_kernel(
     BlockIdx, ColOffsets, Cursor, RowIdx, HeadIdx, SlotIdx, CuSeqlens,
     S, T, TOKENS,
     TOP_K: tl.constexpr, N_BLOCKS: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -269,7 +269,7 @@ def build_csc_from_indices(
     # reduces over a column array that already exists.
     grid = (triton.cdiv(rows_per_seq, INDEX_BLOCK_M), n_seq * h_q)
     ptr = cu_seqlens if varlen else block_idx
-    _count_columns[grid](
+    count_columns_kernel[grid](
         block_idx, col_nnz, ptr, s, s,
         TOP_K=top_k, N_BLOCKS=num_blocks, BLOCK_M=INDEX_BLOCK_M,
         H_Q=h_q, Q_PER_KV=group, VARLEN=varlen,
@@ -279,12 +279,12 @@ def build_csc_from_indices(
     # what keeps this kernel's `static_range(N_BLOCKS)` reduction the size it is
     # in the padded path. Global numbering would have multiplied it by the
     # batch.
-    _offsets_and_order[(bh_kv,)](
+    offsets_and_order_kernel[(bh_kv,)](
         col_nnz, col_offsets, order,
         N_BLOCKS=num_blocks,
         N_POW2=max(TENSOR_CORE_TILE, triton.next_power_of_2(num_blocks)),
     )
-    _scatter_pairs[grid](
+    scatter_pairs_kernel[grid](
         block_idx, col_offsets, cursor, row_indices, head_indices,
         slot_of_pair, ptr, s, total, s,
         TOP_K=top_k, N_BLOCKS=num_blocks, BLOCK_M=INDEX_BLOCK_M,

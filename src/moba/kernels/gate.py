@@ -43,7 +43,7 @@ occupancy no longer depends on sequence length.
 The loop that streaming introduces also admits an optimization the one-shot
 form cannot express at all: its trip count is a runtime value, so a query tile
 stops at the last block any of its queries can causally see instead of scoring
-every block and masking the future away afterwards. See `_moba_gate_fwd`.
+every block and masking the future away afterwards. See `gate_kernel`.
 """
 
 import torch
@@ -81,7 +81,7 @@ GATE_WARPS = 4
 
 
 @triton.jit
-def _moba_gate_fwd(
+def gate_kernel(
     Q, Kbar, BlockIdx, CuSeqlens,
     S, T, sm_scale,
     BLOCK_SIZE: tl.constexpr, BLOCK_M: tl.constexpr, D: tl.constexpr,
@@ -395,7 +395,7 @@ def gate_select(
 
     out = torch.empty((b, h, s, cfg.top_k), device=q.device, dtype=torch.int32)
 
-    _moba_gate_fwd[grid](
+    gate_kernel[grid](
         q, kbar, out, cu_seqlens if varlen else q,
         s, s,
         # The gate score is deliberately unscaled: softmax's 1/sqrt(D) is a
@@ -414,7 +414,7 @@ def gate_select(
 
 
 @triton.jit
-def _block_representatives_fwd(
+def pool_blocks_kernel(
     K, Kbar, CuSeqlens,
     S, T, N_BLOCKS,
     BLOCK_SIZE: tl.constexpr, BLOCK_POW2: tl.constexpr, D: tl.constexpr,
@@ -520,7 +520,7 @@ def block_representatives_triton(
     if cu_seqlens is None:
         n = cfg.num_blocks(s)
         out = torch.empty((b, h, n, d), device=k.device, dtype=k.dtype)
-        _block_representatives_fwd[(n, b * h)](
+        pool_blocks_kernel[(n, b * h)](
             k, out, k, s, s, n,
             BLOCK_SIZE=cfg.block_size,
             BLOCK_POW2=triton.next_power_of_2(cfg.block_size),
@@ -540,7 +540,7 @@ def block_representatives_triton(
     n = cfg.num_blocks(max_seqlen)
 
     out = torch.empty((n_seq, h, n, d), device=k.device, dtype=k.dtype)
-    _block_representatives_fwd[(n, n_seq * h)](
+    pool_blocks_kernel[(n, n_seq * h)](
         k, out, cu_seqlens, s, s, n,
         BLOCK_SIZE=cfg.block_size,
         BLOCK_POW2=triton.next_power_of_2(cfg.block_size),

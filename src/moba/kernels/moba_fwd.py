@@ -51,7 +51,7 @@ from moba.kernels.index_fused import build_csc_fused
 
 
 @triton.jit
-def _moba_attn_fwd(
+def moba_fwd_kernel(
     Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
     PartM, PartL, PartAcc,
     S, T, TOKENS, sm_scale, num_blocks,
@@ -483,7 +483,7 @@ def choose_combine_tile(head_dim: int, block_m: int | None = None) -> tuple[int,
 
 
 @triton.jit
-def _moba_combine(
+def moba_combine_kernel(
     PartM, PartL, PartAcc, Out, Lse,
     S,
     K_SLOTS: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -628,7 +628,7 @@ def combine_partials(
            if return_lse else out)
     block_m, warps = choose_combine_tile(d, block_m)
 
-    _moba_combine[(triton.cdiv(s, block_m), b * h)](
+    moba_combine_kernel[(triton.cdiv(s, block_m), b * h)](
         part_m, part_l, part_acc, out, lse, s,
         K_SLOTS=slots, D=d, BLOCK_M=block_m, H_Q=h, WRITE_LSE=return_lse,
         num_warps=warps,
@@ -829,7 +829,7 @@ def attend_partials(
     # loads, which is the whole gain.
     for group in candidates:
         try:
-            _moba_attn_fwd[(index.num_blocks, n_seq * h_kv)](
+            moba_fwd_kernel[(index.num_blocks, n_seq * h_kv)](
                 q, k, v,
                 index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,
