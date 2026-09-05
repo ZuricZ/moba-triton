@@ -21,10 +21,10 @@ from moba.kernels.fa2_minimal import fa2_forward
 # (batch, heads, seq_len, head_dim). Includes a sequence length that is not a
 # multiple of any tile size, to exercise the masked tail.
 SHAPES = [
-    (1, 2, 128, 64),
-    (1, 4, 512, 64),
-    (2, 2, 384, 64),
-    (1, 2, 200, 64),
+    (1, 128, 2, 64),
+    (1, 512, 4, 64),
+    (2, 384, 2, 64),
+    (1, 200, 2, 64),
 ]
 
 # Tile sizes probed in docs/learning/02. 128x128 spills registers and 64x128
@@ -35,10 +35,15 @@ ATOL = 2e-2
 
 
 def _reference(q, k, v, causal):
-    return F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+    """torch SDPA on the same inputs, converted to its head-major convention."""
+    out = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+        is_causal=causal,
+    )
+    return out.transpose(1, 2)
 
 
-@pytest.mark.parametrize("shape", SHAPES, ids=lambda s: "b%dh%ds%dd%d" % s)
+@pytest.mark.parametrize("shape", SHAPES, ids=lambda s: "b%ds%dh%dd%d" % s)
 @pytest.mark.parametrize("causal", [True, False], ids=["causal", "full"])
 def test_matches_sdpa(device, shape, causal):
     """The kernel agrees with torch SDPA across shapes and masking modes."""
@@ -62,7 +67,7 @@ def test_tile_sizes_all_correct(device, block_m, block_n):
     Register spilling and reduced occupancy are allowed to make a
     configuration slow. They are not allowed to make it wrong.
     """
-    shape = (1, 4, 512, 64)
+    shape = (1, 512, 4, 64)
     g = torch.Generator(device=device).manual_seed(0)
     q, k, v = (
         torch.randn(shape, generator=g, device=device, dtype=torch.float16)
@@ -83,7 +88,7 @@ def test_causal_mask_actually_masks(device):
     share. This checks the property directly: editing key/value rows at the end
     of the sequence must leave the first half of the output untouched.
     """
-    shape = (1, 2, 256, 64)
+    shape = (1, 256, 2, 64)
     g = torch.Generator(device=device).manual_seed(0)
     q, k, v = (
         torch.randn(shape, generator=g, device=device, dtype=torch.float16)
@@ -93,15 +98,15 @@ def test_causal_mask_actually_masks(device):
     before = fa2_forward(q, k, v, causal=True)
 
     k2, v2 = k.clone(), v.clone()
-    k2[:, :, 128:] += 10.0
-    v2[:, :, 128:] += 10.0
+    k2[:, 128:] += 10.0
+    v2[:, 128:] += 10.0
     after = fa2_forward(q, k2, v2, causal=True)
 
-    assert torch.equal(before[:, :, :128], after[:, :, :128]), (
+    assert torch.equal(before[:, :128], after[:, :128]), (
         "rows 0-127 changed when only keys/values at positions 128+ were "
         "modified -- causal masking is leaking future information"
     )
-    assert not torch.equal(before[:, :, 128:], after[:, :, 128:]), (
+    assert not torch.equal(before[:, 128:], after[:, 128:]), (
         "rows 128+ did not change at all -- the perturbation never reached "
         "the kernel, so this test proves nothing"
     )
@@ -110,8 +115,8 @@ def test_causal_mask_actually_masks(device):
 def test_rejects_mismatched_shapes(device):
     """Shape validation fires before any kernel launch."""
     g = torch.Generator(device=device).manual_seed(0)
-    q = torch.randn(1, 2, 128, 64, generator=g, device=device, dtype=torch.float16)
-    k = torch.randn(1, 2, 256, 64, generator=g, device=device, dtype=torch.float16)
+    q = torch.randn(1, 128, 2, 64, generator=g, device=device, dtype=torch.float16)
+    k = torch.randn(1, 256, 2, 64, generator=g, device=device, dtype=torch.float16)
 
     with pytest.raises(ValueError, match="shape mismatch"):
         fa2_forward(q, k, k)

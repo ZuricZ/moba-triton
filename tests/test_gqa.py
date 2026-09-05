@@ -40,9 +40,9 @@ def _shapes(shape, dtype, device, seed=0):
     """Returns (q, k, v) with the query and key/value head counts of `shape`."""
     b, h_q, h_kv, s, d = shape
     gen = torch.Generator(device=device).manual_seed(seed)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device, dtype=dtype)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device, dtype=dtype)
-    v = torch.randn(b, h_kv, s, d, generator=gen, device=device, dtype=dtype)
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device, dtype=dtype)
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device, dtype=dtype)
+    v = torch.randn(b, s, h_kv, d, generator=gen, device=device, dtype=dtype)
     return q, k, v
 
 
@@ -71,7 +71,7 @@ def test_forward_matches_the_oracle_under_gqa(device, shape, gate):
     ref = moba_attention_naive(qb, kb, vb, cfg, selected=selected)
     ours = moba_forward(qb, kb, vb, cfg, index=index)
 
-    assert ours.shape == (b, h_q, s, d)
+    assert ours.shape == (b, s, h_q, d)
     cap = max(TOLERANCE_FACTOR * max_abs_error(ref, truth), TOLERANCE_FLOOR)
     err = max_abs_error(ours, truth)
     assert err <= cap, (
@@ -121,8 +121,8 @@ def test_every_query_head_receives_output_under_gqa(device):
 
 def test_indivisible_head_counts_are_rejected_at_the_boundary(device):
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
-    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
-    k = torch.randn(1, 3, 256, 64, dtype=torch.bfloat16, device=device)
+    q = torch.randn(1, 256, 8, 64, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, 256, 3, 64, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="divisible"):
         moba_forward(q, k, k, cfg)
 
@@ -130,9 +130,9 @@ def test_indivisible_head_counts_are_rejected_at_the_boundary(device):
 def test_mismatched_key_and_value_shapes_are_rejected(device):
     """K and V must still agree with each other, GQA or not."""
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
-    q = torch.randn(1, 8, 256, 64, dtype=torch.bfloat16, device=device)
-    k = torch.randn(1, 2, 256, 64, dtype=torch.bfloat16, device=device)
-    v = torch.randn(1, 4, 256, 64, dtype=torch.bfloat16, device=device)
+    q = torch.randn(1, 256, 8, 64, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, 256, 2, 64, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, 256, 4, 64, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError, match="key/value"):
         moba_forward(q, k, v, cfg)
 
@@ -168,7 +168,7 @@ def test_gradients_under_gqa_are_within_the_precision_budget(device, gate):
     q64, k64, v64 = _shapes(shape, torch.float64, device)
     qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
     gen = torch.Generator(device=device).manual_seed(7)
-    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    g = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.float64) * 0.1
 
     index = build_csc_fused(qb, kb, cfg)
@@ -184,9 +184,11 @@ def test_gradients_under_gqa_are_within_the_precision_budget(device, gate):
     rq, rk, rv = _grads(oracle, qb, kb, vb, g)
     dq, dk, dv = _grads(kernel, qb, kb, vb, g)
 
-    assert dq.shape == (b, h_q, s, d)
-    assert dk.shape == (b, h_kv, s, d)
-    assert dv.shape == (b, h_kv, s, d)
+    # Token-major. `selected` above is the head-major mask, which did
+    # not move -- it is ours, not part of the API surface.
+    assert dq.shape == (b, s, h_q, d)
+    assert dk.shape == (b, s, h_kv, d)
+    assert dv.shape == (b, s, h_kv, d)
 
     for name, ours, ref, truth in [("dq", dq, rq, tq), ("dk", dk, rk, tk),
                                    ("dv", dv, rv, tv)]:
@@ -212,7 +214,7 @@ def test_gqa_backward_equals_the_kernel_on_expanded_heads(device):
     b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
     q, k, v = _shapes((b, h_q, h_kv, s, d), torch.bfloat16, device, seed=5)
     gen = torch.Generator(device=device).manual_seed(9)
-    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    g = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16) * 0.1
     group = h_q // h_kv
 
@@ -220,8 +222,10 @@ def test_gqa_backward_equals_the_kernel_on_expanded_heads(device):
     wq, wk, wv = _grads(lambda a, x, y: moba_attention(a, x, y, cfg),
                         q, expand_kv(k, h_q), expand_kv(v, h_q), g)
 
-    folded_k = wk.view(b, h_kv, group, s, d).sum(dim=2)
-    folded_v = wv.view(b, h_kv, group, s, d).sum(dim=2)
+    # Token-major: the head axis is 2, and `expand_kv` interleaves there, so
+    # query head g belongs to kv head g // group and the group is contiguous.
+    folded_k = wk.view(b, s, h_kv, group, d).sum(dim=3)
+    folded_v = wv.view(b, s, h_kv, group, d).sum(dim=3)
 
     for name, a, bb in [("dq", nq, wq), ("dk", nk, folded_k),
                         ("dv", nv, folded_v)]:
@@ -253,7 +257,7 @@ def test_unselected_blocks_still_get_a_zero_gradient_under_gqa(device):
     b, h_q, h_kv, s, d = 1, 4, 1, 1024, 64
     q, k, v = _shapes((b, h_q, h_kv, s, d), torch.bfloat16, device, seed=11)
     gen = torch.Generator(device=device).manual_seed(13)
-    g = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    g = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16) * 0.1
 
     index = build_csc_fused(q, k, cfg)

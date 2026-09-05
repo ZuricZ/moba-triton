@@ -176,4 +176,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward, backward, grouped-query attention and variable-length (packed) batches all done; 429 tests green. Forward 2.18x over dense SDPA at S=8192; backward 2.58x. Varlen costs 1% on a uniform batch and pays *superlinearly* on a ragged one -- 8.5x at 82% padding, against 5.6x fewer tokens, because padding manufactures blocks for `top_k` to select (`docs/varlen-measurements.md`). Next: a real head-to-head on rented sm_80/90, then DD-1 (layout).
+> Status: Forward, backward, GQA and varlen all done; 429 tests green. Now **token-major `[B, S, H, D]`**, matching FA-2/NSA/FlashMoBA -- measured neutral (-1.4% to +1.3%), and it deleted the varlen branch from the address arithmetic, since no token-major stride contains `S` (`docs/layout-measurements.md`, DD-1 resolved). Buffers we own stayed head-major. Next: merge the branch, then a real head-to-head on rented sm_80/90.

@@ -321,8 +321,8 @@ def build_csc_fused(
     path needed -- ~230 us each on WSL -- are gone entirely.
 
     Args:
-        q: Queries shaped [B, H, S, D], or [1, H, T, D] when packed.
-        k: Keys shaped [B, H_kv, S, D], where `H_kv` divides `H`.
+        q: Queries shaped [B, S, H, D], or [1, T, H, D] when packed.
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`.
         cfg: Configuration.
         cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
             given, the inputs hold one packed batch and `B` must be 1.
@@ -338,6 +338,6 @@ def build_csc_fused(
     block_idx = gate_select(q, kbar, cfg, cu_seqlens=cu_seqlens,
                             max_seqlen=max_seqlen)
     return build_csc_from_indices(block_idx, kbar.shape[2], cfg,
-                                  num_kv_heads=k.shape[1],
+                                  num_kv_heads=k.shape[2],  # token-major
                                   cu_seqlens=cu_seqlens,
                                   max_seqlen=max_seqlen)

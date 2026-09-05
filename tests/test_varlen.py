@@ -39,7 +39,7 @@ def _packed(device, dtype, heads=2, d=64, seed=0):
     gen = torch.Generator(device=device).manual_seed(seed)
 
     def mk():
-        return torch.randn(1, heads, TOTAL, d, generator=gen, device=device,
+        return torch.randn(1, TOTAL, heads, d, generator=gen, device=device,
                            dtype=dtype)
 
     return mk(), mk(), mk()
@@ -102,8 +102,8 @@ def test_gate_matches_running_each_sequence_alone(device):
     lo = 0
     for n in LENS:
         piece = gate_select(
-            q[:, :, lo:lo + n],
-            block_representatives_triton(k[:, :, lo:lo + n], cfg), cfg)
+            q[:, lo:lo + n],
+            block_representatives_triton(k[:, lo:lo + n], cfg), cfg)
         assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
 
@@ -170,7 +170,7 @@ def test_a_sequence_shorter_than_one_tile_is_gated(device):
 def test_packed_gate_rejects_a_real_batch_axis(device):
     cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(2, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    q = torch.randn(2, TOTAL, 2, 64, device=device, dtype=torch.bfloat16)
     kbar = torch.randn(4, 2, 5, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="batch 1"):
         gate_select(q, kbar, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
@@ -180,7 +180,7 @@ def test_max_seqlen_is_required_when_packing(device):
     """Not derivable without a host synchronization, so it is an argument."""
     cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(1, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    q = torch.randn(1, TOTAL, 2, 64, device=device, dtype=torch.bfloat16)
     kbar = torch.randn(4, 2, 5, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="max_seqlen"):
         gate_select(q, kbar, cfg, cu_seqlens=cu)
@@ -317,9 +317,9 @@ def test_forward_matches_running_each_sequence_alone(device, gate):
 
     lo = 0
     for n in LENS:
-        piece = moba_forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
-                             v[:, :, lo:lo + n], cfg)
-        assert torch.equal(packed[:, :, lo:lo + n], piece), (
+        piece = moba_forward(q[:, lo:lo + n], k[:, lo:lo + n],
+                             v[:, lo:lo + n], cfg)
+        assert torch.equal(packed[:, lo:lo + n], piece), (
             f"sequence at {lo} (length {n}) differs"
         )
         lo += n
@@ -393,19 +393,19 @@ def test_packed_forward_under_gqa(device):
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     gen = torch.Generator(device=device).manual_seed(10)
-    q = torch.randn(1, 4, TOTAL, 64, generator=gen, device=device,
+    q = torch.randn(1, TOTAL, 4, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+    k = torch.randn(1, TOTAL, 2, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    v = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+    v = torch.randn(1, TOTAL, 2, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
 
     packed = moba_forward(q, k, v, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
     lo = 0
     for n in LENS:
-        piece = moba_forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
-                             v[:, :, lo:lo + n], cfg)
-        assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
+        piece = moba_forward(q[:, lo:lo + n], k[:, lo:lo + n],
+                             v[:, lo:lo + n], cfg)
+        assert torch.equal(packed[:, lo:lo + n], piece), f"at {lo}"
         lo += n
 
 
@@ -413,7 +413,7 @@ def test_packed_forward_rejects_a_real_batch_axis(device):
     from moba.kernels.moba_fwd import moba_forward
     cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(2, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    q = torch.randn(2, TOTAL, 2, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="batch 1"):
         moba_forward(q, q, q, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
 
@@ -423,7 +423,7 @@ def test_forward_requires_max_seqlen_when_packing(device):
     from moba.kernels.moba_fwd import moba_forward
     cfg = MoBAConfig(block_size=BLOCK, top_k=2, dtype=torch.bfloat16)
     cu = _cu(device)
-    q = torch.randn(1, 2, TOTAL, 64, device=device, dtype=torch.bfloat16)
+    q = torch.randn(1, TOTAL, 2, 64, device=device, dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="max_seqlen"):
         moba_forward(q, q, q, cfg, cu_seqlens=cu)
 
@@ -459,13 +459,13 @@ def test_gradients_match_running_each_sequence_alone(device):
     for n in LENS:
         sq, sk, sv = _grads(
             lambda a, x, y: moba_attention(a, x, y, cfg),
-            q[:, :, lo:lo + n], k[:, :, lo:lo + n], v[:, :, lo:lo + n],
-            g[:, :, lo:lo + n])
+            q[:, lo:lo + n], k[:, lo:lo + n], v[:, lo:lo + n],
+            g[:, lo:lo + n])
         for name, a, b in [("dq", pq, sq), ("dk", pk, sk), ("dv", pv, sv)]:
-            assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
+            assert torch.allclose(a[:, lo:lo + n].float(), b.float(),
                                   rtol=2e-2, atol=1e-3), (
                 f"{name} differs for the sequence at {lo}: max "
-                f"{(a[:, :, lo:lo + n].float() - b.float()).abs().max():.3e}")
+                f"{(a[:, lo:lo + n].float() - b.float()).abs().max():.3e}")
         lo += n
 
 
@@ -483,7 +483,7 @@ def test_packed_gradients_match_the_oracle(device):
     q64, k64, v64 = _packed(device, torch.float64, seed=12)
     qb, kb, vb = (t.to(torch.bfloat16) for t in (q64, k64, v64))
     gen = torch.Generator(device=device).manual_seed(13)
-    g = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+    g = torch.randn(1, TOTAL, 2, 64, generator=gen, device=device,
                     dtype=torch.float64) * 0.1
 
     index = build_csc_fused(qb, kb, cfg, cu_seqlens=cu, max_seqlen=MAXLEN)
@@ -547,11 +547,11 @@ def test_packed_backward_under_gqa(device):
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
     gen = torch.Generator(device=device).manual_seed(15)
-    q = torch.randn(1, 4, TOTAL, 64, generator=gen, device=device,
+    q = torch.randn(1, TOTAL, 4, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+    k = torch.randn(1, TOTAL, 2, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    v = torch.randn(1, 2, TOTAL, 64, generator=gen, device=device,
+    v = torch.randn(1, TOTAL, 2, 64, generator=gen, device=device,
                     dtype=torch.bfloat16)
     g = torch.randn_like(q) * 0.1
 
@@ -562,10 +562,10 @@ def test_packed_backward_under_gqa(device):
     for n in LENS:
         sq, sk, sv = _grads(
             lambda a, x, y: moba_attention(a, x, y, cfg),
-            q[:, :, lo:lo + n], k[:, :, lo:lo + n], v[:, :, lo:lo + n],
-            g[:, :, lo:lo + n])
+            q[:, lo:lo + n], k[:, lo:lo + n], v[:, lo:lo + n],
+            g[:, lo:lo + n])
         for name, a, b in [("dq", pq, sq), ("dk", pk, sk), ("dv", pv, sv)]:
-            assert torch.allclose(a[:, :, lo:lo + n].float(), b.float(),
+            assert torch.allclose(a[:, lo:lo + n].float(), b.float(),
                                   rtol=3e-2, atol=2e-3), f"{name} at {lo}"
         lo += n
 
@@ -588,9 +588,9 @@ def test_packed_dense_baseline_matches_running_each_sequence_alone(device):
 
     lo = 0
     for n in LENS:
-        piece = backend.forward(q[:, :, lo:lo + n], k[:, :, lo:lo + n],
-                                v[:, :, lo:lo + n], cfg)
-        assert torch.allclose(packed[:, :, lo:lo + n].float(), piece.float(),
+        piece = backend.forward(q[:, lo:lo + n], k[:, lo:lo + n],
+                                v[:, lo:lo + n], cfg)
+        assert torch.allclose(packed[:, lo:lo + n].float(), piece.float(),
                               rtol=1e-3, atol=1e-3), f"at {lo}"
         lo += n
 
@@ -625,7 +625,7 @@ def test_packed_dense_baseline_rejects_a_real_batch_axis(device):
     from moba.backends.base import get_backend
 
     backend = get_backend("sdpa_dense")
-    q = torch.randn(2, 2, 16, 64, device=device, dtype=torch.bfloat16)
+    q = torch.randn(2, 16, 2, 64, device=device, dtype=torch.bfloat16)
     cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)
-    with pytest.raises(ValueError, match=r"\[1, H, T, D\]"):
+    with pytest.raises(ValueError, match=r"\[1, T, H, D\]"):
         backend.forward_packed(q, q, q, cfg, cu)

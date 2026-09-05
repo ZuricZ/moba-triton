@@ -45,7 +45,7 @@ from moba.tolerance import (
 def test_single_slot_matches_the_oracle(device):
     """top_k=1 means one block per query, so no cross-slot merging occurs."""
     cfg = MoBAConfig(block_size=32, top_k=1, dtype=torch.bfloat16)
-    q, k, v = make_qkv((1, 4, 512, 64), dtype=torch.float64, device=device)
+    q, k, v = make_qkv((1, 512, 4, 64), dtype=torch.float64, device=device)
     truth, ref_err = reference_error(q, k, v, cfg, query_chunk=QUERY_CHUNK)
 
     ql, kl, vl = (t.to(cfg.dtype) for t in (q, k, v))
@@ -79,7 +79,7 @@ def test_kernel_routing_matches_the_oracle_exactly(device, shape, gate):
     ql, kl = q.to(cfg.dtype), k.to(cfg.dtype)
 
     expected = moba_selection(ql, kl, cfg)
-    actual = csc_to_mask(build_csc(ql, kl, cfg), shape[2])
+    actual = csc_to_mask(build_csc(ql, kl, cfg), shape[1])
 
     assert_selection_matches(actual, expected, name="moba_triton")
 
@@ -87,8 +87,8 @@ def test_kernel_routing_matches_the_oracle_exactly(device, shape, gate):
 def test_rejects_mismatched_shapes(device):
     """Validation fires before any launch."""
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
-    q, _, _ = make_qkv((1, 2, 128, 64), dtype=torch.bfloat16, device=device)
-    k, _, _ = make_qkv((1, 2, 256, 64), dtype=torch.bfloat16, device=device)
+    q, _, _ = make_qkv((1, 128, 2, 64), dtype=torch.bfloat16, device=device)
+    k, _, _ = make_qkv((1, 256, 2, 64), dtype=torch.bfloat16, device=device)
 
     with pytest.raises(ValueError, match="shape mismatch"):
         moba_forward(q, k, k, cfg)
@@ -97,7 +97,7 @@ def test_rejects_mismatched_shapes(device):
 def test_rejects_block_size_below_tensor_core_minimum(device):
     """block_size < 16 cannot fill a tl.dot operand and is refused, not padded."""
     cfg = MoBAConfig(block_size=8, top_k=2, dtype=torch.bfloat16)
-    q, k, v = make_qkv((1, 2, 128, 64), dtype=torch.bfloat16, device=device)
+    q, k, v = make_qkv((1, 128, 2, 64), dtype=torch.bfloat16, device=device)
 
     with pytest.raises(ValueError, match="below the tl.dot minimum"):
         moba_forward(q, k, v, cfg)
@@ -128,11 +128,15 @@ def _reference_combine(part_m, part_l, part_acc):
         part_acc: Per-slot un-normalized outputs, [B, H, S, K, D].
 
     Returns:
-        Merged output shaped [B, H, S, D], float64.
+        Merged output shaped [B, S, H, D], float64 -- token-major, matching
+        what `combine_partials` returns. The partials themselves stay
+        head-major: they are ours, and only the merged output crosses the API
+        boundary.
     """
     m, l, acc = (t.double() for t in (part_m, part_l, part_acc))
     w = torch.exp2(m - m.max(dim=-1, keepdim=True).values)
-    return (acc * w.unsqueeze(-1)).sum(-2) / (l * w).sum(-1).unsqueeze(-1)
+    merged = (acc * w.unsqueeze(-1)).sum(-2) / (l * w).sum(-1).unsqueeze(-1)
+    return merged.transpose(1, 2)          # [B, H, S, D] -> [B, S, H, D]
 
 
 def _random_partials(device, b=1, h=2, s=256, k=4, d=64, seed=0):
@@ -209,7 +213,8 @@ def test_combine_is_dominated_by_the_largest_maximum(device):
     part_m[..., 1:-1] = 0.0         # negligible: exp(-100) underflows to zero
 
     actual = combine_partials(part_m, part_l, part_acc, torch.float32)
-    expected = part_acc[..., 0, :] / part_l[..., 0].unsqueeze(-1)
+    expected = (part_acc[..., 0, :]
+                / part_l[..., 0].unsqueeze(-1)).transpose(1, 2)
 
     err = (actual - expected).abs().max().item()
     assert err < 1e-5, f"dominant slot not isolated: {err:.3e}"
@@ -257,7 +262,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     part_m = torch.zeros((1, 2, s, slots), device=device)
     part_l = torch.ones((1, 2, s, slots), device=device)
     part_acc = torch.zeros((1, 2, s, slots, head_dim), device=device)
-    out = torch.empty((1, 2, s, head_dim), device=device)
+    out = torch.empty((1, s, 2, head_dim), device=device)
 
     lse = torch.empty((1, 2, s), device=device)
 
@@ -267,7 +272,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     for write_lse in (False, True):
         kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
             part_m, part_l, part_acc, out, lse, s,
-            K_SLOTS=slots, D=head_dim, BLOCK_M=block_m,
+            K_SLOTS=slots, D=head_dim, BLOCK_M=block_m, H_Q=2,
             WRITE_LSE=write_lse, num_warps=warps,
         )
 

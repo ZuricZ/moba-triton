@@ -119,6 +119,12 @@ Its K and V are expanded to `H_q` outside the timed region: nested SDPA has no
 `enable_gqa` and raises "This path is currently not implemented for jagged
 layout NT" when the head counts differ.
 
+**These dense numbers are from the head-major era and are now conservative in
+our favour.** Since the move to token-major (`docs/layout-measurements.md`),
+building the jagged tensor no longer needs a transpose-and-copy, and the
+baseline got 7-16% faster. The `gain` column -- our kernel against our own
+kernel -- is unaffected and remains the trustworthy one.
+
 | kind | B | dense packed (ms) | moba packed (ms) | ratio |
 |---|---|---|---|---|
 | uniform | 4 | 5.946 | 2.433 | 2.44× |

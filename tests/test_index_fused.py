@@ -30,7 +30,7 @@ def test_fused_index_routes_identically(device, shape, gate):
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
     q, k, _ = make_qkv(shape, dtype=torch.bfloat16, device=device)
-    seq_len = shape[2]
+    seq_len = shape[1]
 
     expected = build_csc(q, k, cfg)
     actual = build_csc_fused(q, k, cfg)
@@ -54,7 +54,7 @@ def test_column_membership_is_correct(device, gate):
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1024, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1024, 2, 128), dtype=torch.bfloat16, device=device)
 
     expected, actual = build_csc(q, k, cfg), build_csc_fused(q, k, cfg)
 
@@ -82,7 +82,7 @@ def test_slot_of_pair_agrees_with_the_query_it_belongs_to(device, gate):
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1024, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1024, 2, 128), dtype=torch.bfloat16, device=device)
 
     ref, ix = build_csc(q, k, cfg), build_csc_fused(q, k, cfg)
     ref_mask = csc_to_mask(ref, 1024)
@@ -112,7 +112,7 @@ def test_dispatch_order_is_longest_first_and_repeatable(device):
     changes run to run is nearly indistinguishable from one with a race.
     """
     cfg = MoBAConfig(block_size=32, top_k=4, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1024, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1024, 2, 128), dtype=torch.bfloat16, device=device)
 
     ix = build_csc_fused(q, k, cfg)
     counts = torch.gather(ix.col_nnz, -1, ix.order.long())
@@ -138,7 +138,7 @@ def test_fused_index_never_synchronizes_with_the_host(device):
     everything slower. So it is tested as a property.
     """
     cfg = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1024, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1024, 2, 128), dtype=torch.bfloat16, device=device)
 
     build_csc_fused(q, k, cfg)          # compile before measuring
     torch.cuda.synchronize()
@@ -167,7 +167,7 @@ def test_fused_index_handles_a_sequence_that_is_not_a_block_multiple(device):
     evenly, which every other test in this file does.
     """
     cfg = MoBAConfig(block_size=128, top_k=4, dtype=torch.bfloat16)
-    q, k, _ = make_qkv((1, 2, 1000, 128), dtype=torch.bfloat16, device=device)
+    q, k, _ = make_qkv((1, 1000, 2, 128), dtype=torch.bfloat16, device=device)
 
     expected, actual = build_csc(q, k, cfg), build_csc_fused(q, k, cfg)
 
@@ -178,9 +178,9 @@ def test_fused_index_handles_a_sequence_that_is_not_a_block_multiple(device):
 def _gqa_qk(device, b=1, h_q=8, h_kv=2, s=512, d=64, seed=0):
     """Returns (q, k) with fewer key/value heads than query heads."""
     gen = torch.Generator(device=device).manual_seed(seed)
-    q = torch.randn(b, h_q, s, d, generator=gen, device=device,
+    q = torch.randn(b, s, h_q, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
-    k = torch.randn(b, h_kv, s, d, generator=gen, device=device,
+    k = torch.randn(b, s, h_kv, d, generator=gen, device=device,
                     dtype=torch.bfloat16)
     return q, k
 

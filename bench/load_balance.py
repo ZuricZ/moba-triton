@@ -88,7 +88,7 @@ def analyse(
     cfg = MoBAConfig(block_size=block_size, top_k=top_k)
     g = torch.Generator(device="cuda").manual_seed(seed)
     q, k = (
-        torch.randn(1, heads, seq_len, head_dim, generator=g,
+        torch.randn(1, seq_len, heads, head_dim, generator=g,
                     device="cuda", dtype=torch.bfloat16)
         for _ in range(2)
     )

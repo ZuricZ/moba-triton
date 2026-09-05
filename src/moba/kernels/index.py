@@ -89,8 +89,8 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
     """Builds the KV-block-major index for one batch of queries and keys.
 
     Args:
-        q: Queries shaped [B, H, S, D].
-        k: Keys shaped [B, H, S, D].
+        q: Queries shaped [B, S, H, D].
+        k: Keys shaped [B, S, H_kv, D].
         cfg: Configuration supplying `block_size` and `top_k`.
 
     Returns:
@@ -98,7 +98,7 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
     """
     mask = moba_selection(q, k, cfg)                # [B, H_q, S, N] bool
     b, h_q, s, n = mask.shape
-    h_kv = k.shape[1]
+    h_kv = k.shape[2]                               # token-major head axis
     group = head_group_size(h_q, h_kv)
     device = mask.device
     slots = cfg.top_k

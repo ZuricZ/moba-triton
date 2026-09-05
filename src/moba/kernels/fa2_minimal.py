@@ -28,7 +28,7 @@ correct attention on this machine -- that `tl.dot`, the fp32 accumulators and
 the online softmax behave as expected on sm_86. When the MoBA kernel later
 disagrees with the oracle, that whole class of suspect is already eliminated.
 
-Layout assumption: q, k, v are contiguous [B, H, S, D]. Requiring contiguity
+Layout assumption: q, k, v are contiguous [B, S, H, D]. Requiring contiguity
 lets us index with a single flat offset instead of carrying four strides per
 tensor, which removes a lot of noise from the pointer arithmetic.
 """
@@ -48,6 +48,7 @@ def _fa2_fwd(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     D: tl.constexpr,
+    H: tl.constexpr,
     CAUSAL: tl.constexpr,
 ):
     """One program instance computes one tile of BLOCK_M output rows.
@@ -60,10 +61,11 @@ def _fa2_fwd(
     pid_m = tl.program_id(0)      # which query tile
     pid_bh = tl.program_id(1)     # which (batch, head) pair
 
-    # Each (batch, head) owns a contiguous [S, D] slab. Offsetting the base
-    # pointer once means the rest of the kernel can pretend it is working on a
-    # single-head problem.
-    base = pid_bh * S * D
+    # Token-major [B, S, H, D], so a head no longer owns a contiguous slab --
+    # its rows are H*D apart, interleaved with the other heads. Offsetting the
+    # base pointer once still lets the rest of the kernel pretend it is a
+    # single-head problem; only the row stride changes.
+    base = (pid_bh // H) * S * H * D + (pid_bh % H) * D
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)   # query rows, absolute
     offs_d = tl.arange(0, D)                           # feature columns
@@ -72,7 +74,7 @@ def _fa2_fwd(
     # Q stays in registers for the whole kernel. This is FA-2's central
     # bookkeeping choice: the query tile is loaded from HBM exactly once, and
     # every K/V tile streams past it.
-    q_ptrs = Q + base + offs_m[:, None] * D + offs_d[None, :]
+    q_ptrs = Q + base + offs_m[:, None] * (H * D) + offs_d[None, :]
     q = tl.load(q_ptrs, mask=offs_m[:, None] < S, other=0.0)
 
     # --- Online softmax state, one entry per query row. ---------------------
@@ -98,7 +100,7 @@ def _fa2_fwd(
 
         # --- Load one K tile into SRAM. ------------------------------------
         k = tl.load(
-            K + base + offs_n[:, None] * D + offs_d[None, :],
+            K + base + offs_n[:, None] * (H * D) + offs_d[None, :],
             mask=offs_n[:, None] < S,
             other=0.0,
         )
@@ -128,7 +130,7 @@ def _fa2_fwd(
         acc = acc * alpha[:, None]
 
         v = tl.load(
-            V + base + offs_n[:, None] * D + offs_d[None, :],
+            V + base + offs_n[:, None] * (H * D) + offs_d[None, :],
             mask=offs_n[:, None] < S,
             other=0.0,
         )
@@ -144,7 +146,7 @@ def _fa2_fwd(
     acc = acc / l_i[:, None]
 
     tl.store(
-        Out + base + offs_m[:, None] * D + offs_d[None, :],
+        Out + base + offs_m[:, None] * (H * D) + offs_d[None, :],
         acc.to(Out.dtype.element_ty),
         mask=offs_m[:, None] < S,
     )
@@ -161,15 +163,15 @@ def fa2_forward(
     """Runs the minimal FA-2 forward kernel.
 
     Args:
-        q: Queries shaped [B, H, S, D], contiguous.
-        k: Keys shaped [B, H, S, D], contiguous.
-        v: Values shaped [B, H, S, D], contiguous.
+        q: Queries shaped [B, S, H, D], contiguous.
+        k: Keys shaped [B, S, H, D], contiguous.
+        v: Values shaped [B, S, H, D], contiguous.
         causal: Whether to apply causal masking.
         block_m: Query rows per program instance.
         block_n: Key rows per inner-loop step.
 
     Returns:
-        Attention output shaped [B, H, S, D], same dtype as `q`.
+        Attention output shaped [B, S, H, D], same dtype as `q`.
 
     Raises:
         ValueError: If shapes disagree or the head dimension is unsupported.
@@ -177,7 +179,7 @@ def fa2_forward(
     if not (q.shape == k.shape == v.shape):
         raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
 
-    b, h, s, d = q.shape
+    b, s, h, d = q.shape
     # Dense attention reads Q contiguously, so it is not subject to the
     # cache-line floor that `check_gathered_head_dim` imposes on the gathered
     # MoBA kernel. The only requirement here is that tl.dot can fill its
@@ -201,6 +203,7 @@ def fa2_forward(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         D=d,
+        H=h,
         CAUSAL=causal,
     )
     return out

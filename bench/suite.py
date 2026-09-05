@@ -171,7 +171,7 @@ def _blank_row(
     note: str,
 ) -> BenchRow:
     """Builds a row for a measurement that did not happen."""
-    batch, heads, seq_len, head_dim = shape
+    batch, seq_len, heads, head_dim = shape
     block_size, top_k = gate
     return BenchRow(
         backend=backend, batch=batch, heads=heads, seq_len=seq_len,
@@ -207,7 +207,7 @@ def run_suite(
     row is produced, rather than by rescanning results afterwards.
 
     Args:
-        shapes: List of (batch, heads, seq_len, head_dim).
+        shapes: List of (batch, seq_len, heads, head_dim).
         gates: List of (block_size, top_k).
         dtype: Compute dtype.
         memory_budget_mb: Configs estimated above this are skipped.
@@ -219,7 +219,7 @@ def run_suite(
     rows: list[BenchRow] = []
 
     for shape in shapes:
-        batch, heads, seq_len, head_dim = shape
+        batch, seq_len, heads, head_dim = shape
         for gate in gates:
             block_size, top_k = gate
             cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=dtype)

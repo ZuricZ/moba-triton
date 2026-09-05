@@ -16,16 +16,16 @@ H_Q = 8
 
 def run(b, s, h_kv):
     g = torch.Generator(device="cuda").manual_seed(0)
-    q = torch.randn(b, H_Q, s, D, generator=g, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn(b, h_kv, s, D, generator=g, device="cuda", dtype=torch.bfloat16)
-    v = torch.randn(b, h_kv, s, D, generator=g, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(b, s, H_Q, D, generator=g, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(b, s, h_kv, D, generator=g, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(b, s, h_kv, D, generator=g, device="cuda", dtype=torch.bfloat16)
     def t(kk, vv):
         i = build_csc_fused(q, kk, CFG)
         p = empty_partials(q.shape, i.max_slots, q.device, q.dtype)
         ms = triton.testing.do_bench(
             lambda: attend_partials(q, kk, vv, CFG, i, partials=p),
             warmup=50, rep=200, return_mode="median")
-        return ms, i.num_blocks * b * kk.shape[1]
+        return ms, i.num_blocks * b * kk.shape[2]   # token-major head axis
     narrow, gn = t(k, v)
     wide, gw = t(expand_kv(k, H_Q).contiguous(), expand_kv(v, H_Q).contiguous())
     print(f"  batch={b:>2}  grid {gn:>4} vs {gw:>4}   "

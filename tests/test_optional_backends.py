@@ -61,14 +61,14 @@ def test_flash_moba_reason_names_the_architecture_gap():
 
 @pytest.mark.parametrize("batch,heads,seq_len,dim", [(1, 4, 32, 16), (3, 2, 8, 4)])
 def test_varlen_roundtrip_is_exact(batch, heads, seq_len, dim):
-    x = torch.randn(batch, heads, seq_len, dim, device="cuda", dtype=torch.float64)
+    x = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.float64)
     assert torch.equal(from_varlen(to_varlen(x), batch, seq_len), x)
 
 
 def test_varlen_packing_puts_sequences_contiguously():
     """Sequence b must occupy rows [b*S, (b+1)*S) in the packed layout."""
     batch, heads, seq_len, dim = 3, 2, 4, 5
-    x = torch.zeros(batch, heads, seq_len, dim, device="cuda")
+    x = torch.zeros(batch, seq_len, heads, dim, device="cuda")
     for b in range(batch):
         x[b] = b + 1
     packed = to_varlen(x)
@@ -101,10 +101,14 @@ def test_available_reference_reduces_to_dense_causal():
     b, h, s, d = 1, 2, 256, 64
     g = torch.Generator(device="cuda").manual_seed(0)
     q, k, v = (
-        torch.randn(b, h, s, d, generator=g, device="cuda", dtype=torch.float64)
+        torch.randn(b, s, h, d, generator=g, device="cuda", dtype=torch.float64)
         for _ in range(3)
     )
-    dense = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # torch SDPA is head-major; convert in and back out so the comparison is
+    # against our own layout.
+    dense = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+    ).transpose(1, 2)
     cfg = MoBAConfig(block_size=32, top_k=s // 32, dtype=torch.float64)
 
     checked = 0

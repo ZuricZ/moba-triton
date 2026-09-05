@@ -32,7 +32,7 @@ def _load():
 
 
 class MoonshotBackend:
-    """MoonshotAI's naive MoBA, adapted from varlen to [B, H, S, D]."""
+    """MoonshotAI's naive MoBA, adapted from varlen to [B, S, H, D]."""
 
     name = "moonshot"
     vendored = True
@@ -60,7 +60,7 @@ class MoonshotBackend:
             raise RuntimeError(f"moonshot backend not available: {reason}")
 
         module = _load()
-        b, h, s, d = q.shape
+        b, s, h, d = q.shape        # token-major
         out = module.moba_attn_varlen_naive(
             to_varlen(q),
             to_varlen(k),

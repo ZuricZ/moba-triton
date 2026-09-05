@@ -4,7 +4,7 @@ Two problems this module solves.
 
 **Layout.** Every reference uses FlashAttention's `varlen` convention:
 q/k/v packed as [total_tokens, H, D] with a `cu_seqlens` offset tensor,
-rather than our [B, H, S, D]. For uniform sequence lengths the conversion is
+rather than our [B, S, H, D]. For uniform sequence lengths the conversion is
 a permute and a reshape.
 
 **Name collision.** `references/MoBA/moba/` is a package named `moba` -- the
@@ -73,20 +73,25 @@ def load_reference_module(alias: str, relative_path: str) -> ModuleType:
 
 
 def to_varlen(x: torch.Tensor) -> torch.Tensor:
-    """Converts [B, H, S, D] to the varlen packing [B*S, H, D].
+    """Converts [B, S, H, D] to the varlen packing [B*S, H, D].
+
+    A reshape, not a permute: token-major already puts the axes in this order,
+    so no data moves. Under head-major this was a permute and a full copy.
 
     Args:
-        x: Tensor shaped [B, H, S, D].
+        x: Tensor shaped [B, S, H, D].
 
     Returns:
-        Contiguous tensor shaped [B*S, H, D].
+        Tensor shaped [B*S, H, D], contiguous whenever `x` is.
     """
-    b, h, s, d = x.shape
-    return x.permute(0, 2, 1, 3).reshape(b * s, h, d).contiguous()
+    b, s, h, d = x.shape
+    return x.reshape(b * s, h, d)
 
 
 def from_varlen(x: torch.Tensor, batch: int, seq_len: int) -> torch.Tensor:
-    """Converts varlen packing [B*S, H, D] back to [B, H, S, D].
+    """Converts varlen packing [B*S, H, D] back to [B, S, H, D].
+
+    The inverse of `to_varlen`, and equally free.
 
     Args:
         x: Tensor shaped [B*S, H, D].
@@ -94,10 +99,10 @@ def from_varlen(x: torch.Tensor, batch: int, seq_len: int) -> torch.Tensor:
         seq_len: Sequence length (uniform across the batch).
 
     Returns:
-        Contiguous tensor shaped [B, H, S, D].
+        Tensor shaped [B, S, H, D].
     """
     _, h, d = x.shape
-    return x.view(batch, seq_len, h, d).permute(0, 2, 1, 3).contiguous()
+    return x.reshape(batch, seq_len, h, d)
 
 
 def cu_seqlens_for(batch: int, seq_len: int, device: torch.device) -> torch.Tensor:

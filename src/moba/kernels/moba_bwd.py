@@ -97,7 +97,7 @@ _BWD_GROUP_CACHE: dict[tuple, int] = {}
 
 @triton.jit
 def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
-                         BLOCK_M: tl.constexpr):
+                         BLOCK_M: tl.constexpr, H_Q: tl.constexpr):
     """Computes `delta_i = rowsum(dO_i * O_i)` for every query.
 
     This is the term the softmax Jacobian contributes: `dS = P * (dP - delta)`,
@@ -113,7 +113,9 @@ def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     live = offs_m < S
     offs_d = tl.arange(0, D)
-    base = pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :]
+    # O and DO are the caller's, so token-major; Delta below is ours.
+    base = ((pid_bh // H_Q) * S * H_Q * D + (pid_bh % H_Q) * D
+            + offs_m[:, None] * (H_Q * D) + offs_d[None, :])
 
     o = tl.load(O + base, mask=live[:, None], other=0.0)
     do = tl.load(DO + base, mask=live[:, None], other=0.0)
@@ -166,11 +168,12 @@ def _moba_bwd(
         # stride; the sequence enters only through the key range below.
         q_base = 0
         q_lin = 0
-        q_span = TOKENS
+        part_span = TOKENS
     else:
+        # Unchanged by the move: H_Q*S*D and S*H_Q*D are the same number.
         q_base = pid_b * H_Q * S * D
         q_lin = pid_b * H_Q * S
-        q_span = S
+        part_span = S
 
     tiles: tl.constexpr = BLOCK_SIZE // KEY_TILE
     # Longest-first dispatch is preserved: the block index still comes from
@@ -187,18 +190,18 @@ def _moba_bwd(
         eos = tl.load(CuSeqlens + pid_b + 1)
         lo_k = bos + blk * BLOCK_SIZE
         hi_k = tl.minimum(lo_k + BLOCK_SIZE, eos)
-        kv_base = (pid_bh % H_KV) * TOKENS * D
+        kv_base = (pid_bh % H_KV) * D
     else:
         lo_k = blk * BLOCK_SIZE
         hi_k = S
-        kv_base = pid_bh * S * D
+        kv_base = pid_b * S * H_KV * D + (pid_bh % H_KV) * D
 
     key_pos = lo_k + sub * KEY_TILE + tl.arange(0, KEY_TILE)
     key_ok = key_pos < hi_k
 
-    k = tl.load(K + kv_base + key_pos[:, None] * D + offs_d[None, :],
+    k = tl.load(K + kv_base + key_pos[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=key_ok[:, None], other=0.0)
-    v = tl.load(V + kv_base + key_pos[:, None] * D + offs_d[None, :],
+    v = tl.load(V + kv_base + key_pos[:, None] * (H_KV * D) + offs_d[None, :],
                 mask=key_ok[:, None], other=0.0)
 
     # Owned outright by this program, so they live in registers for the whole
@@ -220,15 +223,18 @@ def _moba_bwd(
         slots = tl.load(SlotIdx + pid_bh * T + lo + offs, mask=live, other=0)
 
         # `rows` stays a raw position so the causal compare below is untouched;
-        # the head rides alongside it. Same trade as the forward.
-        q_row = heads * q_span + rows
+        # the head rides alongside it. Same trade as the forward -- and the
+        # same split: `part_row` names *which query*, addressing our head-major
+        # Lse, Delta and dQ partials; the loads name *where it lives*, in the
+        # caller's token-major tensors.
+        part_row = heads * part_span + rows
 
-        q = tl.load(Q + q_base + q_row[:, None] * D + offs_d[None, :],
-                    mask=live[:, None], other=0.0)
-        do = tl.load(DO + q_base + q_row[:, None] * D + offs_d[None, :],
-                     mask=live[:, None], other=0.0)
-        lse = tl.load(Lse + q_lin + q_row, mask=live, other=0.0)
-        delta = tl.load(Delta + q_lin + q_row, mask=live, other=0.0)
+        q_addr = (q_base + rows[:, None] * (H_Q * D)
+                  + heads[:, None] * D + offs_d[None, :])
+        q = tl.load(Q + q_addr, mask=live[:, None], other=0.0)
+        do = tl.load(DO + q_addr, mask=live[:, None], other=0.0)
+        lse = tl.load(Lse + q_lin + part_row, mask=live, other=0.0)
+        delta = tl.load(Delta + q_lin + part_row, mask=live, other=0.0)
 
         # Same additive construction as the forward, for the same reason: the
         # masks do not depend on the matmul, so they can issue while it is in
@@ -275,7 +281,7 @@ def _moba_bwd(
         # Restored by widening the slot axis to give each sub-tile its own
         # address. `reduce_dq` sums over all of them.
         dq = tl.dot(ds.to(k.dtype), k) * softmax_scale
-        dst = q_row * DQ_SLOTS + slots * (BLOCK_SIZE // KEY_TILE) + sub
+        dst = part_row * DQ_SLOTS + slots * (BLOCK_SIZE // KEY_TILE) + sub
         tl.store(
             DQPart + q_lin * DQ_SLOTS * D + dst[:, None] * D
             + offs_d[None, :],
@@ -287,7 +293,7 @@ def _moba_bwd(
     # `n_seq * H_KV` while the tensor holds one pinned batch, so the program id
     # is not a stride into it. Getting this wrong writes past the end of dK and
     # dV -- which does not fault, it corrupts whatever the allocator put next.
-    kv_out = kv_base + key_pos[:, None] * D + offs_d[None, :]
+    kv_out = kv_base + key_pos[:, None] * (H_KV * D) + offs_d[None, :]
     tl.store(DK + kv_out, dk.to(DK.dtype.element_ty), mask=key_ok[:, None])
     tl.store(DV + kv_out, dv.to(DV.dtype.element_ty), mask=key_ok[:, None])
 
@@ -297,7 +303,7 @@ def _moba_dq_reduce(
     DQPart, PartM, DQ,
     S,
     K_SLOTS: tl.constexpr, TILES: tl.constexpr, D: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M: tl.constexpr, H_Q: tl.constexpr,
 ):
     """Sums each query's per-slot `dQ` partials.
 
@@ -336,7 +342,10 @@ def _moba_dq_reduce(
                            mask=live[:, None], other=0.0)
             acc += tl.where(written[:, None], part.to(tl.float32), 0.0)
 
-    tl.store(DQ + pid_bh * S * D + offs_m[:, None] * D + offs_d[None, :],
+    # DQPart and PartM above are ours and head-major; DQ goes back to the
+    # caller, so it is token-major.
+    tl.store(DQ + (pid_bh // H_Q) * S * H_Q * D + (pid_bh % H_Q) * D
+             + offs_m[:, None] * (H_Q * D) + offs_d[None, :],
              acc.to(DQ.dtype.element_ty), mask=live[:, None])
 
 
@@ -344,17 +353,17 @@ def compute_delta(out: torch.Tensor, dout: torch.Tensor) -> torch.Tensor:
     """Computes the softmax-Jacobian term `rowsum(dO * O)` per query.
 
     Args:
-        out: Forward output shaped [B, H, S, D].
+        out: Forward output shaped [B, S, H, D].
         dout: Output gradient, same shape.
 
     Returns:
         Delta shaped [B, H, S], float32.
     """
-    b, h, s, d = out.shape
+    b, s, h, d = out.shape            # token-major
     delta = torch.empty((b, h, s), device=out.device, dtype=torch.float32)
     _moba_bwd_preprocess[(triton.cdiv(s, BWD_BLOCK_M), b * h)](
         out.contiguous(), dout.contiguous(), delta, s,
-        D=d, BLOCK_M=BWD_BLOCK_M,
+        D=d, BLOCK_M=BWD_BLOCK_M, H_Q=h,
     )
     return delta
 
@@ -371,16 +380,17 @@ def reduce_dq(
         out_dtype: Dtype of the returned tensor.
 
     Returns:
-        Query gradient shaped [B, H, S, D].
+        Query gradient shaped [B, S, H, D].
     """
     b, h, s, wide, d = dq_part.shape
     slots = part_m.shape[-1]
-    dq = torch.empty((b, h, s, d), device=dq_part.device, dtype=out_dtype)
+    # `dq_part` is ours and head-major; `dq` goes to the caller token-major.
+    dq = torch.empty((b, s, h, d), device=dq_part.device, dtype=out_dtype)
     block_m, warps = choose_combine_tile(d)
 
     _moba_dq_reduce[(triton.cdiv(s, block_m), b * h)](
         dq_part, part_m, dq, s,
-        K_SLOTS=slots, TILES=wide // slots, D=d, BLOCK_M=block_m,
+        K_SLOTS=slots, TILES=wide // slots, D=d, BLOCK_M=block_m, H_Q=h,
         num_warps=warps,
     )
     return dq
@@ -401,9 +411,9 @@ def moba_backward(
     """Computes gradients for the MoBA forward pass.
 
     Args:
-        dout: Gradient of the loss w.r.t. the forward output, [B, H, S, D].
-        q: Queries as passed to the forward, [B, H, S, D].
-        k: Keys, [B, H_kv, S, D], where `H_kv` divides `H`.
+        dout: Gradient of the loss w.r.t. the forward output, [B, S, H, D].
+        q: Queries as passed to the forward, [B, S, H, D].
+        k: Keys, [B, S, H_kv, D], where `H_kv` divides `H`.
         v: Values, same shape as `k`.
         out: Forward output, shaped like `q`.
         lse: Per-query global log-sum-exp in log2 units, [B, H, S], as
@@ -424,8 +434,8 @@ def moba_backward(
     Raises:
         ValueError: If no chunk height compiles within shared memory.
     """
-    b, h_q, s, d = q.shape
-    h_kv = k.shape[1]
+    b, s, h_q, d = q.shape
+    h_kv = k.shape[2]
     head_group_size(h_q, h_kv)
     slots = index.max_slots
     varlen = index.cu_seqlens is not None

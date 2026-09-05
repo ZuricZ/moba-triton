@@ -42,8 +42,8 @@ class NaiveTorchBackend:
         completely different fixes.
 
         Args:
-            q: Queries shaped [B, H, S, D].
-            k: Keys shaped [B, H, S, D].
+            q: Queries shaped [B, S, H, D].
+            k: Keys shaped [B, S, H, D].
             cfg: Configuration.
 
         Returns:

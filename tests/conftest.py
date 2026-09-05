@@ -25,7 +25,10 @@ import torch
 # full matrix -- see test_query_chunking_is_bitwise_identical_at_realistic_sizes.
 QUERY_CHUNK = 256
 
-# (batch, heads, seq_len, head_dim) -- fast tier, runs by default.
+# (batch, seq_len, heads, head_dim) -- fast tier, runs by default.
+#
+# Token-major, matching FlashAttention-2, NSA and FlashMoBA. The axis order
+# changed on 2026-09-03; see docs/superpowers/plans/2026-09-03-token-major-layout.md.
 #
 # head_dim 128 is primary: it is what both reference implementations use
 # (FlashMoBA benchmarks and MoonshotAI's llama example), and it is the size at
@@ -35,19 +38,19 @@ QUERY_CHUNK = 256
 # gate is sparse: at seq_len 512 with block_size 128 there are four blocks, so
 # top_k 8 selects all of them. See `gate_is_sparse`.
 SHAPE_SWEEP = [
-    (1, 4, 1024, 128),
-    (2, 4, 1024, 128),
-    (1, 4, 2048, 128),
-    (1, 4, 2048, 64),
+    (1, 1024, 4, 128),
+    (2, 1024, 4, 128),
+    (1, 2048, 4, 128),
+    (1, 2048, 4, 64),
 ]
 
 # Long context. Slower, and the regime the project actually targets. seq_len
 # 8192 exists so block_size 128 with top_k 12 is covered somewhere at all: it
 # needs 48 blocks to clear the sparsity floor, hence seq_len >= 6144.
 LONG_SHAPE_SWEEP = [
-    (1, 4, 4096, 128),
-    (1, 4, 4096, 64),
-    (1, 2, 8192, 128),
+    (1, 4096, 4, 128),
+    (1, 4096, 4, 64),
+    (1, 8192, 2, 128),
 ]
 
 # (block_size, top_k).
@@ -81,7 +84,7 @@ def make_qkv(shape, dtype=torch.float64, seed=0, device="cuda"):
     """Builds deterministic q, k, v tensors.
 
     Args:
-        shape: Tuple of (batch, heads, seq_len, head_dim).
+        shape: Tuple of (batch, seq_len, heads, head_dim).
         dtype: Tensor dtype.
         seed: RNG seed, so a failure reproduces exactly.
         device: Torch device string.
@@ -96,10 +99,10 @@ def make_qkv(shape, dtype=torch.float64, seed=0, device="cuda"):
 
 
 def case_id(shape, gate):
-    """Builds a readable pytest id, e.g. b1h4s512d64-blk16-top2."""
-    b, h, s, d = shape
+    """Builds a readable pytest id, e.g. b1s1024h4d128-blk128-top8."""
+    b, s, h, d = shape
     bk, tk = gate
-    return f"b{b}h{h}s{s}d{d}-blk{bk}-top{tk}"
+    return f"b{b}s{s}h{h}d{d}-blk{bk}-top{tk}"
 
 
 # A gate is only meaningfully sparse when there are several times more blocks
@@ -119,13 +122,16 @@ def gate_is_sparse(shape, gate):
     """Reports whether a (shape, gate) pair is sparse enough to be worth running.
 
     Args:
-        shape: Tuple of (batch, heads, seq_len, head_dim).
+        shape: Tuple of (batch, seq_len, heads, head_dim).
         gate: Tuple of (block_size, top_k).
 
     Returns:
         True if the configuration selects a small enough fraction of blocks.
     """
-    seq_len = shape[2]
+    # shape[1], not shape[2]: token-major puts the sequence length second.
+    # Reading the old position would silently return the head count and
+    # declare every configuration sparse rather than raising.
+    seq_len = shape[1]
     block_size, top_k = gate
     num_blocks = math.ceil(seq_len / block_size)
     return num_blocks >= MIN_BLOCKS_PER_SELECTION * top_k

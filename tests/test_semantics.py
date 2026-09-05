@@ -21,10 +21,14 @@ from moba.ref.naive import (
 DEVICE = "cuda"
 
 
-def make_qkv(b, h, s, d, dtype=torch.float64, seed=0):
-    """Deterministic q, k, v so a failure reproduces exactly."""
+def make_qkv(b, s, h, d, dtype=torch.float64, seed=0):
+    """Deterministic q, k, v so a failure reproduces exactly.
+
+    Token-major, so the argument order is (batch, seq_len, heads, head_dim) --
+    the same order the tensor has, which is the point of the layout.
+    """
     g = torch.Generator(device=DEVICE).manual_seed(seed)
-    shape = (b, h, s, d)
+    shape = (b, s, h, d)
     return tuple(
         torch.randn(shape, generator=g, device=DEVICE, dtype=dtype) for _ in range(3)
     )
@@ -37,12 +41,14 @@ def make_qkv(b, h, s, d, dtype=torch.float64, seed=0):
 
 @pytest.mark.parametrize("seq_len,block_size", [(128, 32), (129, 32), (64, 64)])
 def test_block_representatives_are_block_means(seq_len, block_size):
-    _, k, _ = make_qkv(1, 2, seq_len, 16)
+    _, k, _ = make_qkv(1, seq_len, 2, 16)
     cfg = MoBAConfig(block_size=block_size, top_k=1)
     kbar = block_representatives(k, cfg)
 
     assert kbar.shape == (1, 2, cfg.num_blocks(seq_len), 16)
-    torch.testing.assert_close(kbar[:, :, 0], k[:, :, :block_size].mean(dim=2))
+    # kbar stays head-major; k is token-major, so its blocks live on axis 1.
+    torch.testing.assert_close(kbar[:, :, 0],
+                               k[:, :block_size].mean(dim=1))
 
 
 def test_short_final_block_is_not_diluted_by_padding():
@@ -52,12 +58,12 @@ def test_short_final_block_is_not_diluted_by_padding():
     divide that key by 32 instead of 1. This is the classic off-by-padding
     bug, and it is invisible whenever seq_len happens to divide evenly.
     """
-    _, k, _ = make_qkv(1, 1, 129, 16)
+    _, k, _ = make_qkv(1, 129, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
     kbar = block_representatives(k, cfg)
 
     assert cfg.num_blocks(129) == 5
-    torch.testing.assert_close(kbar[:, :, -1], k[:, :, 128:].mean(dim=2))
+    torch.testing.assert_close(kbar[:, :, -1], k[:, 128:].mean(dim=1))
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +72,7 @@ def test_short_final_block_is_not_diluted_by_padding():
 
 
 def test_current_block_always_selected():
-    q, k, _ = make_qkv(1, 1, 128, 16)
+    q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
@@ -75,7 +81,7 @@ def test_current_block_always_selected():
 
 
 def test_future_blocks_never_selected():
-    q, k, _ = make_qkv(1, 1, 128, 16)
+    q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=8)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
@@ -87,7 +93,7 @@ def test_future_blocks_never_selected():
 
 def test_selection_count_respects_top_k():
     """Under the default convention top_k counts the query's own block."""
-    q, k, _ = make_qkv(1, 1, 256, 16)
+    q, k, _ = make_qkv(1, 256, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=2)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
@@ -104,7 +110,7 @@ def test_top_k_convention_flag_changes_the_budget():
     it is the more natural definition of "how many blocks of context do I get
     to look at", and because a future reference may use it.
     """
-    q, k, _ = make_qkv(1, 1, 256, 16)
+    q, k, _ = make_qkv(1, 256, 1, 16)
 
     inclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=True)
     exclusive = MoBAConfig(block_size=32, top_k=3, top_k_includes_current=False)
@@ -118,7 +124,7 @@ def test_top_k_convention_flag_changes_the_budget():
 
 def test_top_k_of_one_selects_only_the_current_block():
     """Edge case of the inclusive convention: the budget is entirely spent."""
-    q, k, _ = make_qkv(1, 1, 128, 16)
+    q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=1)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
@@ -129,7 +135,7 @@ def test_top_k_of_one_selects_only_the_current_block():
 
 def test_early_queries_select_all_available_candidates():
     """A query in block 1 has only one past block; top_k=4 cannot invent more."""
-    q, k, _ = make_qkv(1, 1, 128, 16)
+    q, k, _ = make_qkv(1, 128, 1, 16)
     cfg = MoBAConfig(block_size=32, top_k=4)
     sel = select_blocks(q, block_representatives(k, cfg), cfg)
 
@@ -141,8 +147,8 @@ def test_ties_resolve_to_lower_block_index():
     """Identical keys everywhere make every gate score equal."""
     b, h, s, d = 1, 1, 128, 16
     g = torch.Generator(device=DEVICE).manual_seed(0)
-    q = torch.randn(b, h, s, d, generator=g, device=DEVICE, dtype=torch.float64)
-    k = torch.ones(b, h, s, d, device=DEVICE, dtype=torch.float64)
+    q = torch.randn(b, s, h, d, generator=g, device=DEVICE, dtype=torch.float64)
+    k = torch.ones(b, s, h, d, device=DEVICE, dtype=torch.float64)
     # top_k=2 under the inclusive convention buys exactly one past block, so
     # the tie-break decides which one.
     cfg = MoBAConfig(block_size=32, top_k=2)
@@ -169,32 +175,40 @@ def test_reduces_to_dense_causal_attention_when_top_k_covers_all_blocks():
     at once, against an independent implementation (torch SDPA), with no
     tolerance argument available to hide behind.
     """
-    b, h, s, d = 1, 2, 128, 32
-    q, k, v = make_qkv(b, h, s, d)
+    b, s, h, d = 1, 128, 2, 32
+    q, k, v = make_qkv(b, s, h, d)
     cfg = MoBAConfig(block_size=16, top_k=s // 16)
 
     got = moba_attention_naive(q, k, v, cfg)
-    want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # torch SDPA is head-major; we are not. Transposing here rather than
+    # comparing in SDPA's layout keeps the assertion about our output.
+    want = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+    ).transpose(1, 2)
 
     torch.testing.assert_close(got, want, rtol=1e-10, atol=1e-10)
 
 
 def test_single_block_equals_plain_causal_attention():
     """With one block total, there is nothing to select; only causality acts."""
-    b, h, s, d = 1, 1, 32, 16
-    q, k, v = make_qkv(b, h, s, d)
+    b, s, h, d = 1, 32, 1, 16
+    q, k, v = make_qkv(b, s, h, d)
     cfg = MoBAConfig(block_size=32, top_k=1)
 
     got = moba_attention_naive(q, k, v, cfg)
-    want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # torch SDPA is head-major; we are not. Transposing here rather than
+    # comparing in SDPA's layout keeps the assertion about our output.
+    want = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+    ).transpose(1, 2)
 
     torch.testing.assert_close(got, want, rtol=1e-10, atol=1e-10)
 
 
 def test_first_query_attends_only_to_itself():
     """Position 0 sees exactly one key, so softmax is degenerate and out == v[0]."""
-    b, h, s, d = 1, 1, 64, 16
-    q, k, v = make_qkv(b, h, s, d)
+    b, s, h, d = 1, 64, 1, 16
+    q, k, v = make_qkv(b, s, h, d)
     cfg = MoBAConfig(block_size=16, top_k=2)
 
     got = moba_attention_naive(q, k, v, cfg)
@@ -207,13 +221,14 @@ def test_output_rows_are_convex_combinations_of_values():
 
     This catches sign errors and mask leaks that a shape check would miss.
     """
-    b, h, s, d = 1, 1, 96, 8
-    q, k, v = make_qkv(b, h, s, d)
+    b, s, h, d = 1, 96, 1, 8
+    q, k, v = make_qkv(b, s, h, d)
     cfg = MoBAConfig(block_size=16, top_k=2)
 
     out = moba_attention_naive(q, k, v, cfg)
-    lo = v.amin(dim=2, keepdim=True)
-    hi = v.amax(dim=2, keepdim=True)
+    # Token-major: the key axis the output mixes over is 1, not 2.
+    lo = v.amin(dim=1, keepdim=True)
+    hi = v.amax(dim=1, keepdim=True)
     assert (out >= lo - 1e-12).all() and (out <= hi + 1e-12).all()
 
 
@@ -228,7 +243,7 @@ def test_query_chunking_is_bitwise_identical_at_realistic_sizes(chunk):
     would for the full matrix, so the result is bitwise identical. `1000`
     exceeds S and checks the clamp.
     """
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=16, top_k=2)
 
     unchunked = moba_attention_naive(q, k, v, cfg)
@@ -254,7 +269,7 @@ def test_tiny_query_chunks_agree_to_floating_point_noise(chunk):
     so the residual is bounded by fp64 rounding, ~1e-14, which is twelve
     orders of magnitude below the bf16 tolerance budget of ~1e-2.
     """
-    q, k, v = make_qkv(1, 2, 128, 32)
+    q, k, v = make_qkv(1, 128, 2, 32)
     cfg = MoBAConfig(block_size=16, top_k=2)
 
     unchunked = moba_attention_naive(q, k, v, cfg)
@@ -266,7 +281,7 @@ def test_tiny_query_chunks_agree_to_floating_point_noise(chunk):
 
 def test_query_chunking_identical_in_low_precision():
     """Also holds in bf16, where any drift would be far easier to hide."""
-    q, k, v = make_qkv(1, 2, 256, 64)
+    q, k, v = make_qkv(1, 256, 2, 64)
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     qb, kb, vb = (t.to(torch.bfloat16) for t in (q, k, v))
 
@@ -283,7 +298,7 @@ def test_no_nan_when_only_one_key_is_visible():
     masked row, softmax would produce NaN, and it would silently poison
     everything downstream.
     """
-    q, k, v = make_qkv(1, 1, 64, 16)
+    q, k, v = make_qkv(1, 64, 1, 16)
     cfg = MoBAConfig(block_size=8, top_k=1)
     out = moba_attention_naive(q, k, v, cfg)
     assert torch.isfinite(out).all()

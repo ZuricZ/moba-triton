@@ -37,7 +37,7 @@ NOT_A_MOBA_BACKEND = {"sdpa_dense"}
 
 @pytest.mark.parametrize("shape,gate", sweep_cases())
 def test_backend_matches_oracle(shape, gate, device):
-    b, h, s, d = shape
+    b, s, h, d = shape
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
 
@@ -57,7 +57,7 @@ def test_backend_matches_oracle(shape, gate, device):
         out = backend.forward(ql, kl, vl, cfg)
 
         # Shape, dtype and finiteness are contract violations for anyone.
-        assert out.shape == (b, h, s, d), f"{backend.name} returned {out.shape}"
+        assert out.shape == (b, s, h, d), f"{backend.name} returned {out.shape}"
         assert out.dtype is cfg.dtype, f"{backend.name} returned {out.dtype}"
         assert torch.isfinite(out).all(), f"{backend.name} produced non-finite values"
 
@@ -83,7 +83,7 @@ def test_backend_routing_matches_oracle(shape, gate, device):
     depends on block_size and top_k rather than on sequence length, so long
     shapes add cost without adding coverage.
     """
-    _, _, s, _ = shape
+    _, s, _, _ = shape
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
 

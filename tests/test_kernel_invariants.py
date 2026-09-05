@@ -48,7 +48,7 @@ BLOCK_SIZE, TOP_K = GATE_SWEEP[0]
 # two to four times. seq_len 1024 at block_size 32 gives 32 blocks against a
 # budget of 4, comfortably clear of the sparsity floor `gate_is_sparse`
 # enforces, while `part_acc` costs only 2 MiB of the 4 GiB budget.
-SHAPE = (1, 2, 1024, 64)
+SHAPE = (1, 1024, 2, 64)
 
 CFG = MoBAConfig(block_size=BLOCK_SIZE, top_k=TOP_K, dtype=torch.bfloat16)
 
@@ -136,15 +136,16 @@ def test_unselected_blocks_do_not_affect_output(device):
 
     k2, v2 = k.clone(), v.clone()
     lo = blk * CFG.block_size
-    k2[0, 0, lo:lo + CFG.block_size] += PERTURBATION
-    v2[0, 0, lo:lo + CFG.block_size] += PERTURBATION
+    # Token-major: [batch, token, head, dim], so the head index comes last.
+    k2[0, lo:lo + CFG.block_size, 0] += PERTURBATION
+    v2[0, lo:lo + CFG.block_size, 0] += PERTURBATION
 
     after = moba_forward(q, k2, v2, CFG, index=index)
 
     # Only (batch 0, head 0) was perturbed, so only its rows may move -- and
     # within it, only the rows that selected `blk`.
     selected = mask[0, 0, :, blk]
-    moved = (before[0, 0] != after[0, 0]).any(dim=-1)
+    moved = (before[0, :, 0] != after[0, :, 0]).any(dim=-1)
 
     leaked = (moved & ~selected).nonzero().squeeze(1)
     assert leaked.numel() == 0, (
@@ -162,7 +163,7 @@ def test_unselected_blocks_do_not_affect_output(device):
         f"when it was perturbed, first at row {int(missing[0])} -- the gather "
         "is skipping rows inside its column"
     )
-    assert torch.equal(before[0, 1], after[0, 1]), (
+    assert torch.equal(before[0, :, 1], after[0, :, 1]), (
         "an unperturbed head changed -- the kernel is indexing across heads"
     )
 
@@ -184,18 +185,18 @@ def test_causality(device):
     index = build_csc(q, k, CFG)
     before = moba_forward(q, k, v, CFG, index=index)
 
-    cut = SHAPE[2] // 2
+    cut = SHAPE[1] // 2   # token-major: seq_len is axis 1
     assert cut % CFG.block_size == 0, "cut must be block-aligned"
 
     k2, v2 = k.clone(), v.clone()
-    k2[:, :, cut:] += PERTURBATION
-    v2[:, :, cut:] += PERTURBATION
+    k2[:, cut:] += PERTURBATION
+    v2[:, cut:] += PERTURBATION
     after = moba_forward(q, k2, v2, CFG, index=index)
 
-    assert torch.equal(before[:, :, :cut], after[:, :, :cut]), (
+    assert torch.equal(before[:, :cut], after[:, :cut]), (
         "future keys leaked into earlier output rows"
     )
-    assert not torch.equal(before[:, :, cut:], after[:, :, cut:]), (
+    assert not torch.equal(before[:, cut:], after[:, cut:]), (
         "nothing changed at all -- the perturbation never reached the kernel"
     )
 
