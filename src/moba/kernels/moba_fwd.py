@@ -44,6 +44,11 @@ from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
 from moba.varlen import validate_cu_seqlens
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
 def moba_fwd_kernel(
     Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
@@ -319,114 +324,9 @@ def moba_combine_kernel(
         tl.store(Lse + pid_bh * S + offs_m, m_g + tl.log2(l), mask=live)
 
 
-def combine_partials(
-    part_m: torch.Tensor,
-    part_l: torch.Tensor,
-    part_acc: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_m: int | None = None,
-    return_lse: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Merges per-slot partial softmaxes into the final attention output.
-
-    Args:
-        part_m: Per-slot maxima in log2 units, [B, H, S, K] fp32, as
-            `attend_partials` writes them.
-        part_l: Per-slot denominators, [B, H, S, K] fp32.
-        part_acc: Per-slot un-normalized outputs, [B, H, S, K, D] fp32.
-        out_dtype: Dtype of the returned tensor.
-        block_m: Queries per program. Derived from the register budget when
-            omitted, which is what callers should do.
-        return_lse: Also return each query's global log-sum-exp, in log2 units.
-            The backward pass needs it to recompute the softmax without having
-            stored it, and this is the only place a query's per-block maxima
-            are reduced together.
-
-    Returns:
-        Attention output shaped [B, S, H, D], or a tuple of it and the
-        log-sum-exp shaped [B, H, S] when `return_lse` is set.
-
-    Raises:
-        ValueError: If the three buffers disagree on shape, or if `block_m`
-            would spill registers.
-    """
-    b, h, s, slots = part_m.shape
-    d = part_acc.shape[-1]
-    if part_l.shape != part_m.shape:
-        raise ValueError(
-            f"shape mismatch: part_l {tuple(part_l.shape)} against part_m "
-            f"{tuple(part_m.shape)}"
-        )
-    if part_acc.shape != (b, h, s, slots, d):
-        raise ValueError(
-            f"shape mismatch: part_acc {tuple(part_acc.shape)} against "
-            f"{(b, h, s, slots, d)}"
-        )
-
-    part_m, part_l, part_acc = (
-        t.contiguous() for t in (part_m, part_l, part_acc)
-    )
-    out = torch.empty((b, s, h, d), device=part_m.device, dtype=out_dtype)
-    lse = (torch.empty((b, h, s), device=part_m.device, dtype=torch.float32)
-           if return_lse else out)
-    block_m, warps = choose_combine_tile(d, block_m)
-
-    moba_combine_kernel[(triton.cdiv(s, block_m), b * h)](
-        part_m, part_l, part_acc, out, lse, s,
-        K_SLOTS=slots, D=d, BLOCK_M=block_m, H_Q=h, WRITE_LSE=return_lse,
-        num_warps=warps,
-    )
-    return (out, lse) if return_lse else out
-
-
-def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-              cfg: MoBAConfig,
-              cu_seqlens: torch.Tensor | None = None,
-              max_seqlen: int | None = None) -> None:
-    """Checks shapes and configuration before any launch.
-
-    Args:
-        q: Queries shaped [B, S, H, D].
-        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`. Fewer
-            key/value heads than query heads is grouped-query attention.
-        v: Values, same shape as `k`.
-        cfg: Configuration.
-
-    Raises:
-        ValueError: If shapes disagree, if the head counts do not divide, or
-            if head_dim or block_size is unsupported.
-    """
-    if k.shape != v.shape:
-        raise ValueError(f"key/value shape mismatch: {k.shape}, {v.shape}")
-    # Token-major: batch, sequence and head_dim must agree; only the head
-    # count may differ, and only by a whole group.
-    if (q.shape[0] != k.shape[0] or q.shape[1] != k.shape[1]
-            or q.shape[3] != k.shape[3]):
-        raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
-
-    # Grouped-query attention is a shape property, not a configuration one:
-    # the group size is H_q // H_kv and there is nowhere else it could be
-    # stated. Raises if the counts do not divide.
-    head_group_size(q.shape[2], k.shape[2])
-
-    if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"packed input must have batch 1, got {q.shape[0]}; every "
-                f"sequence lives on the token axis and cu_seqlens says where"
-            )
-        if max_seqlen is None:
-            raise ValueError("max_seqlen is required when cu_seqlens is given")
-        validate_cu_seqlens(cu_seqlens, total_tokens=q.shape[1],
-                            max_seqlen=max_seqlen)
-    ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
-    if not ok:
-        raise ValueError(reason)
-    if cfg.block_size < TENSOR_CORE_TILE:
-        raise ValueError(
-            f"block_size {cfg.block_size} below the tl.dot minimum of "
-            f"{TENSOR_CORE_TILE}"
-        )
+# -------------------------------------------------------------------------
+# Launchers, in the order the forward runs them
+# -------------------------------------------------------------------------
 
 
 def empty_partials(
@@ -595,6 +495,121 @@ def attend_partials(
         f"{cfg.block_size} at head_dim {d}; every one exceeded this GPU's "
         f"shared memory"
     )
+
+
+def combine_partials(
+    part_m: torch.Tensor,
+    part_l: torch.Tensor,
+    part_acc: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_m: int | None = None,
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Merges per-slot partial softmaxes into the final attention output.
+
+    Args:
+        part_m: Per-slot maxima in log2 units, [B, H, S, K] fp32, as
+            `attend_partials` writes them.
+        part_l: Per-slot denominators, [B, H, S, K] fp32.
+        part_acc: Per-slot un-normalized outputs, [B, H, S, K, D] fp32.
+        out_dtype: Dtype of the returned tensor.
+        block_m: Queries per program. Derived from the register budget when
+            omitted, which is what callers should do.
+        return_lse: Also return each query's global log-sum-exp, in log2 units.
+            The backward pass needs it to recompute the softmax without having
+            stored it, and this is the only place a query's per-block maxima
+            are reduced together.
+
+    Returns:
+        Attention output shaped [B, S, H, D], or a tuple of it and the
+        log-sum-exp shaped [B, H, S] when `return_lse` is set.
+
+    Raises:
+        ValueError: If the three buffers disagree on shape, or if `block_m`
+            would spill registers.
+    """
+    b, h, s, slots = part_m.shape
+    d = part_acc.shape[-1]
+    if part_l.shape != part_m.shape:
+        raise ValueError(
+            f"shape mismatch: part_l {tuple(part_l.shape)} against part_m "
+            f"{tuple(part_m.shape)}"
+        )
+    if part_acc.shape != (b, h, s, slots, d):
+        raise ValueError(
+            f"shape mismatch: part_acc {tuple(part_acc.shape)} against "
+            f"{(b, h, s, slots, d)}"
+        )
+
+    part_m, part_l, part_acc = (
+        t.contiguous() for t in (part_m, part_l, part_acc)
+    )
+    out = torch.empty((b, s, h, d), device=part_m.device, dtype=out_dtype)
+    lse = (torch.empty((b, h, s), device=part_m.device, dtype=torch.float32)
+           if return_lse else out)
+    block_m, warps = choose_combine_tile(d, block_m)
+
+    moba_combine_kernel[(triton.cdiv(s, block_m), b * h)](
+        part_m, part_l, part_acc, out, lse, s,
+        K_SLOTS=slots, D=d, BLOCK_M=block_m, H_Q=h, WRITE_LSE=return_lse,
+        num_warps=warps,
+    )
+    return (out, lse) if return_lse else out
+
+
+# -------------------------------------------------------------------------
+# Public entry point
+# -------------------------------------------------------------------------
+
+
+def _validate(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+              cfg: MoBAConfig,
+              cu_seqlens: torch.Tensor | None = None,
+              max_seqlen: int | None = None) -> None:
+    """Checks shapes and configuration before any launch.
+
+    Args:
+        q: Queries shaped [B, S, H, D].
+        k: Keys shaped [B, S, H_kv, D], where `H_kv` divides `H`. Fewer
+            key/value heads than query heads is grouped-query attention.
+        v: Values, same shape as `k`.
+        cfg: Configuration.
+
+    Raises:
+        ValueError: If shapes disagree, if the head counts do not divide, or
+            if head_dim or block_size is unsupported.
+    """
+    if k.shape != v.shape:
+        raise ValueError(f"key/value shape mismatch: {k.shape}, {v.shape}")
+    # Token-major: batch, sequence and head_dim must agree; only the head
+    # count may differ, and only by a whole group.
+    if (q.shape[0] != k.shape[0] or q.shape[1] != k.shape[1]
+            or q.shape[3] != k.shape[3]):
+        raise ValueError(f"shape mismatch: {q.shape}, {k.shape}, {v.shape}")
+
+    # Grouped-query attention is a shape property, not a configuration one:
+    # the group size is H_q // H_kv and there is nowhere else it could be
+    # stated. Raises if the counts do not divide.
+    head_group_size(q.shape[2], k.shape[2])
+
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"packed input must have batch 1, got {q.shape[0]}; every "
+                f"sequence lives on the token axis and cu_seqlens says where"
+            )
+        if max_seqlen is None:
+            raise ValueError("max_seqlen is required when cu_seqlens is given")
+        validate_cu_seqlens(cu_seqlens, total_tokens=q.shape[1],
+                            max_seqlen=max_seqlen)
+    ok, reason = check_gathered_head_dim(q.shape[-1], q.element_size())
+    if not ok:
+        raise ValueError(reason)
+    if cfg.block_size < TENSOR_CORE_TILE:
+        raise ValueError(
+            f"block_size {cfg.block_size} below the tl.dot minimum of "
+            f"{TENSOR_CORE_TILE}"
+        )
 
 
 def moba_forward(

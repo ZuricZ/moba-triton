@@ -118,5 +118,5 @@ def moba_attention(
         receive gradients with their own `H_kv` heads, each already summed over
         the query heads that shared it.
     """
-    return MoBAAttentionFunction.apply(q, k, v, cfg, index, causal, cu_seqlens,
-                                max_seqlen)
+    return MoBAAttentionFunction.apply(
+        q, k, v, cfg, index, causal, cu_seqlens, max_seqlen)

@@ -40,6 +40,11 @@ import triton.language as tl
 from moba.device import TENSOR_CORE_TILE
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
 def fa2_fwd_kernel(
     Q, K, V, Out,
@@ -150,6 +155,11 @@ def fa2_fwd_kernel(
         acc.to(Out.dtype.element_ty),
         mask=offs_m[:, None] < S,
     )
+
+
+# -------------------------------------------------------------------------
+# Launcher
+# -------------------------------------------------------------------------
 
 
 def fa2_forward(

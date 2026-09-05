@@ -84,6 +84,11 @@ GATE_BLOCK_N = 32
 GATE_WARPS = 4
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
 def gate_kernel(
     Q, Kbar, BlockIdx, CuSeqlens,
@@ -315,6 +320,11 @@ def gate_kernel(
         # once, and the seeded current block is never a past candidate, so no
         # index ever appears twice.
         remaining = tl.where(remaining == nxt[:, None], N_BLOCKS, remaining)
+
+
+# -------------------------------------------------------------------------
+# Launcher
+# -------------------------------------------------------------------------
 
 
 def gate_select(

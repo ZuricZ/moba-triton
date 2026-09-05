@@ -17,6 +17,11 @@ from moba.config import MoBAConfig
 from moba.varlen import validate_cu_seqlens
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
 def pool_blocks_kernel(
     K, Kbar, CuSeqlens,
@@ -88,6 +93,11 @@ def pool_blocks_kernel(
 
     tl.store(Kbar + pid_bh * N_BLOCKS * D + blk * D + offs_d,
              mean.to(Kbar.dtype.element_ty))
+
+
+# -------------------------------------------------------------------------
+# Launcher
+# -------------------------------------------------------------------------
 
 
 def pool_blocks(

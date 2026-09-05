@@ -54,6 +54,11 @@ MAX_GROUP = 128
 PIPELINE_STAGES = 2
 
 
+# -------------------------------------------------------------------------
+# Attention chunk height
+# -------------------------------------------------------------------------
+
+
 def estimate_shared_memory(
     block_size: int, group: int, head_dim: int, itemsize: int
 ) -> int:
@@ -223,6 +228,11 @@ MAX_COMBINE_WARPS = 8
 MAX_COMBINE_TILE_ELEMENTS = (
     WARP_SIZE * COMBINE_ELEMENTS_PER_THREAD * MAX_COMBINE_WARPS
 )
+
+
+# -------------------------------------------------------------------------
+# Combine tile and warp count
+# -------------------------------------------------------------------------
 
 
 def choose_combine_tile(head_dim: int, block_m: int | None = None) -> tuple[int, int]:

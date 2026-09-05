@@ -91,9 +91,14 @@ BWD_STAGES = 3
 _BWD_GROUP_CACHE: dict[tuple, int] = {}
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
 def moba_bwd_preprocess_kernel(O, DO, Delta, S, D: tl.constexpr,
-                         BLOCK_M: tl.constexpr, H_Q: tl.constexpr):
+                               BLOCK_M: tl.constexpr, H_Q: tl.constexpr):
     """Computes `delta_i = rowsum(dO_i * O_i)` for every query.
 
     This is the term the softmax Jacobian contributes: `dS = P * (dP - delta)`,
@@ -345,6 +350,11 @@ def moba_dq_reduce_kernel(
              acc.to(DQ.dtype.element_ty), mask=live[:, None])
 
 
+# -------------------------------------------------------------------------
+# Launchers
+# -------------------------------------------------------------------------
+
+
 def compute_delta(out: torch.Tensor, dout: torch.Tensor) -> torch.Tensor:
     """Computes the softmax-Jacobian term `rowsum(dO * O)` per query.
 
@@ -390,6 +400,11 @@ def reduce_dq(
         num_warps=warps,
     )
     return dq
+
+
+# -------------------------------------------------------------------------
+# Public entry point
+# -------------------------------------------------------------------------
 
 
 def moba_backward(
