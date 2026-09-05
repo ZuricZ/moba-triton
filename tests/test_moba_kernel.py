@@ -26,13 +26,12 @@ from moba.kernels.moba_fwd import (
     _GROUP_CACHE,
     moba_fwd_kernel,
     moba_combine_kernel,
-    choose_combine_tile,
     attend_partials,
-    group_candidates,
     combine_partials,
     empty_partials,
     moba_forward,
 )
+from moba.kernels.tuning import choose_combine_tile, group_candidates
 from moba.ref.naive import moba_selection
 from moba.tolerance import (
     assert_selection_matches,

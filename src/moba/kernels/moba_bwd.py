@@ -43,11 +43,7 @@ from triton.runtime.errors import OutOfResources
 from moba.config import MoBAConfig
 from moba.heads import head_group_size
 from moba.kernels.routing import CSCIndex
-from moba.kernels.moba_fwd import (
-    LOG2_E,
-    choose_combine_tile,
-    group_candidates,
-)
+from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
 
 # Queries per program for the preprocess and dQ-reduce passes. Both are pure
 # streaming over [B, H, S, ...] with no matmul, so this only trades program

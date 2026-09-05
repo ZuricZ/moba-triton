@@ -36,7 +36,7 @@ import torch
 
 from moba.config import MoBAConfig
 from moba.device import multiprocessor_count
-from moba.kernels.moba_fwd import choose_group
+from moba.kernels.tuning import choose_group
 from moba.ref.naive import moba_selection
 
 # Resident programs per SM. Occupancy is configuration-dependent; 2 is what
