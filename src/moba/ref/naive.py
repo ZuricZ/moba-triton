@@ -167,7 +167,7 @@ def moba_selection(
         sequence's block count -- a column `j` means "block j of my own
         sequence". A global numbering would need a mask `total_blocks` wide,
         almost entirely false, growing with the batch for no information.
-        `moba.kernels.index.csc_to_mask` reproduces this convention.
+        `moba.kernels.routing.csc_to_mask` reproduces this convention.
 
     Raises:
         ValueError: If `cu_seqlens` is given and the batch axis is not 1.

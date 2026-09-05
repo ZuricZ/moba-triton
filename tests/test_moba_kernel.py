@@ -19,8 +19,7 @@ import triton
 from conftest import GATE_SWEEP, QUERY_CHUNK, make_qkv, sweep_cases
 from moba.config import MoBAConfig
 from moba.device import shared_memory_budget
-from moba.kernels.index import build_csc, csc_to_mask
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import build_csc, csc_to_mask, build_csc_fused
 from triton.runtime.errors import OutOfResources
 
 from moba.kernels.moba_fwd import (

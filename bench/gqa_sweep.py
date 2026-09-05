@@ -22,7 +22,7 @@ import triton
 
 from moba.config import MoBAConfig
 from moba.heads import expand_kv
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import build_csc_fused
 from moba.kernels.moba_fwd import (
     attend_partials,
     combine_partials,

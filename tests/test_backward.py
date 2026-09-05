@@ -18,8 +18,7 @@ import torch
 from conftest import GATE_SWEEP, make_qkv
 from moba.config import MoBAConfig
 from moba.kernels.autograd import moba_attention
-from moba.kernels.index import csc_to_mask
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import csc_to_mask, build_csc_fused
 from moba.ref.naive import moba_attention_naive
 from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
 
@@ -119,7 +118,7 @@ def test_rebuilding_the_index_changes_gradients_only_by_summation_order(
     Worth pinning down because it is easy to expect bitwise equality here and
     be alarmed when it is absent. `build_csc_fused` lets queries claim their
     position within a column with an atomic cursor, so a column's order varies
-    run to run -- documented in `moba.kernels.index_fused`.
+    run to run -- documented in `moba.kernels.routing`.
 
     The forward is untouched by that: `part_acc` is addressed by (query, slot),
     so permuting a column moves no value. `dk` and `dv` are sums *down* the

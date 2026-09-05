@@ -32,7 +32,7 @@ import torch
 
 from conftest import GATE_SWEEP, gate_is_sparse, make_qkv
 from moba.config import MoBAConfig
-from moba.kernels.index import build_csc
+from moba.kernels.routing import build_csc
 from moba.kernels.moba_fwd import moba_forward
 from moba.ref.naive import moba_selection
 

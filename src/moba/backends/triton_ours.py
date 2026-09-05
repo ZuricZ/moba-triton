@@ -18,7 +18,7 @@ import torch
 from moba.backends.base import register
 from moba.config import MoBAConfig
 from moba.device import MIN_CAPABILITY, TENSOR_CORE_TILE, supports_dtype
-from moba.kernels.index import build_csc, csc_to_mask
+from moba.kernels.routing import build_csc, csc_to_mask
 from moba.kernels.moba_fwd import moba_forward
 
 # Dtypes with a tensor-core `tl.dot` path on Ampere. `supports_dtype` is the

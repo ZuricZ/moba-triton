@@ -45,9 +45,8 @@ from moba.device import (
     shared_memory_budget,
 )
 from moba.heads import head_group_size
-from moba.kernels.index import CSCIndex
+from moba.kernels.routing import CSCIndex, build_csc_fused
 from moba.packing import validate_cu_seqlens
-from moba.kernels.index_fused import build_csc_fused
 
 
 @triton.jit

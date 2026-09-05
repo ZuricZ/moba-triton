@@ -18,8 +18,7 @@ import torch
 
 from moba.config import MoBAConfig
 from moba.heads import expand_kv
-from moba.kernels.index import csc_to_mask
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import csc_to_mask, build_csc_fused
 from moba.kernels.moba_fwd import moba_forward
 from moba.ref.naive import moba_attention_naive
 from moba.tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error

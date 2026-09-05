@@ -42,7 +42,7 @@ from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
 from moba.heads import head_group_size
-from moba.kernels.index import CSCIndex
+from moba.kernels.routing import CSCIndex
 from moba.kernels.moba_fwd import (
     LOG2_E,
     choose_combine_tile,
