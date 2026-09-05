@@ -575,7 +575,7 @@ def test_packed_dense_baseline_matches_running_each_sequence_alone(device):
     wastes the same padding we removed, so its cost would be charged to dense
     attention rather than to raggedness.
     """
-    from backends.base import get_backend
+    from implementations.base import get_backend
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     backend = get_backend("sdpa_dense")
@@ -604,7 +604,7 @@ def test_packed_dense_baseline_really_uses_the_variable_length_kernel(device):
     """
     from torch.nn.attention import SDPBackend, sdpa_kernel
 
-    from backends.base import get_backend
+    from implementations.base import get_backend
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     backend = get_backend("sdpa_dense")
@@ -620,7 +620,7 @@ def test_packed_dense_baseline_really_uses_the_variable_length_kernel(device):
 
 def test_packed_dense_baseline_rejects_a_real_batch_axis(device):
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
-    from backends.base import get_backend
+    from implementations.base import get_backend
 
     backend = get_backend("sdpa_dense")
     q = torch.randn(2, 16, 2, 64, device=device, dtype=torch.bfloat16)

@@ -18,7 +18,7 @@ point of the Backend protocol.
 import pytest
 import torch
 
-from backends import available_backends, skipped_backends
+from implementations import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from moba.naive import moba_selection
 from tolerance import (

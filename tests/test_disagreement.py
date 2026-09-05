@@ -16,7 +16,7 @@ import itertools
 import pytest
 import torch
 
-from backends import available_backends, skipped_backends
+from implementations import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from tolerance import max_abs_error
 

@@ -9,7 +9,7 @@ backend produces a results table that looks complete and is not.
 import pytest
 import torch
 
-from backends import (
+from implementations import (
     Backend,
     all_backends,
     available_backends,
@@ -109,8 +109,8 @@ def test_backends_preserve_shape_and_dtype():
 
 def test_duplicate_registration_is_rejected():
     """Silent overwrite would make results depend on import order."""
-    from backends.base import register
-    from backends.naive_torch import NaiveTorchBackend
+    from implementations.base import register
+    from implementations.naive_torch import NaiveTorchBackend
 
     with pytest.raises(ValueError, match="already registered"):
         register(NaiveTorchBackend())

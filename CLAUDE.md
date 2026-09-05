@@ -195,11 +195,11 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
   the API boundary are token-major `[B, S, H, D]`; buffers we allocate for
   ourselves stayed head-major.
 - **`src/moba` is the library and nothing else.** The comparison harness lives
-  in top-level `backends/` and the test tolerance policy in `tests/`; neither
-  ships. Nothing under `src/moba` may import either.
+  in top-level `implementations/` and the test tolerance policy in `tests/`;
+  neither ships. Nothing under `src/moba` may import either.
 - **Run benchmarks as modules**: `uv run python -m bench.stages`, not
   `python bench/stages.py`. A script gets only its own directory on the path,
-  so the direct form cannot find top-level `backends/`.
+  so the direct form cannot find top-level `implementations/`.
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.

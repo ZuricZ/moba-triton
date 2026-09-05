@@ -15,7 +15,7 @@ call. That check stays in `moba_forward`, where the shape exists.
 
 import torch
 
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 from moba.device import MIN_CAPABILITY, TENSOR_CORE_TILE, supports_dtype
 from moba.kernels.moba_fwd import moba_forward

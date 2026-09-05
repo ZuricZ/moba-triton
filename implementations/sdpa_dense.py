@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch.nested import nested_tensor_from_jagged
 
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 
 
