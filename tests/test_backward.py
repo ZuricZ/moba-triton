@@ -79,29 +79,34 @@ def test_every_key_receives_gradient_including_unselected_blocks(device, gate):
     and dV. Returning early would leave whatever the allocator handed back --
     plausible-looking numbers from a previous iteration, and silent.
 
-    Checked by comparing against the oracle, which has no such buffer, on a
-    configuration whose early blocks are genuinely unselected by anyone.
+    Runs with `always_select_current=False`, which is the only way to reach the
+    case at all: under the default every block is selected by the queries
+    inside it, so `col_nnz` is never zero and there is nothing to check. With
+    the own block optional, the last block goes unselected -- it is causally
+    visible only to its own queries, and they prefer earlier ones.
     """
     block_size, top_k = gate
-    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16,
+                     always_select_current=False)
     shape = (1, 1024, 2, 64)
     q, k, v = make_qkv(shape, dtype=torch.bfloat16, device=device)
     g = torch.randn(shape, device=device, dtype=torch.bfloat16) * 0.1
 
     index = build_csc_fused(q, k, cfg)
     empty = (index.col_nnz == 0)
-    if not bool(empty.any()):
-        pytest.skip("no unselected block at this configuration")
+    # Asserted, not skipped. This premise held silently for months while the
+    # body below was unreachable; a skip here would hide that again.
+    assert bool(empty.any()), "no unselected block, so nothing is being checked"
 
     _, _, dk, dv = _kernel_grads(q, k, v, cfg, index, g)
 
     for b, h, blk in empty.nonzero().tolist():
         lo = blk * cfg.block_size
         hi = min(lo + cfg.block_size, shape[1])
-        assert not bool(dk[b, h, lo:hi].any()), (
+        assert not bool(dk[b, lo:hi, h].any()), (
             f"unselected block {blk} has a nonzero dk"
         )
-        assert not bool(dv[b, h, lo:hi].any()), (
+        assert not bool(dv[b, lo:hi, h].any()), (
             f"unselected block {blk} has a nonzero dv"
         )
 

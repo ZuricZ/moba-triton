@@ -224,7 +224,7 @@ def test_gate_scores_each_query_head_against_its_shared_representatives(device):
     assert kbar.shape == (b, h_kv, cfg.num_blocks(s), d)
 
     narrow = gate_select(q, kbar, cfg)
-    wide = gate_select(q, expand_kv(kbar, h_q), cfg)
+    wide = gate_select(q, expand_kv(kbar, h_q, dim=1), cfg)
     assert narrow.shape == (b, h_q, s, cfg.top_k)
     assert torch.equal(narrow, wide)
 

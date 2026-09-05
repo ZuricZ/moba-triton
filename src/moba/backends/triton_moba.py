@@ -60,7 +60,7 @@ class TritonMoBABackend:
             raise RuntimeError(f"triton_moba backend not available: {reason}")
 
         module = load_reference_module(_MODULE_ALIAS, _RELATIVE_PATH)
-        b, h, s, d = q.shape
+        b, s, h, d = q.shape        # token-major
         out = module.moba_attn_varlen_triton(
             to_varlen(q),
             to_varlen(k),

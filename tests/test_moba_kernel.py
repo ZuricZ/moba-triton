@@ -341,7 +341,7 @@ def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    q, k, v = make_qkv((1, 1, 1024, head_dim), dtype=torch.bfloat16,
+    q, k, v = make_qkv((1, 1024, 1, head_dim), dtype=torch.bfloat16,
                        device=device)
     index = build_csc_fused(q, k, cfg)
     budget = shared_memory_budget(q.device)
@@ -368,8 +368,8 @@ def test_the_chunk_height_actually_used_fits_and_is_the_largest_that_does(
 
 def _compile_attn(q, k, v, cfg, index, group):
     """Launches the attention kernel at a given chunk height."""
-    b, h_q, s, d = q.shape
-    h_kv = k.shape[1]
+    b, s, h_q, d = q.shape
+    h_kv = k.shape[2]
     part_m, part_l, part_acc = empty_partials(
         q.shape, index.max_slots, q.device, q.dtype)
     part_m.fill_(float("-inf"))

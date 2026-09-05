@@ -43,7 +43,7 @@ from moba.ref.naive import moba_selection
 # the wrong column.
 BLOCK_SIZE, TOP_K = GATE_SWEEP[0]
 
-# (batch, heads, seq_len, head_dim). Deliberately smaller than SHAPE_SWEEP:
+# (batch, seq_len, heads, head_dim). Deliberately smaller than SHAPE_SWEEP:
 # these are property tests, not accuracy tests, and each one runs the kernel
 # two to four times. seq_len 1024 at block_size 32 gives 32 blocks against a
 # budget of 4, comfortably clear of the sparsity floor `gate_is_sparse`
