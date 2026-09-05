@@ -43,3 +43,7 @@ bench_out/
 *.csv
 *.png
 .vscode/
+
+# --- Toolchain installers pulled down during setup, never part of the repo ---
+*.deb
+*.run
