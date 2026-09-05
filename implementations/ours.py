@@ -33,6 +33,7 @@ class OursBackend:
 
     name = "ours"
     vendored = False
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         """Reports whether this backend can run `cfg` on this machine.

@@ -25,6 +25,7 @@ from implementations import ours as _ours  # noqa: F401
 # Vendored references. These register unconditionally and report their own
 # availability, so a missing checkout or an unbuilt extension shows up as a
 # skip-with-reason rather than an ImportError at package import time.
+from implementations import fa2_minimal as _fa2_minimal  # noqa: F401
 from implementations import flash_moba as _flash_moba  # noqa: F401
 from implementations import moonshot as _moonshot  # noqa: F401
 from implementations import triton_moba as _triton_moba  # noqa: F401

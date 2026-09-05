@@ -33,6 +33,7 @@ class TritonMoBABackend:
 
     name = "triton_moba"
     vendored = True
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

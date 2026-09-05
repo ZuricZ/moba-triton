@@ -34,6 +34,7 @@ class SdpaDenseBackend:
 
     name = "sdpa_dense"
     vendored = False
+    computes_moba = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

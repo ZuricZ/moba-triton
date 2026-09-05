@@ -37,6 +37,8 @@ import torch
 import triton
 import triton.language as tl
 
+from implementations.base import register
+from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE
 
 
@@ -217,3 +219,59 @@ def fa2_forward(
         CAUSAL=causal,
     )
     return out
+
+
+# -------------------------------------------------------------------------
+# Backend adapter
+# -------------------------------------------------------------------------
+
+
+# Dtypes with a tensor-core `tl.dot` path on Ampere. Same list as `ours.py`,
+# kept local rather than shared: it describes what this kernel can feed to
+# `tl.dot`, which is a property of the kernel, not of the registry.
+TENSOR_CORE_DTYPES = (torch.bfloat16, torch.float16)
+
+
+class Fa2MinimalBackend:
+    """Our from-scratch FlashAttention-2 -- the second dense baseline.
+
+    Registered so the suite reports it beside `sdpa_dense`. That pairing is
+    the point: torch's SDPA is a hand-tuned production kernel and this is a
+    teaching rebuild, so the gap between them is a measurement of our Triton
+    on a problem with no sparsity in it at all. It is the floor under every
+    MoBA number, and a MoBA speedup means less if the dense case is already
+    far behind.
+
+    Attends to everything, so `cfg`'s gate parameters are ignored by design,
+    exactly as `sdpa_dense` ignores them.
+
+    No grouped-query path: `fa2_forward` requires q, k and v to have the same
+    head count and raises otherwise. `is_available` cannot check that -- it
+    sees a config and a GPU, never a shape -- so the check stays where the
+    shape exists. Neither the suite nor the correctness tiers build unequal
+    head counts for the dense baselines, so this has no consumer today.
+    """
+
+    name = "fa2_minimal"
+    vendored = False
+    computes_moba = False
+
+    def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
+        if not torch.cuda.is_available():
+            return False, "no CUDA device"
+        if cfg.dtype not in TENSOR_CORE_DTYPES:
+            return False, f"{cfg.dtype} has no tensor-core tl.dot path here"
+        return True, ""
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cfg: MoBAConfig,
+    ) -> torch.Tensor:
+        """Computes dense causal attention, ignoring cfg's gate parameters."""
+        return fa2_forward(q, k, v, causal=True)
+
+
+register(Fa2MinimalBackend())
