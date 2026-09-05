@@ -99,7 +99,7 @@ def time_stages(
     caching allocator cannot reuse. It is an upper bound on the gate's cost.
 
     Args:
-        shape: (batch, heads, seq_len, head_dim).
+        shape: (batch, seq_len, heads, head_dim).
         gate: (block_size, top_k).
         dtype: Compute dtype for q, k, v.
         partials_dtype: Storage dtype for `part_acc`.

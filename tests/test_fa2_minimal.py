@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from moba.kernels.fa2_minimal import fa2_forward
 
-# (batch, heads, seq_len, head_dim). Includes a sequence length that is not a
+# (batch, seq_len, heads, head_dim). Includes a sequence length that is not a
 # multiple of any tile size, to exercise the masked tail.
 SHAPES = [
     (1, 128, 2, 64),

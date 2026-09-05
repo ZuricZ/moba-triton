@@ -118,7 +118,7 @@ def test_sparsity_actually_reduces_attended_keys(device):
     shrinking block_size sharply reduces the number of keys attended.
     """
     s = 1024
-    q, k, _ = make_qkv((1, 4, s, 64), dtype=torch.float64, device=device)
+    q, k, _ = make_qkv((1, s, 4, 64), dtype=torch.float64, device=device)
 
     previous = None
     for block_size in (128, 64, 32, 16):

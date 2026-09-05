@@ -235,7 +235,8 @@ def run_suite(
             for name, reason in skipped_backends(cfg):
                 rows.append(blank(name, "skipped", reason))
 
-            estimate = estimate_memory_mb(*shape, dtype, query_chunk=None)
+            estimate = estimate_memory_mb(
+                batch, heads, seq_len, head_dim, dtype, query_chunk=None)
             if estimate > memory_budget_mb:
                 for backend in available_backends(cfg):
                     rows.append(
