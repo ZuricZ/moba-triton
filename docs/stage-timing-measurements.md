@@ -248,7 +248,7 @@ performance criteria at S >= 16384 need rented hardware.
 
 No comparison against dense SDPA or the reference MoBA implementations — that
 is `bench/suite.py`'s job, and our kernel runs there automatically as the
-`moba_triton` backend.
+`ours` backend (registered as `moba_triton` when this was written).
 
 The query-major control kernel remains unbuilt, so the wall-clock crossover
 between the two loop orders is still inferred from the traffic model rather

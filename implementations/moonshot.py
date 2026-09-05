@@ -13,13 +13,13 @@ semantics against ours.
 
 import torch
 
-from backends.layout import (
+from implementations.layout import (
     cu_seqlens_for,
     from_varlen,
     load_reference_module,
     to_varlen,
 )
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 
 _MODULE_ALIAS = "_moonshot_moba_naive"
@@ -36,6 +36,7 @@ class MoonshotBackend:
 
     name = "moonshot"
     vendored = True
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

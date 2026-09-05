@@ -29,10 +29,22 @@ class Backend(Protocol):
             *reported*, never asserted -- per design decision D1, a reference
             disagreeing with us is a finding to investigate, not a test
             failure. Ours is the spec; theirs is evidence.
+        computes_moba: False for a dense roofline baseline that attends to
+            everything and therefore cannot be compared against the MoBA
+            oracle. Declared here rather than looked up by name: "is this a
+            MoBA implementation?" was previously answered by three separate
+            hardcoded name sets, in two test modules and the benchmark, and
+            adding a second dense baseline is what exposed that.
     """
 
     name: str
     vendored: bool = False
+    computes_moba: bool = True
+
+    # The defaults above are documentation, not behaviour. Backends satisfy
+    # this protocol structurally rather than by inheriting it, so a class that
+    # omits one of these attributes does not pick the default up -- it raises
+    # AttributeError at the first use. Every backend states both explicitly.
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         """Reports whether this backend can run `cfg` on this machine.

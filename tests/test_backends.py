@@ -18,7 +18,7 @@ point of the Backend protocol.
 import pytest
 import torch
 
-from backends import available_backends, skipped_backends
+from implementations import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from moba.naive import moba_selection
 from tolerance import (
@@ -32,7 +32,7 @@ from conftest import QUERY_CHUNK, make_qkv, sweep_cases
 # sdpa_dense is a roofline baseline, not a MoBA implementation. It attends to
 # everything by design, so comparing it against the oracle would fail for a
 # reason that is not a defect.
-NOT_A_MOBA_BACKEND = {"sdpa_dense"}
+
 
 
 @pytest.mark.parametrize("shape,gate", sweep_cases())
@@ -52,7 +52,7 @@ def test_backend_matches_oracle(shape, gate, device):
 
     checked = 0
     for backend in available_backends(cfg):
-        if backend.name in NOT_A_MOBA_BACKEND:
+        if not backend.computes_moba:
             continue
         out = backend.forward(ql, kl, vl, cfg)
 
@@ -96,7 +96,7 @@ def test_backend_routing_matches_oracle(shape, gate, device):
 
     exercised = 0
     for backend in available_backends(cfg):
-        if backend.name in NOT_A_MOBA_BACKEND:
+        if not backend.computes_moba:
             continue
         routing = getattr(backend, "selection", None)
         if routing is None:

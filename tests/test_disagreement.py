@@ -16,13 +16,13 @@ import itertools
 import pytest
 import torch
 
-from backends import available_backends, skipped_backends
+from implementations import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from tolerance import max_abs_error
 
 from conftest import make_qkv
 
-NOT_A_MOBA_BACKEND = {"sdpa_dense"}
+
 
 # Pairs known to agree after the Task 8 cross-check, with the threshold each
 # is expected to meet. Moonshot forces fp32 internally (moba_naive.py:84-86),
@@ -48,7 +48,7 @@ def disagreement_matrix(q, k, v, cfg):
     """
     outputs = {}
     for backend in available_backends(cfg):
-        if backend.name in NOT_A_MOBA_BACKEND:
+        if not backend.computes_moba:
             continue
         try:
             outputs[backend.name] = backend.forward(q, k, v, cfg)

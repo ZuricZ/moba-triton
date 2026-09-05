@@ -9,7 +9,7 @@ backend produces a results table that looks complete and is not.
 import pytest
 import torch
 
-from backends import (
+from implementations import (
     Backend,
     all_backends,
     available_backends,
@@ -109,8 +109,8 @@ def test_backends_preserve_shape_and_dtype():
 
 def test_duplicate_registration_is_rejected():
     """Silent overwrite would make results depend on import order."""
-    from backends.base import register
-    from backends.naive_torch import NaiveTorchBackend
+    from implementations.base import register
+    from implementations.naive_torch import NaiveTorchBackend
 
     with pytest.raises(ValueError, match="already registered"):
         register(NaiveTorchBackend())
@@ -122,7 +122,7 @@ def test_our_triton_backend_is_registered_and_available():
     `vendored` False is the load-bearing half: it is what makes Tier 2 assert
     on our accuracy instead of merely reporting it (D1).
     """
-    backend = get_backend("moba_triton")
+    backend = get_backend("ours")
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
 
     ok, reason = backend.is_available(cfg)
@@ -136,7 +136,7 @@ def test_our_triton_backend_exposes_routing():
     The output comparison would still run, but a routing bug and a precision
     bug look identical there and need completely different fixes.
     """
-    backend = get_backend("moba_triton")
+    backend = get_backend("ours")
     assert callable(getattr(backend, "selection", None))
 
 
@@ -147,7 +147,7 @@ def test_our_triton_backend_declines_dtypes_without_tensor_cores():
     to answer the narrower question of what its own kernel can multiply.
     """
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.float64)
-    ok, reason = get_backend("moba_triton").is_available(cfg)
+    ok, reason = get_backend("ours").is_available(cfg)
     assert not ok
     assert "tensor-core" in reason, reason
 
@@ -155,7 +155,7 @@ def test_our_triton_backend_declines_dtypes_without_tensor_cores():
 def test_our_triton_backend_declines_block_sizes_below_the_mma_atom():
     """A KV tile narrower than 16 cannot fill a tensor core at all."""
     cfg = MoBAConfig(block_size=8, top_k=2, dtype=torch.bfloat16)
-    ok, reason = get_backend("moba_triton").is_available(cfg)
+    ok, reason = get_backend("ours").is_available(cfg)
     assert not ok
     assert "tl.dot" in reason, reason
 
@@ -176,6 +176,6 @@ def test_our_triton_backend_routing_matches_the_oracle():
         for _ in range(2)
     )
 
-    got = get_backend("moba_triton").selection(q, k, cfg)
+    got = get_backend("ours").selection(q, k, cfg)
 
     assert torch.equal(got, moba_selection(q, k, cfg))

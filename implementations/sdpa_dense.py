@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch.nested import nested_tensor_from_jagged
 
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 
 
@@ -34,6 +34,7 @@ class SdpaDenseBackend:
 
     name = "sdpa_dense"
     vendored = False
+    computes_moba = False
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

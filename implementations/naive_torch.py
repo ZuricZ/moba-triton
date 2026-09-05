@@ -2,7 +2,7 @@
 
 import torch
 
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 from moba.naive import moba_attention_naive, moba_selection
 
@@ -17,6 +17,7 @@ class NaiveTorchBackend:
 
     name = "naive_torch"
     vendored = False
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         return True, ""

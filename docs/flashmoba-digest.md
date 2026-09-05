@@ -258,7 +258,7 @@ launch rather than compile time.
 
 Consequences: this digest is grounded in reading, and the `flash_moba` backend
 reports itself unavailable with that reason
-(`src/moba/backends/flash_moba.py`). Nothing in the harness blocks on it.
+(`implementations/flash_moba.py`). Nothing in the harness blocks on it.
 
 ## 8. Open questions
 

@@ -8,7 +8,7 @@ side-effect pattern keeps the design property that a new backend is exactly
 one new file.
 """
 
-from backends.base import (
+from implementations.base import (
     Backend,
     all_backends,
     available_backends,
@@ -18,16 +18,17 @@ from backends.base import (
 )
 
 # Imported for side effect: each module registers its backend on import.
-from backends import naive_torch as _naive_torch  # noqa: F401
-from backends import sdpa_dense as _sdpa_dense  # noqa: F401
-from backends import triton_ours as _triton_ours  # noqa: F401
+from implementations import naive_torch as _naive_torch  # noqa: F401
+from implementations import sdpa_dense as _sdpa_dense  # noqa: F401
+from implementations import ours as _ours  # noqa: F401
 
 # Vendored references. These register unconditionally and report their own
 # availability, so a missing checkout or an unbuilt extension shows up as a
 # skip-with-reason rather than an ImportError at package import time.
-from backends import flash_moba as _flash_moba  # noqa: F401
-from backends import moonshot as _moonshot  # noqa: F401
-from backends import triton_moba as _triton_moba  # noqa: F401
+from implementations import fa2_minimal as _fa2_minimal  # noqa: F401
+from implementations import flash_moba as _flash_moba  # noqa: F401
+from implementations import moonshot as _moonshot  # noqa: F401
+from implementations import triton_moba as _triton_moba  # noqa: F401
 
 __all__ = [
     "Backend",

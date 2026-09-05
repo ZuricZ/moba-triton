@@ -18,8 +18,8 @@ import importlib.util
 
 import torch
 
-from backends.base import register
-from backends.layout import cu_seqlens_for, from_varlen, to_varlen
+from implementations.base import register
+from implementations.layout import cu_seqlens_for, from_varlen, to_varlen
 from moba.config import MoBAConfig
 from moba.device import supports_dtype
 
@@ -29,6 +29,7 @@ class FlashMoBABackend:
 
     name = "flash_moba"
     vendored = True
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         if not torch.cuda.is_available():

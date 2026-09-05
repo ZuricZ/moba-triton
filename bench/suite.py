@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 import torch
 import triton.testing
 
-from backends import available_backends, skipped_backends
+from implementations import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from moba.device import BYTES_PER_MIB, DeviceInfo
 
@@ -303,8 +303,16 @@ def run_suite(
                         block_size=block_size, top_k=top_k,
                         dtype=str(dtype).replace("torch.", ""),
                         latency_ms=ms,
+                        # A dense entry attends to everything, so counting its
+                        # FLOPs against the sparse pattern would credit it with
+                        # arithmetic it never skipped and overstate its
+                        # attainment. Same correction the roofline row makes.
                         tflops=effective_tflops(
-                            batch, heads, seq_len, head_dim, cfg, ms
+                            batch, heads, seq_len, head_dim,
+                            cfg if backend.computes_moba else MoBAConfig(
+                                block_size=block_size, top_k=SELECT_ALL_TOP_K,
+                                dtype=dtype),
+                            ms,
                         ),
                         peak_memory_mb=peak, sparsity=sparsity,
                         speedup_vs_dense=speedup, speedup_ceiling=ceiling,

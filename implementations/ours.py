@@ -15,7 +15,7 @@ call. That check stays in `moba_forward`, where the shape exists.
 
 import torch
 
-from backends.base import register
+from implementations.base import register
 from moba.config import MoBAConfig
 from moba.device import MIN_CAPABILITY, TENSOR_CORE_TILE, supports_dtype
 from moba.kernels.moba_fwd import moba_forward
@@ -28,11 +28,12 @@ from moba.kernels.routing import build_csc, csc_to_mask
 TENSOR_CORE_DTYPES = (torch.bfloat16, torch.float16)
 
 
-class TritonMoBABackend:
+class OursBackend:
     """Adapter for `moba.kernels.moba_fwd.moba_forward`."""
 
-    name = "moba_triton"
+    name = "ours"
     vendored = False
+    computes_moba = True
 
     def is_available(self, cfg: MoBAConfig) -> tuple[bool, str]:
         """Reports whether this backend can run `cfg` on this machine.
@@ -106,7 +107,7 @@ class TritonMoBABackend:
         """
         ok, reason = self.is_available(cfg)
         if not ok:
-            raise RuntimeError(f"moba_triton backend not available: {reason}")
+            raise RuntimeError(f"ours backend not available: {reason}")
         return moba_forward(q, k, v, cfg)
 
     def selection(
@@ -131,4 +132,4 @@ class TritonMoBABackend:
         return csc_to_mask(build_csc(q, k, cfg), q.shape[1])
 
 
-register(TritonMoBABackend())
+register(OursBackend())

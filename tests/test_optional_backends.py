@@ -8,8 +8,8 @@ contract is that every one of those is a reported reason, not a traceback.
 import pytest
 import torch
 
-from backends import all_backends, available_backends, get_backend
-from backends.layout import cu_seqlens_for, from_varlen, to_varlen
+from implementations import all_backends, available_backends, get_backend
+from implementations.layout import cu_seqlens_for, from_varlen, to_varlen
 from moba.config import MoBAConfig
 
 OPTIONAL = ["moonshot", "triton_moba", "flash_moba"]

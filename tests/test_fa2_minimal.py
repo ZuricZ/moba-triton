@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from moba.kernels.fa2_minimal import fa2_forward
+from implementations.fa2_minimal import fa2_forward
 
 # (batch, seq_len, heads, head_dim). Includes a sequence length that is not a
 # multiple of any tile size, to exercise the masked tail.

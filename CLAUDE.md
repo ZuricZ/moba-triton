@@ -186,8 +186,9 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 - **The oracle carries the marker, the kernel gets the bare name**:
   `pool_blocks_naive` / `pool_blocks`, `moba_attention_naive` / `moba_attention`.
 - **Modules are named for pipeline stages**, not implementations:
-  `pooling` → `gating` → `routing` → `moba_fwd`/`moba_bwd`, with `tuning`
-  holding the host-side launch policy the last two share.
+  `pooling` → `gating` → `routing` → `moba_fwd`/`moba_bwd` → `attention`,
+  with `tuning` holding the host-side launch policy the kernels share. Never
+  name a module after a PyTorch mechanism -- `attention.py` was `autograd.py`.
 - **Order within a file**: docstring, imports, constants, device code,
   launchers, entry point — with `# ---` section banners at the boundaries.
   Large files are fine; mixed-tier files are not.
@@ -195,12 +196,12 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
   the API boundary are token-major `[B, S, H, D]`; buffers we allocate for
   ourselves stayed head-major.
 - **`src/moba` is the library and nothing else.** The comparison harness lives
-  in top-level `backends/` and the test tolerance policy in `tests/`; neither
-  ships. Nothing under `src/moba` may import either.
+  in top-level `implementations/` and the test tolerance policy in `tests/`;
+  neither ships. Nothing under `src/moba` may import either.
 - **Run benchmarks as modules**: `uv run python -m bench.stages`, not
   `python bench/stages.py`. A script gets only its own directory on the path,
-  so the direct form cannot find top-level `backends/`.
+  so the direct form cannot find top-level `implementations/`.
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward, backward, GQA, varlen, **token-major `[B, S, H, D]`** and a **structure refactor** all done and merged; 435 tests green. A high-effort review caught seven call sites the layout migration missed — two live bugs and four tests that had silently stopped asserting — all fixed, which is where the +6 tests came from. The package now follows the reference kernels' conventions (see Code conventions above) and exports `moba_attention` from its root; measured neutral, −1.1% to +0.8% same-session. Next: a real head-to-head against FlashMoBA and Triton-MoBA on rented sm_80/90, and a separate pass on the comments, which are 50% of `src/` against 4–5% in the references.
+> Status: Forward, backward, GQA, varlen, token-major `[B, S, H, D]` and a **structure and naming refactor** all done and merged; 435 tests green. `src/moba` is now the library and nothing else -- the comparison harness moved out to `implementations/`, the oracle up to `moba/naive.py`, test policy to `tests/`, leaving one subpackage where there were three, which is what every reference kernel does. Our backend is `ours` (was `moba_triton`, a near-anagram of the vendored `triton_moba` that would have sat beside it in the head-to-head). `fa2_minimal` is registered as a second dense baseline and lands within 7% of torch SDPA. Next: the rented sm_80/90 head-to-head, and a pass on the comments, which are 50% of `src/` against 4-5% in the references.

@@ -1,4 +1,14 @@
-"""Autograd wiring for the MoBA kernels.
+"""MoBA attention as one differentiable operation.
+
+`moba_fwd` and `moba_bwd` are the two halves; this is the whole. It is the last
+stage of the pipeline and the only module a caller needs -- `moba_attention` is
+re-exported from the package root.
+
+It has to be its own module rather than living in either half, because it
+imports from both, and putting it in `moba_bwd` would make the backward depend
+on the forward for no computational reason. FlashMoBA resolves this the same
+way, in `flash_moba_interface.py`; NSA and Triton-MoBA do not face it, because
+each keeps its forward and backward in a single file.
 
 The forward and backward kernels are written and tested as plain functions, so
 this module holds only what connects them to PyTorch: which tensors survive
