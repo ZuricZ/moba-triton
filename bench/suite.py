@@ -12,6 +12,7 @@ theoretically available win the implementation actually collects.
 """
 
 import math
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 
@@ -184,6 +185,69 @@ def _blank_row(
     )
 
 
+COOLDOWN_TARGET_C = 76
+COOLDOWN_CAP_S = 180
+
+
+def gpu_temperature() -> int | None:
+    """Returns the GPU temperature in Celsius, or None if unreadable."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def cool_down_device(target_c: int = COOLDOWN_TARGET_C,
+                     cap_s: float = COOLDOWN_CAP_S) -> None:
+    """Idles until the GPU drops to `target_c`, or `cap_s` elapses.
+
+    ON A SATURATED CARD, WARMING UP IS THE WRONG DIRECTION. `warm_up_device`
+    exists because a cold GPU sits at a low clock and a short measurement can
+    finish before it ramps. The opposite failure is just as large and was found
+    the harder way: on this laptop at 84-86 C there is no headroom left, and
+    further load *spends* what remains. Measured, `ours` at S=8192, three runs
+    each, varying only the warm-up length:
+
+        warm-up      runs (ms)                spread   temp
+          2 s        1.583  1.612  1.610       1.02x    84
+         10 s        5.414  5.858  5.614       1.08x    85
+         20 s       10.847 14.810 11.495       1.37x    86
+
+    Note the spread column: the card is *repeatable* in any given thermal
+    state, just not comparable across states. Three runs agreeing within 1.37x
+    around a 7x-wrong number is what makes this hard to catch -- tight error
+    bars do not indicate a good measurement here.
+
+    Cooling first restores it, and cheaply:
+
+        after 20 s warm-up (cooked)   16.669 ms   86 C
+        cooled 26 s to 76 C, warm 2 s  1.617 ms
+        immediately again              1.585 ms
+        another cooldown cycle         1.620 ms
+
+    So the order is cool, then briefly warm, then measure. One short
+    measurement does not re-cook the card; a provider running hundreds of
+    milliseconds per rep does, which is why this runs before every one rather
+    than once.
+
+    A no-op where the temperature cannot be read -- a container without
+    `nvidia-smi`, or a device that does not report one. Benchmarks still run;
+    they are simply not protected.
+    """
+    if gpu_temperature() is None:
+        return
+    deadline = time.perf_counter() + cap_s
+    while time.perf_counter() < deadline:
+        current = gpu_temperature()
+        if current is None or current <= target_c:
+            return
+        time.sleep(5)
+
+
 def warm_up_device(seconds: float = 2.0) -> None:
     """Runs throwaway work until the GPU reaches its sustained clock.
 
@@ -194,9 +258,29 @@ def warm_up_device(seconds: float = 2.0) -> None:
     at 0.741-0.767 ms over the next four, a 1.59x spread. `ours` moved 1.10x
     across the same passes because by then the clocks were already up.
 
-    `do_bench` warms the callable it is given, which is not the same thing: the
-    ramp is a property of the device, so only the first measurement in a
-    process pays it.
+    `do_bench` warms the callable it is given, which is not the same thing: it
+    compiles the kernel, allocates its buffers and fills caches, all of which
+    belong to the code. The ramp belongs to the *device*.
+
+    CALL THIS BEFORE EVERY MEASUREMENT, NOT ONCE PER PROCESS. The sentence
+    above used to end "so only the first measurement in a process pays it",
+    which is wrong: the clock is shared state and any neighbouring workload
+    resets it. Measured at S=8192 against a cold-box 1.55 ms for `ours`:
+
+        after a 30 s matmul burn, no re-warm       6.73 ms
+        after 90 s idle, no re-warm               11.70 ms
+        after 90 s idle, re-warmed                 1.55 ms
+        repeated                                   1.55 ms
+
+    A pure matmul burn touching no MoBA code reproduces it, so this is not
+    something a particular backend leaks. Note the middle row: idling made it
+    *worse* than hammering did, so there is no "rest the card" alternative --
+    both extremes are bad and only a deliberate ramp lands in the middle.
+
+    Not thermal, despite appearances. `nvidia-smi` reported no throttle flags
+    and a byte-identical 1717 MHz / 84 C at three different moments, which
+    under WSL2 is a stale reading rather than a stable card, and 180 s of extra
+    idle made the number worse rather than better.
     """
     a = torch.randn((2048, 2048), device="cuda", dtype=torch.bfloat16)
     end = time.perf_counter() + seconds
@@ -209,13 +293,17 @@ def warm_up_device(seconds: float = 2.0) -> None:
 def _measure(backend, q, k, v, cfg) -> tuple[float, float]:
     """Times one backend and reports its peak memory.
 
-    Assumes `warm_up_device` has already run; see why there.
+    Warms the device itself, every time. The previous version warmed once per
+    run and said so here; that is wrong for the reason `warm_up_device`
+    records, and it biased whichever backend followed a slow one.
 
     Returns:
         A tuple of (median_ms, peak_mb).
     """
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
+    cool_down_device()
+    warm_up_device()
     ms = triton.testing.do_bench(lambda: backend.forward(q, k, v, cfg))
     return ms, torch.cuda.max_memory_allocated() / BYTES_PER_MIB
 

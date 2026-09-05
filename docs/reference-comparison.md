@@ -50,18 +50,148 @@ nobody thinks to check.
 
 ---
 
+## The thermal protocol, and why the numbers needed one
+
+Four sweeps on 2026-09-05 produced four different answers for the same kernel.
+`ours` at S=8192 read 1.535, 5.243, 7.271 and 1.596 ms across them. The kernel
+never changed; the measuring apparatus was wrong in three different ways.
+
+### Warming up is not monotonic
+
+`warm_up_device` was added because a cold GPU sits at a low clock and a short
+measurement can finish before it ramps. True, but only half the picture. With
+the card heat-soaked at 84-86 C after an evening of compiling, `ours` at
+S=8192, three runs at each warm-up length:
+
+| warm-up | run 1 | run 2 | run 3 | spread | temp |
+|---|---|---|---|---|---|
+| 2 s | 1.583 | 1.612 | 1.610 | 1.02x | 84 |
+| 5 s | 1.754 | 1.743 | 6.997 | 4.01x | 84 |
+| 10 s | 5.414 | 5.858 | 5.614 | 1.08x | 85 |
+| 20 s | 10.847 | 14.810 | 11.495 | 1.37x | 86 |
+| 40 s | 6.536 | 5.556 | 5.663 | 1.18x | 84 |
+
+**More warm-up is worse.** On a saturated card the warm-up is not raising the
+clock, it is spending the last of the power budget before timing starts. Both
+extremes are bad -- 90 s of idle with no warm-up measured 11.70 ms, a 20 s
+warm-up measured 16.67 ms, and the true figure is ~1.60 ms.
+
+Cooling first restores it, and cheaply:
+
+    after 20 s warm-up (cooked)      16.669 ms   86 C
+    cooled 26 s to 76 C, warm 2 s     1.617 ms
+    immediately again                 1.585 ms
+    another cooldown cycle            1.620 ms
+
+Hence `cool_down_device()` then `warm_up_device()` before **every**
+measurement, not once per run. One short measurement does not re-cook the
+card; a provider running hundreds of milliseconds a rep does, which is how
+`moonshot` at 690 ms poisoned every backend measured after it.
+
+### Tight error bars around a wrong number
+
+Read the spread column again: 1.02x, 1.08x, 1.18x. In any fixed thermal state
+this card is *repeatable*. Three runs agreeing within 1.37x around a figure
+that is 10x wrong is what makes this hard to catch, and it is the reason a
+confidence interval is not evidence of a good measurement here.
+
+### The minimum, not the median
+
+Cooling reduces contamination without eliminating it. Rechecking `ours` three
+times per size, cooling before each:
+
+    S=2048   0.504  0.506  1.687
+    S=4096   0.785  0.797  0.782
+    S=8192   1.616  1.617  3.182
+
+One reading in three is still bad, and **every bad reading is slow**. Nothing
+makes a kernel finish faster than its true time, so the error is one-sided and
+the minimum is the least-contaminated sample rather than an optimistic pick.
+`bench/compare.py` therefore takes the best of `BEST_OF = 3`. A median would
+have recorded 1.687 ms at S=2048 had the outlier landed differently.
+
+Cost of the whole protocol: 9 minutes for 48 measurements.
+
+### Four artifacts, and the direction they pull
+
+This is the fourth measurement artifact this project has caught, after the
+clock ramp (below), the WDDM allocator (`docs/gqa-measurements.md`) and clock
+drift (`docs/layout-measurements.md`). The first three all flattered us. This
+one penalised us, which is the direction a habit of suspecting good news does
+not catch.
+
+Two things were ruled out before landing on thermal, each by measurement:
+
+* **Not the allocator.** `empty_cache()` returned `reserved` to the identical
+  cold-state 334 MB with zero `num_alloc_retries`, and the slowdown persisted.
+* **Not something a backend leaks.** A pure matmul burn touching no MoBA code
+  reproduced it exactly.
+
+`nvidia-smi` was no help in either direction: it reported no throttle flags and
+a byte-identical 1717 MHz / 84 C at three different moments, which under WSL2
+is a stale reading rather than a stable card.
+
+---
+
 ## The numbers
 
-| S | blocks | ours | sdpa_dense | vs dense | fa2_minimal | naive_torch | moonshot | vs moonshot |
-|---|---|---|---|---|---|---|---|---|
-| 1024 | 8 | 0.381 ms | 0.083 ms | 0.22x | 0.078 ms | 2.581 ms | 5.848 ms | 15x |
-| 2048 | 16 | 0.500 ms | 0.228 ms | 0.46x | 0.215 ms | 5.209 ms | 9.853 ms | 20x |
-| 4096 | 32 | 0.773 ms | 0.739 ms | 0.96x | 0.759 ms | 17.543 ms | 46.922 ms | 61x |
-| 8192 | 64 | 1.535 ms | 2.766 ms | **1.80x** | 2.974 ms | 62.547 ms | 114.406 ms | 75x |
+Re-measured 2026-09-06 under the thermal protocol below, with `flash_moba`
+included for the first time. All six backends monotonic in S.
+
+**Forward:**
+
+| S | blocks | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot |
+|---|---|---|---|---|---|---|---|
+| 1024 | 8 | 0.293 ms | 1.418 ms | 0.083 ms | 0.077 ms | 2.164 ms | 4.386 ms |
+| 2048 | 16 | 0.476 ms | 1.655 ms | 0.231 ms | 0.221 ms | 4.738 ms | 9.619 ms |
+| 4096 | 32 | 0.766 ms | 2.438 ms | 0.776 ms | 0.786 ms | 16.399 ms | 31.686 ms |
+| 8192 | 64 | **1.596 ms** | 4.698 ms | 2.830 ms | 3.034 ms | 62.811 ms | 382.931 ms |
+
+**Backward** (`forward().backward(dO)`, the full step, as NSA reports it):
+
+| S | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot |
+|---|---|---|---|---|---|---|
+| 1024 | 0.575 ms | 2.531 ms | 0.305 ms | 0.629 ms | 3.793 ms | 11.035 ms |
+| 2048 | 1.160 ms | 2.601 ms | 0.813 ms | 2.029 ms | 9.240 ms | 33.227 ms |
+| 4096 | 2.323 ms | 3.715 ms | 2.700 ms | 7.513 ms | 32.558 ms | 115.565 ms |
+| 8192 | **4.883 ms** | 6.820 ms | 9.853 ms | 29.043 ms | 512.335 ms | 2889.160 ms |
+
+**Ratios at S=8192**, the only length here with real sparsity:
+
+| | forward | backward |
+|---|---|---|
+| vs `sdpa_dense` | **1.77x** | **2.02x** |
+| vs `flash_moba` | 2.94x | 1.40x |
+| vs `moonshot` | 240x | 592x |
 
 `moonshot` is MoonshotAI's own MoBA -- the algorithm's reference
 implementation, in PyTorch. `naive_torch` is our oracle. `fa2_minimal` is our
 from-scratch FlashAttention-2, a second dense baseline.
+
+### Two independent checks that this run is sound
+
+**Against prior records.** `sdpa_dense` and `fa2_minimal` reproduce values
+taken on a different day by a different driver, to within 3%:
+
+    sdpa_dense   0.083 / 0.231 / 0.776 / 2.830   vs   0.083 / 0.228 / 0.739 / 2.766
+    fa2_minimal  0.077 / 0.221 / 0.786 / 3.034   vs   0.078 / 0.215 / 0.759 / 2.974
+
+**Against arithmetic, which needs no prior record.** MoBA attends
+`top_k * block_size` = 1024 keys per query *whatever S is*, so total work grows
+linearly, and S=8192 must cost about twice S=4096. Measured: 0.766 -> 1.596 ms,
+a factor of 2.08. A contaminated run of 2026-09-05 reported 1.754 ms at S=4096
+against 1.639 ms at S=8192 -- more work taking less time -- and that violation
+is what exposed it. Worth keeping as a habit: dense attention is quadratic in
+S, MoBA is linear, and either constraint catches a bad cell on a machine with
+no history at all.
+
+### On beating flash_moba here
+
+2.94x on the forward, on 20 SMs and 99 KiB of shared memory. Their
+`decide_lg_block_m` selects a 512-query tile at S=8192, sized for the 164 KiB
+an A100 provides. **This says our kernel suits this card, not that it is faster
+than theirs.** The comparison that would mean something needs the rented
+sm_80/90, where their tile choice is the one they designed for.
 
 ### Against the reference MoBA: 15x to 75x
 

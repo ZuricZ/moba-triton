@@ -39,6 +39,7 @@ import torch
 import triton
 import triton.testing
 
+from bench.suite import cool_down_device, warm_up_device
 from implementations.base import all_backends
 from moba.config import MoBAConfig
 
@@ -55,6 +56,10 @@ BATCH, HEADS, HEAD_DIM = 1, 4, 64
 SEQ_LENS = [1024, 2048, 4096, 8192]
 
 QUANTILES = [0.5, 0.2, 0.8]
+
+# Repeats per measurement; the fastest is kept. See `benchmark` for why the
+# minimum rather than the median.
+BEST_OF = 3
 
 # provider -> why it produced no number.
 SKIPPED: dict[str, str] = {}
@@ -280,7 +285,39 @@ def benchmark(seq_len, provider):
         else:
             fn = lambda: call(q, k, v, CFG)  # noqa: E731
         fn()                      # surface an unsupported path before timing
-        result = triton.testing.do_bench(fn, quantiles=QUANTILES)
+        # Cool, then briefly warm, before *every* measurement. The device's
+        # thermal state is shared, and a sweep hands it from one provider to
+        # the next: `moonshot` at 690 ms a rep runs full-tilt for tens of
+        # seconds, and whatever follows inherits a saturated card. Measured at
+        # S=8192, `ours`, whose true figure here is ~1.59 ms:
+        #
+        #     after 90 s idle, no warm-up              11.70 ms
+        #     after a 30 s matmul burn                  6.73 ms
+        #     after a 20 s warm-up (86 C)              16.67 ms
+        #     cooled to 76 C, then warmed 2 s           1.62 ms
+        #
+        # Both extremes are wrong, which is why this is two calls and not one.
+        # `cool_down_device` handles a card with no headroom left; the short
+        # warm-up handles one that has dropped to its idle clock. See both
+        # docstrings in bench/suite.py.
+        cool_down_device()
+        warm_up_device()
+        # Best of BEST_OF, not one measurement. Cooling cuts the contamination
+        # but does not remove it: rechecking `ours` three times per size, with
+        # a cooldown before each, still produced one bad reading in three --
+        #
+        #     S=2048   0.504  0.506  1.687
+        #     S=4096   0.785  0.797  0.782
+        #     S=8192   1.616  1.617  3.182
+        #
+        # -- and every bad reading is *slow*. Nothing makes a kernel finish
+        # faster than its true time, so the error is one-sided and the minimum
+        # is the least-contaminated sample. A median over three would have
+        # taken 1.687 at S=2048; the minimum takes 0.504, which is the figure
+        # two independent runs agree on.
+        samples = [triton.testing.do_bench(fn, quantiles=QUANTILES)
+                   for _ in range(BEST_OF)]
+        result = min(samples, key=lambda r: r[0])
         MEDIANS[(provider, seq_len)] = result[0]
         return result
     except (RuntimeError, NotImplementedError, torch.OutOfMemoryError) as exc:
@@ -342,10 +379,7 @@ def throughput_table() -> None:
 
 
 if __name__ == "__main__":
-    from bench.suite import warm_up_device
-
     print(f"providers: {', '.join(PROVIDERS)}\n")
-    warm_up_device()          # the clock ramp lands on whoever goes first
     Path("results").mkdir(exist_ok=True)
     benchmark.run(print_data=True, save_path="results")
     throughput_table()
