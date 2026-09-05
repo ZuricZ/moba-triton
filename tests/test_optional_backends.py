@@ -45,13 +45,23 @@ def test_unavailable_backend_forward_raises_clearly(name):
         backend.forward(q, k, v, cfg)
 
 
-def test_flash_moba_reason_names_the_architecture_gap():
-    """The most likely reason is specific and worth stating precisely."""
+def test_flash_moba_reason_is_specific():
+    """An unavailable reason must name a cause, not merely decline.
+
+    Until 2026-09-05 this asserted "sm_" or "not built", the only two reasons
+    that could arise while the extension was unbuilt. It is built now, so
+    neither string can appear and the assertion as written could only fail.
+    What it was really checking -- that the reason is actionable enough to fix
+    -- outlives the build: at block_size=32 the backend reports the
+    multiple-of-64 limit that flash-moba otherwise raises from C++ mid-launch.
+    """
     cfg = MoBAConfig(block_size=32, top_k=2, dtype=torch.bfloat16)
     ok, reason = get_backend("flash_moba").is_available(cfg)
     if ok:
-        pytest.skip("flash_moba built; the gap closed")
-    assert "sm_" in reason or "not built" in reason
+        pytest.skip("flash_moba runs block_size=32; nothing to check here")
+    assert any(
+        s in reason for s in ("sm_", "not built", "multiple of 64")
+    ), f"reason is not actionable: {reason!r}"
 
 
 # --------------------------------------------------------------------------

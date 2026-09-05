@@ -105,10 +105,10 @@ limits the MoBA numbers.
 
 | | status | blocker |
 |---|---|---|
-| `flash_moba` | **not measured** | CUDA extension unbuilt |
+| `flash_moba` | **built, launches** (2026-09-05) | none -- see below |
 | `triton_moba` | **not measured** | needs `flash_attn` |
 
-Neither blocker is about this GPU.
+Neither blocker was about this GPU, and the `flash_moba` one is now cleared.
 
 **flash-moba** ships `setup.py` with `FLASH_MOBA_CUDA_ARCHS` defaulting to
 `"80;90;100;120"`, and there is no `86` branch -- so the env var cannot add one.
@@ -124,8 +124,10 @@ without editing a vendored file. Its `setup_requires` also needs
 `packaging`/`psutil`/`ninja` present, because setuptools fetches them with
 `python -m pip` and this venv has no pip.
 
-Even built, `docs/flashmoba-digest.md` predicts a launch failure: their tiling
-assumes an A100's 164 KiB of shared memory and this card has 99 KiB.
+`docs/flashmoba-digest.md` further predicted a launch failure even once built,
+on the grounds that their tiling assumes an A100's 164 KiB of shared memory
+against this card's 99 KiB. **That prediction was wrong**, and the section
+below records why.
 
 **Triton-MoBA** itself constrains nothing. It is pure Python -- no `.so`, no
 `.cu`, no `setup.py` -- and its `requirements.txt` asks for `torch>=2.1.0`,
@@ -157,6 +159,114 @@ venvs. Use `MAX_JOBS=2` and build under `~/`.
 default arch list and torch can be pinned to a version flash-attn ships wheels
 for. See `docs/layout-measurements.md` for why absolute numbers here are not
 the deliverable anyway.
+
+---
+
+## flash_moba, built and running (2026-09-05)
+
+### It launches, and the shared-memory prediction was wrong
+
+Built with `FLASH_MOBA_CUDA_ARCHS=86 TORCH_CUDA_ARCH_LIST=8.6`, under `~/`
+rather than `/mnt/c`, `MAX_JOBS` sized to RAM. 85 objects, zero errors, a
+74 MB `flash_moba_cuda.cpython-313-x86_64-linux-gnu.so`.
+
+It then launched at every sequence length, finite output throughout:
+
+| S | lg_block_m | result |
+|---|---|---|
+| 1024 | 128 | OK |
+| 2048 | 128 | OK |
+| 4096 | 256 | OK |
+| 8192 | 512 | OK |
+
+The digest expected a shared-memory failure because their tiling is sized for
+an A100. The reason it does not happen is `decide_lg_block_m`: the query tile
+is chosen **at call time from predicted sparsity**, not fixed at compile time.
+
+    budget  = top_k * block_size
+    density = (2*budget*S - budget^2) / S^2      # causal
+    sparsity <= 0.5 -> 128;  <= 0.7 -> 256;  <= 0.8 -> 512
+    <= 0.9 -> 768;  else 1024
+
+A closed form on the host, five branches, no autotuning and no occupancy
+probe. A runtime policy fits whatever SRAM the card has; the compile-time
+constant the digest assumed would not have. This is the same class of decision
+as our `tuning.PIPELINE_STAGES`, where a conservative guess silently cost 12%.
+
+### How it is installed, and why not with pip
+
+The extension is on the venv's path via a `.pth` file, not a pip install:
+
+    ~/.venvs/moba/lib/python3.13/site-packages/flash-moba-local.pth
+        -> /home/ubuntu/fmbuild/site
+    ~/fmbuild/site/
+        flash_moba                                    -> the package
+        flash_moba_cuda.cpython-313-...-linux-gnu.so  -> the built extension
+
+Both `uv pip install .` and `uv pip install -e .` were tried first and both
+began recompiling all 85 objects: each builds in its own `/tmp/tmp*.build-temp`
+rather than the tree's existing `build/`, so the hour already spent buys
+nothing. Verified by reading `-o` out of the running nvcc command lines.
+
+The link directory holds exactly those two entries on purpose. Putting
+`~/fmbuild/flash-moba` itself on `sys.path` would also expose its `tests/` and
+`benchmarks/` directories, and `tests` would then shadow our own test package
+-- the same collision `implementations/layout.py` documents for the name
+`moba`.
+
+This is a local convenience, not part of the repo: a fresh clone has neither
+the build tree nor the `.pth`, and `flash_moba` correctly reports itself
+unavailable there.
+
+### The adapter was calling the wrong function
+
+`implementations/flash_moba.py` called `flash_moba_attn_varlen_func` with
+`(q, k, v, cu, cu, s, s, block_size, top_k, causal=True)`. That function is the
+attention kernel **alone**: after the four varlen arguments it wants the routing
+as three tensors -- `moba_col_offsets`, `moba_col_nnz`, `moba_row_indices` --
+and does no gating at all. We passed two ints into three tensor slots.
+
+The function whose signature we had actually written against is
+`flash_moba_varlen_func`, one word shorter: their full pipeline, gate then
+attend. Fixed by calling that.
+
+The bug survived because the extension had never compiled, so the call had
+never once executed. An adapter written from reading source is a hypothesis,
+not code.
+
+**Their split is our split.** Those three tensors are exactly the CSC triple
+`src/moba/kernels/routing.py` produces, field for field, and their gate
+(`flash_topk_varlen_func`) returns them as a separate call. Both projects cut
+the pipeline at the same seam, which means a future comparison can isolate
+gate from attention on both sides rather than reporting one end-to-end number.
+Two layout differences to handle if that is done: their `col_offsets` is int64
+with `num_blocks` entries and indexes a globally-flat `row_indices`, ours is
+int32 with `num_blocks + 1` and is per-(batch, head); and ours carries
+`head_indices` for grouped-query attention, which their arrays have no slot
+for, so the conversion is exact only when `H_kv == H_q`.
+
+### Divergence from the oracle: ours and theirs are level
+
+Relative to `naive_torch` at `block_size=128, top_k=8`, shape `[1, S, 4, 64]`,
+bf16, max absolute error over the output divided by the output's scale:
+
+| S | blocks | ours vs oracle | flash_moba vs oracle | per-block counts equal |
+|---|---|---|---|---|
+| 1024 | 8 | 0.0038 | 0.0028 | 100% |
+| 2048 | 16 | 0.036 | 0.040 | 39% |
+| 4096 | 32 | 0.035 | 0.045 | 26% |
+| 8192 | 64 | 0.043 | 0.049 | 26% |
+
+**Neither implementation is closer to the oracle than the other.** The error is
+not arithmetic: at S=1024 there are 8 blocks and `top_k=8`, so every block is
+selected, the two gates *cannot* disagree, and both land at the bf16 floor. From
+S=2048 the gates make different -- and equally valid -- block choices, and the
+output difference that follows is a routing flip, which is the distinction
+`tests/tolerance.py` exists to draw.
+
+Read the last column as a divergence indicator only. It compares each block's
+query *count*, so equal counts do not prove equal selections; unequal counts do
+prove unequal ones.
 
 ---
 
