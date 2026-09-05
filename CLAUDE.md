@@ -186,8 +186,9 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 - **The oracle carries the marker, the kernel gets the bare name**:
   `pool_blocks_naive` / `pool_blocks`, `moba_attention_naive` / `moba_attention`.
 - **Modules are named for pipeline stages**, not implementations:
-  `pooling` → `gating` → `routing` → `moba_fwd`/`moba_bwd`, with `tuning`
-  holding the host-side launch policy the last two share.
+  `pooling` → `gating` → `routing` → `moba_fwd`/`moba_bwd` → `attention`,
+  with `tuning` holding the host-side launch policy the kernels share. Never
+  name a module after a PyTorch mechanism -- `attention.py` was `autograd.py`.
 - **Order within a file**: docstring, imports, constants, device code,
   launchers, entry point — with `# ---` section banners at the boundaries.
   Large files are fine; mixed-tier files are not.

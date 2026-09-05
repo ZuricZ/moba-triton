@@ -17,7 +17,7 @@ import torch
 
 from conftest import GATE_SWEEP, make_qkv
 from moba.config import MoBAConfig
-from moba.kernels.autograd import moba_attention
+from moba.kernels.attention import moba_attention
 from moba.kernels.routing import csc_to_mask, build_csc_fused
 from moba.naive import moba_attention_naive
 from tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error

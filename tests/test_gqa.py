@@ -157,7 +157,7 @@ def test_gradients_under_gqa_are_within_the_precision_budget(device, gate):
     The failure to fear is an off-by-`group`: a dk that is right in shape and
     plausible in magnitude but sums only one head's contribution.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
@@ -207,7 +207,7 @@ def test_gqa_backward_equals_the_kernel_on_expanded_heads(device):
     recovers what the shared run computes in one pass. That sum is the
     comparison, and it is the chain rule written out.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
     b, h_q, h_kv, s, d = 1, 8, 2, 512, 64
@@ -249,7 +249,7 @@ def test_unselected_blocks_still_get_a_zero_gradient_under_gqa(device):
     Measured: zero empty columns across six GQA configurations with the flag
     on, one or two with it off.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     cfg = MoBAConfig(block_size=64, top_k=2, dtype=torch.bfloat16,
                      always_select_current=False)

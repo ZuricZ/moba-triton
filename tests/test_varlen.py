@@ -442,7 +442,7 @@ def test_gradients_match_running_each_sequence_alone(device):
     another sequence, that query's gradient would be summed into this
     document's keys: finite, plausible, and wrong.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -470,7 +470,7 @@ def test_gradients_match_running_each_sequence_alone(device):
 
 def test_packed_gradients_match_the_oracle(device):
     """Routing held fixed, so this measures arithmetic and not gate flips."""
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
     from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.naive import moba_attention_naive
     from tolerance import (
@@ -513,7 +513,7 @@ def test_padded_index_slots_get_no_gradient(device):
     grid is sized by the *longest* sequence. A program for a block that does
     not exist would write into the next document's keys.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -540,7 +540,7 @@ def test_packed_backward_under_gqa(device):
     it; packing changes which rows those are. Nothing tests the product unless
     a test uses both.
     """
-    from moba.kernels.autograd import moba_attention
+    from moba.kernels.attention import moba_attention
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
