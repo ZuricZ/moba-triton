@@ -2,9 +2,9 @@
 
 import torch
 
-from moba.backends.base import register
+from backends.base import register
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_attention_naive, moba_selection
+from moba.naive import moba_attention_naive, moba_selection
 
 
 class NaiveTorchBackend:

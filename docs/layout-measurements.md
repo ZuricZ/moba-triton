@@ -2,7 +2,7 @@
 
 The move from head-major `[B, H, S, D]` to token-major `[B, S, H, D]`,
 resolving `docs/deferred-decisions.md` DD-1. RTX 3050 Ti Laptop (sm_86,
-20 SMs), bf16 unless stated, `uv run python bench/…`.
+20 SMs), bf16 unless stated, `uv run python -m bench.…`.
 
 ---
 

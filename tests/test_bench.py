@@ -19,7 +19,7 @@ from bench.suite import (
     sparsity_ratio,
 )
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 
 from conftest import make_qkv
 

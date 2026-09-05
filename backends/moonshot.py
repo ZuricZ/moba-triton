@@ -13,13 +13,13 @@ semantics against ours.
 
 import torch
 
-from moba.backends.layout import (
+from backends.layout import (
     cu_seqlens_for,
     from_varlen,
     load_reference_module,
     to_varlen,
 )
-from moba.backends.base import register
+from backends.base import register
 from moba.config import MoBAConfig
 
 _MODULE_ALIAS = "_moonshot_moba_naive"

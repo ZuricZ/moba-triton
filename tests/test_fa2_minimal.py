@@ -1,6 +1,6 @@
 """Correctness of the minimal FA-2 kernel against torch SDPA.
 
-SDPA is the right oracle here rather than `moba.ref.naive`: this kernel
+SDPA is the right oracle here rather than `moba.naive`: this kernel
 computes *dense* attention, and SDPA dispatches to a fused Flash implementation
 that is independently written. Agreement between our Triton kernel and NVIDIA's
 CUDA one is a genuinely independent check.

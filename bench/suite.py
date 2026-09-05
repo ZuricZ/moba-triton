@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 import torch
 import triton.testing
 
-from moba.backends import available_backends, skipped_backends
+from backends import available_backends, skipped_backends
 from moba.config import MoBAConfig
 from moba.device import BYTES_PER_MIB, DeviceInfo
 

@@ -20,7 +20,7 @@ from moba.config import MoBAConfig
 from moba.gqa import expand_kv
 from moba.kernels.moba_fwd import moba_forward
 from moba.kernels.routing import csc_to_mask, build_csc_fused
-from moba.ref.naive import moba_attention_naive
+from moba.naive import moba_attention_naive
 from tolerance import TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error
 
 # (batch, query heads, kv heads, seq_len, head_dim). Small on purpose: 4 GiB of

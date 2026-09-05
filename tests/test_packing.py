@@ -163,7 +163,7 @@ def test_packed_oracle_equals_running_each_sequence_alone(device):
     anything but equality is a boundary bug rather than rounding.
     """
     from moba.config import MoBAConfig
-    from moba.ref.naive import moba_attention_naive
+    from moba.naive import moba_attention_naive
 
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float64)
     cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
@@ -193,7 +193,7 @@ def test_packed_selection_uses_sequence_local_block_ids(device):
     batch for no information.
     """
     from moba.config import MoBAConfig
-    from moba.ref.naive import moba_selection
+    from moba.naive import moba_selection
 
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float64)
     cu = torch.tensor([0, 20, 32, 48], dtype=torch.int32, device=device)
@@ -219,7 +219,7 @@ def test_packed_selection_uses_sequence_local_block_ids(device):
 
 def test_packed_oracle_rejects_a_real_batch_axis(device):
     from moba.config import MoBAConfig
-    from moba.ref.naive import moba_attention_naive
+    from moba.naive import moba_attention_naive
 
     cfg = MoBAConfig(block_size=4, top_k=2, dtype=torch.float64)
     cu = torch.tensor([0, 8, 16], dtype=torch.int32, device=device)

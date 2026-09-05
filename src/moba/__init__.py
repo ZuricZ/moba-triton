@@ -9,7 +9,7 @@ The pipeline, in the order the modules run:
     kernels.moba_bwd  the backward of the same
 
 `moba_attention` runs all of it and is differentiable. `kernels.tuning` holds
-the host-side launch policy the last three share; `ref.naive` is the PyTorch
+the host-side launch policy the last three share; `naive` is the PyTorch
 oracle every kernel is checked against.
 """
 

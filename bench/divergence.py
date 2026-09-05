@@ -26,7 +26,7 @@ query-major utilization, not as the expected value in production.
 import torch
 
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 
 
 def divergence_stats(

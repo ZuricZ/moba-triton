@@ -34,7 +34,7 @@ from conftest import GATE_SWEEP, gate_is_sparse, make_qkv
 from moba.config import MoBAConfig
 from moba.kernels.moba_fwd import moba_forward
 from moba.kernels.routing import build_csc
-from moba.ref.naive import moba_selection
+from moba.naive import moba_selection
 
 # One configuration, drawn from the shared sweep rather than invented here, so
 # these tests exercise a gate the correctness sweep also covers. GATE_SWEEP[0]

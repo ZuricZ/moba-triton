@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.ref.naive import moba_attention_naive, moba_selection
+from moba.naive import moba_attention_naive, moba_selection
 from tolerance import (
     TOLERANCE_FACTOR,
     TOLERANCE_FLOOR,

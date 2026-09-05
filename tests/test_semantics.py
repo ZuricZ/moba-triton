@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from moba.config import MoBAConfig
-from moba.ref.naive import (
+from moba.naive import (
     pool_blocks_naive,
     moba_attention_naive,
     gate_select_naive,
