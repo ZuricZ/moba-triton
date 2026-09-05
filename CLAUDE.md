@@ -176,4 +176,4 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward, backward, GQA and varlen all done; 429 tests green. Now **token-major `[B, S, H, D]`**, matching FA-2/NSA/FlashMoBA -- measured neutral (-1.4% to +1.3%), and it deleted the varlen branch from the address arithmetic, since no token-major stride contains `S` (`docs/layout-measurements.md`, DD-1 resolved). Buffers we own stayed head-major. Next: merge the branch, then a real head-to-head on rented sm_80/90.
+> Status: Forward, backward, GQA, varlen and **token-major `[B, S, H, D]`** all done and merged; 429 tests green. The layout now matches FA-2/NSA/FlashMoBA -- measured neutral (-1.4% to +1.3%), and it deleted the varlen branch from the address arithmetic, since no token-major stride contains `S` (`docs/layout-measurements.md`, DD-1 resolved). Buffers we own stayed head-major. Next: a real head-to-head against FlashMoBA and Triton-MoBA on rented sm_80/90 -- now with no layout conversion at the boundary.
