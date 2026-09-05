@@ -7,9 +7,9 @@ the hypothesis holds the penalty must disappear as batch grows.
 """
 import torch, triton
 from moba.config import MoBAConfig
-from moba.heads import expand_kv
-from moba.kernels.index_fused import build_csc_fused
+from moba.gqa import expand_kv
 from moba.kernels.moba_fwd import attend_partials, empty_partials
+from moba.kernels.routing import build_csc_fused
 
 D, CFG = 64, MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
 H_Q = 8

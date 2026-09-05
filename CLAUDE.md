@@ -174,6 +174,27 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
   a silent log does not mean no progress. Check the log contents and the
   process table, not the exit code. (Same trap as `import triton` above.)
 
+## Code conventions — follow these when adding code
+Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
+`docs/superpowers/plans/2026-09-05-structure-refactor.md` for the evidence.
+
+- **Name the tier.** `@triton.jit` device code ends in `_kernel`; host
+  launchers are bare. A leading `_` means module-private and nothing else —
+  never use it to mark device code.
+- **One class per package**, `torch.autograd.Function`. No kernel objects, no
+  builders. Device code cannot be a method, so host code stays flat beside it.
+- **The oracle carries the marker, the kernel gets the bare name**:
+  `pool_blocks_naive` / `pool_blocks`, `moba_attention_naive` / `moba_attention`.
+- **Modules are named for pipeline stages**, not implementations:
+  `pooling` → `gating` → `routing` → `moba_fwd`/`moba_bwd`, with `tuning`
+  holding the host-side launch policy the last two share.
+- **Order within a file**: docstring, imports, constants, device code,
+  launchers, entry point — with `# ---` section banners at the boundaries.
+  Large files are fine; mixed-tier files are not.
+- **Two conventions on tensor layout, split on a clean line**: tensors crossing
+  the API boundary are token-major `[B, S, H, D]`; buffers we allocate for
+  ourselves stayed head-major.
+
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: Forward, backward, GQA, varlen and **token-major `[B, S, H, D]`** all done and merged; 429 tests green. The layout now matches FA-2/NSA/FlashMoBA -- measured neutral (-1.4% to +1.3%), and it deleted the varlen branch from the address arithmetic, since no token-major stride contains `S` (`docs/layout-measurements.md`, DD-1 resolved). Buffers we own stayed head-major. Next: a real head-to-head against FlashMoBA and Triton-MoBA on rented sm_80/90 -- now with no layout conversion at the boundary.
+> Status: Forward, backward, GQA, varlen, **token-major `[B, S, H, D]`** and a **structure refactor** all done and merged; 435 tests green. A high-effort review caught seven call sites the layout migration missed — two live bugs and four tests that had silently stopped asserting — all fixed, which is where the +6 tests came from. The package now follows the reference kernels' conventions (see Code conventions above) and exports `moba_attention` from its root; measured neutral, −1.1% to +0.8% same-session. Next: a real head-to-head against FlashMoBA and Triton-MoBA on rented sm_80/90, and a separate pass on the comments, which are 50% of `src/` against 4–5% in the references.

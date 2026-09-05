@@ -17,7 +17,8 @@ import pytest
 import torch
 
 from moba.config import MoBAConfig
-from moba.kernels.gate import block_representatives_triton, gate_select
+from moba.kernels.gating import gate_select
+from moba.kernels.pooling import pool_blocks
 
 # Deliberately awkward at block_size 16: 80 divides evenly, 48 and 64 do too,
 # and 20 does not -- so one sequence ends in a 4-key block. The last sequence is
@@ -50,7 +51,7 @@ def _cu(device):
 
 
 def _kbar(k, cfg, cu):
-    return block_representatives_triton(k, cfg, cu_seqlens=cu,
+    return pool_blocks(k, cfg, cu_seqlens=cu,
                                         max_seqlen=MAXLEN)
 
 
@@ -103,7 +104,7 @@ def test_gate_matches_running_each_sequence_alone(device):
     for n in LENS:
         piece = gate_select(
             q[:, lo:lo + n],
-            block_representatives_triton(k[:, lo:lo + n], cfg), cfg)
+            pool_blocks(k[:, lo:lo + n], cfg), cfg)
         assert torch.equal(packed[:, :, lo:lo + n], piece), f"at {lo}"
         lo += n
 
@@ -195,7 +196,7 @@ def test_columns_keep_a_batch_axis_and_hold_only_their_sequence(device):
     packed `q`. The data is O(T*H*D) and worth packing; this metadata is
     O(B*H*NB) and is not.
     """
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import build_csc_fused
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -227,7 +228,7 @@ def test_no_column_exists_past_a_sequences_own_block_count(device):
     anything ever landed there the attention kernel would launch a program for
     a block whose keys are another document's.
     """
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import build_csc_fused
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -249,8 +250,7 @@ def test_index_round_trips_to_the_gate_under_packing(device):
     A wrong transpose does not crash -- it attends to the wrong keys and
     returns plausible numbers -- so the round trip is what makes it visible.
     """
-    from moba.kernels.index import csc_to_mask
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.ref.naive import moba_selection
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
@@ -273,7 +273,7 @@ def test_slots_stay_unique_per_query_under_packing(device):
     Slots address the partial buffers, which are indexed by (packed token,
     slot). Packing changes what a row index means, so this is worth re-pinning.
     """
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import build_csc_fused
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
     cu = _cu(device)
@@ -331,13 +331,12 @@ def test_packed_forward_matches_the_oracle(device):
     The gate is discontinuous in its inputs -- a ranking -- so a near-tie can
     swap under a dtype change and send a query to entirely different keys.
     Passing the kernel's own selection to the oracle removes that from the
-    measurement; see `moba.tolerance`.
+    measurement; see `tests/tolerance.py`.
     """
-    from moba.kernels.index import csc_to_mask
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.kernels.moba_fwd import moba_forward
     from moba.ref.naive import moba_attention_naive
-    from moba.tolerance import (
+    from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)
@@ -472,10 +471,9 @@ def test_gradients_match_running_each_sequence_alone(device):
 def test_packed_gradients_match_the_oracle(device):
     """Routing held fixed, so this measures arithmetic and not gate flips."""
     from moba.kernels.autograd import moba_attention
-    from moba.kernels.index import csc_to_mask
-    from moba.kernels.index_fused import build_csc_fused
+    from moba.kernels.routing import csc_to_mask, build_csc_fused
     from moba.ref.naive import moba_attention_naive
-    from moba.tolerance import (
+    from tolerance import (
         TOLERANCE_FACTOR, TOLERANCE_FLOOR, max_abs_error)
 
     cfg = MoBAConfig(block_size=BLOCK, top_k=3, dtype=torch.bfloat16)

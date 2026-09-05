@@ -19,8 +19,7 @@ import torch
 
 from conftest import GATE_SWEEP, SHAPE_SWEEP, make_qkv
 from moba.config import MoBAConfig
-from moba.kernels.index import build_csc, csc_to_mask
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import build_csc, csc_to_mask, build_csc_fused
 
 
 @pytest.mark.parametrize("shape", SHAPE_SWEEP)

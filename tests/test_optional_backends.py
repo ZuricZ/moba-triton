@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from moba.backends import all_backends, available_backends, get_backend
-from moba.backends._refs import cu_seqlens_for, from_varlen, to_varlen
+from moba.backends.layout import cu_seqlens_for, from_varlen, to_varlen
 from moba.config import MoBAConfig
 
 OPTIONAL = ["moonshot", "triton_moba", "flash_moba"]

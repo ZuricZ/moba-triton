@@ -18,7 +18,7 @@ import torch
 
 from moba.backends import available_backends, skipped_backends
 from moba.config import MoBAConfig
-from moba.tolerance import max_abs_error
+from tolerance import max_abs_error
 
 from conftest import make_qkv
 

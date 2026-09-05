@@ -41,13 +41,9 @@ import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
-from moba.heads import head_group_size
-from moba.kernels.index import CSCIndex
-from moba.kernels.moba_fwd import (
-    LOG2_E,
-    choose_combine_tile,
-    group_candidates,
-)
+from moba.gqa import head_group_size
+from moba.kernels.routing import CSCIndex
+from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
 
 # Queries per program for the preprocess and dQ-reduce passes. Both are pure
 # streaming over [B, H, S, ...] with no matmul, so this only trades program
@@ -95,9 +91,14 @@ BWD_STAGES = 3
 _BWD_GROUP_CACHE: dict[tuple, int] = {}
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
-def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
-                         BLOCK_M: tl.constexpr, H_Q: tl.constexpr):
+def moba_bwd_preprocess_kernel(O, DO, Delta, S, D: tl.constexpr,
+                               BLOCK_M: tl.constexpr, H_Q: tl.constexpr):
     """Computes `delta_i = rowsum(dO_i * O_i)` for every query.
 
     This is the term the softmax Jacobian contributes: `dS = P * (dP - delta)`,
@@ -125,7 +126,7 @@ def _moba_bwd_preprocess(O, DO, Delta, S, D: tl.constexpr,
 
 
 @triton.jit
-def _moba_bwd(
+def moba_bwd_kernel(
     Q, K, V, DO, Lse, Delta,
     RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
     DK, DV, DQPart,
@@ -160,7 +161,7 @@ def _moba_bwd(
     pid = tl.program_id(0)
     pid_bh = tl.program_id(1)
 
-    # Keys are shared, queries are not. See `_moba_attn_fwd` -- the same split,
+    # Keys are shared, queries are not. See `moba_fwd_kernel` -- the same split,
     # and at H_Q == H_KV both reduce to `pid_bh` exactly.
     pid_b = pid_bh // H_KV
     if VARLEN:
@@ -299,7 +300,7 @@ def _moba_bwd(
 
 
 @triton.jit
-def _moba_dq_reduce(
+def moba_dq_reduce_kernel(
     DQPart, PartM, DQ,
     S,
     K_SLOTS: tl.constexpr, TILES: tl.constexpr, D: tl.constexpr,
@@ -307,7 +308,7 @@ def _moba_dq_reduce(
 ):
     """Sums each query's per-slot `dQ` partials.
 
-    A plain sum, unlike `_moba_combine`. Each partial was computed against the
+    A plain sum, unlike `moba_combine_kernel`. Each partial was computed against the
     query's global `lse`, so they are already on a common scale and there is no
     `exp2(m_local - m_global)` correction to apply and no two-pass structure.
 
@@ -349,6 +350,11 @@ def _moba_dq_reduce(
              acc.to(DQ.dtype.element_ty), mask=live[:, None])
 
 
+# -------------------------------------------------------------------------
+# Launchers
+# -------------------------------------------------------------------------
+
+
 def compute_delta(out: torch.Tensor, dout: torch.Tensor) -> torch.Tensor:
     """Computes the softmax-Jacobian term `rowsum(dO * O)` per query.
 
@@ -361,7 +367,7 @@ def compute_delta(out: torch.Tensor, dout: torch.Tensor) -> torch.Tensor:
     """
     b, s, h, d = out.shape            # token-major
     delta = torch.empty((b, h, s), device=out.device, dtype=torch.float32)
-    _moba_bwd_preprocess[(triton.cdiv(s, BWD_BLOCK_M), b * h)](
+    moba_bwd_preprocess_kernel[(triton.cdiv(s, BWD_BLOCK_M), b * h)](
         out.contiguous(), dout.contiguous(), delta, s,
         D=d, BLOCK_M=BWD_BLOCK_M, H_Q=h,
     )
@@ -388,12 +394,17 @@ def reduce_dq(
     dq = torch.empty((b, s, h, d), device=dq_part.device, dtype=out_dtype)
     block_m, warps = choose_combine_tile(d)
 
-    _moba_dq_reduce[(triton.cdiv(s, block_m), b * h)](
+    moba_dq_reduce_kernel[(triton.cdiv(s, block_m), b * h)](
         dq_part, part_m, dq, s,
         K_SLOTS=slots, TILES=wide // slots, D=d, BLOCK_M=block_m, H_Q=h,
         num_warps=warps,
     )
     return dq
+
+
+# -------------------------------------------------------------------------
+# Public entry point
+# -------------------------------------------------------------------------
 
 
 def moba_backward(
@@ -465,7 +476,7 @@ def moba_backward(
 
     for group in candidates:
         try:
-            _moba_bwd[(index.num_blocks * tiles, n_seq * h_kv)](
+            moba_bwd_kernel[(index.num_blocks * tiles, n_seq * h_kv)](
                 q, k, v, dout, lse, delta,
                 index.row_indices, index.head_indices, index.slot_of_pair,
                 index.col_offsets, index.col_nnz, index.order,

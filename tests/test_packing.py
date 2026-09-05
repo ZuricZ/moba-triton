@@ -15,7 +15,7 @@ as FA's `unpad_input` does.
 import pytest
 import torch
 
-from moba.packing import from_nested, pack, unpack, validate_cu_seqlens
+from moba.varlen import from_nested, pack, unpack, validate_cu_seqlens
 
 
 def test_pack_keeps_only_real_tokens(device):

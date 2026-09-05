@@ -29,7 +29,7 @@ import triton.testing
 
 from moba.config import MoBAConfig
 from moba.device import BYTES_PER_MIB, MICROSECONDS_PER_MILLISECOND
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import build_csc_fused
 from moba.kernels.moba_fwd import (
     attend_partials,
     combine_partials,

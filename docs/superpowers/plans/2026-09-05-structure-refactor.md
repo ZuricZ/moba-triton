@@ -172,7 +172,7 @@ Nothing else changes.
 | `_scatter_pairs` | `scatter_pairs_kernel` |
 | `_fa2_fwd` | `fa2_fwd_kernel` |
 
-- [ ] **Step 1: Confirm the starting count**
+- [x] **Step 1: Confirm the starting count**
 
 ```bash
 uv run pytest -q -rs 2>&1 | tail -3
@@ -180,7 +180,7 @@ uv run pytest -q -rs 2>&1 | tail -3
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 2: Apply the renames, asserting every occurrence count**
+- [x] **Step 2: Apply the renames, asserting every occurrence count**
 
 Use exact-count substitution, never a loose regex. A pattern that silently
 matches zero times is how the token-major migration left files unpatched.
@@ -226,7 +226,7 @@ for old, n in total.items():
 Note the ordering: `_moba_bwd_preprocess` must be substituted before
 `_moba_bwd`, or the shorter key corrupts the longer name.
 
-- [ ] **Step 3: Verify no old name survives**
+- [x] **Step 3: Verify no old name survives**
 
 ```bash
 grep -rn '_moba_attn_fwd\|_moba_combine\|_moba_bwd\b\|_moba_gate_fwd\|_block_representatives_fwd\|_fa2_fwd' src tests bench --include=*.py
@@ -234,7 +234,7 @@ grep -rn '_moba_attn_fwd\|_moba_combine\|_moba_bwd\b\|_moba_gate_fwd\|_block_rep
 
 Expected: no output.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 ```bash
 uv run pytest -q -rs 2>&1 | tail -3
@@ -242,7 +242,7 @@ uv run pytest -q -rs 2>&1 | tail -3
 
 Expected: `435 passed, 1 skipped` -- both numbers.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -271,6 +271,37 @@ Two launchers and one class do not follow the tier convention.
 | `_MoBAAttention` | `MoBAAttentionFunction` | The references name this tier `ParallelNSAFunction`, `FlashMobaAttnVarlenFunc`, `MixedAttention`. It is the one class in the package; hiding it behind `_` hides the tier. |
 | `gate_select` | `gate_select` | unchanged -- already correct |
 
+### Plan correction, made during execution
+
+The plan claimed `_triton` "announced device code one tier too high". That was
+wrong. `ref/naive.py` already defines `block_representatives`, so the suffix was
+doing real disambiguation between the oracle and the kernel -- dropping it
+naively would have collided in `tests/test_gate.py`, which imports both by bare
+name.
+
+Looking at all three oracle/kernel pairs showed the actual defect: three pairs,
+three different rules.
+
+| oracle (`ref/naive.py`) | kernel (`kernels/`) | rule |
+|---|---|---|
+| `block_representatives` | `block_representatives_triton` | kernel marked |
+| `select_blocks` | `gate_select` | unrelated names |
+| `moba_attention_naive` | `moba_attention` | oracle marked |
+
+The third is right, and it is the pair that matters most. **The oracle carries
+the marker; the kernel gets the bare name** -- the kernel is the product, the
+reference is the thing qualified against it. So this task also renames the two
+oracle functions, which the plan had listed as untouched:
+
+| old | new |
+|---|---|
+| `ref.naive.block_representatives` | `pool_blocks_naive` |
+| `ref.naive.select_blocks` | `gate_select_naive` |
+| `kernels.gate.block_representatives_triton` | `pool_blocks` |
+
+Fixing one pair and leaving two would have left the codebase with two rules
+instead of three, which is not obviously better than three.
+
 **Which underscores stay, and why.** The `_` prefix is not being removed from
 the codebase; it is being narrowed back to its one Python meaning. After Tasks 1
 and 2 the only `_`-prefixed names left are genuine module-private helpers with
@@ -291,7 +322,7 @@ Every one of those is host-side Python that a reader can step through. None of
 them is device code. That is the distinction the prefix should carry and
 currently does not.
 
-- [ ] **Step 1: Apply, with the same count-asserting substitution as Task 1**
+- [x] **Step 1: Apply, with the same count-asserting substitution as Task 1**
 
 ```python
 RENAMES = {
@@ -300,7 +331,7 @@ RENAMES = {
 }
 ```
 
-- [ ] **Step 2: Verify no old name survives**
+- [x] **Step 2: Verify no old name survives**
 
 ```bash
 grep -rn 'block_representatives_triton\|_MoBAAttention' src tests bench --include=*.py
@@ -308,11 +339,11 @@ grep -rn 'block_representatives_triton\|_MoBAAttention' src tests bench --includ
 
 Expected: no output.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A
@@ -343,7 +374,7 @@ stage 1 *below* stage 2, so the file reads backwards relative to the algorithm.
   from `pooling`. They are independent stages joined only by the caller. Verify
   this before splitting -- if either half references the other, stop and report.
 
-- [ ] **Step 1: Confirm the two halves are independent**
+- [x] **Step 1: Confirm the two halves are independent**
 
 ```bash
 sed -n '1,414p' src/moba/kernels/gate.py | grep -n 'pool_blocks\|_representatives'
@@ -353,7 +384,7 @@ sed -n '415,549p' src/moba/kernels/gate.py | grep -n 'gate_select\|gate_kernel'
 Expected: no output from either. If there is output, the seam is not where this
 plan claims -- stop and report rather than improvising a split.
 
-- [ ] **Step 2: Split the file**
+- [x] **Step 2: Split the file**
 
 ```bash
 git mv src/moba/kernels/gate.py src/moba/kernels/gating.py
@@ -374,7 +405,7 @@ than against every key, which is where MoBA's arithmetic saving begins. See
 Delete lines 415-549 from `gating.py` and give it the matching docstring opener
 naming it stage 2.
 
-- [ ] **Step 3: Update the importers**
+- [x] **Step 3: Update the importers**
 
 ```bash
 grep -rn 'kernels.gate\b\|from .gate import\|from ..kernels.gate' src tests bench --include=*.py
@@ -382,11 +413,11 @@ grep -rn 'kernels.gate\b\|from .gate import\|from ..kernels.gate' src tests benc
 
 Repoint each hit to `gating` or `pooling` by which symbol it uses.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -414,14 +445,14 @@ Both are named for the data layout rather than the job.
 - Every symbol keeps its current name and signature. This task moves code
   between files and changes nothing else.
 
-- [ ] **Step 1: Enumerate every importer before moving anything**
+- [x] **Step 1: Enumerate every importer before moving anything**
 
 ```bash
 grep -rn 'kernels.index\b\|kernels.index_fused\|from .index import\|from .index_fused import' \
   src tests bench --include=*.py
 ```
 
-- [ ] **Step 2: Build routing.py in stage order**
+- [x] **Step 2: Build routing.py in stage order**
 
 `git mv src/moba/kernels/index.py src/moba/kernels/routing.py`, then append
 `index_fused.py`'s contents, reconciling the imports. Order the result by tier,
@@ -442,9 +473,9 @@ build_csc                     torch builder, the reference
 csc_to_mask                   the reverse, for tests
 ```
 
-- [ ] **Step 3: Repoint every importer from the Step 1 list**
+- [x] **Step 3: Repoint every importer from the Step 1 list**
 
-- [ ] **Step 4: Verify nothing references the old modules**
+- [x] **Step 4: Verify nothing references the old modules**
 
 ```bash
 grep -rn 'kernels\.index\b\|kernels\.index_fused\|index_fused' src tests bench --include=*.py
@@ -452,11 +483,11 @@ grep -rn 'kernels\.index\b\|kernels\.index_fused\|index_fused' src tests bench -
 
 Expected: no output.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A
@@ -490,25 +521,25 @@ forward and the backward. They are host-side policy, not kernel code, and
 - The `BWD_*` constants stay in `moba_bwd.py`: they are that kernel's tile shape,
   not shared policy. Only move a constant with more than one consumer.
 
-- [ ] **Step 1: Enumerate importers**
+- [x] **Step 1: Enumerate importers**
 
 ```bash
 grep -rn 'choose_group\|group_candidates\|estimate_shared_memory\|choose_combine_tile\|MAX_GROUP\|PIPELINE_STAGES\|LOG2_E\|COMBINE_' \
   src tests bench --include=*.py
 ```
 
-- [ ] **Step 2: Move the block to tuning.py, carrying its comments verbatim**
+- [x] **Step 2: Move the block to tuning.py, carrying its comments verbatim**
 
 The comments on `PIPELINE_STAGES` and `choose_group` are long and are staying
 long for now -- the prose pass is a separate job. Move them unchanged.
 
-- [ ] **Step 3: Repoint imports and delete the originals from moba_fwd.py**
+- [x] **Step 3: Repoint imports and delete the originals from moba_fwd.py**
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 5: Confirm the tuning still picks the same chunk height**
+- [x] **Step 5: Confirm the tuning still picks the same chunk height**
 
 This is the one task where a mistake could change behaviour rather than fail
 loudly: if a constant is dropped or duplicated, `choose_group` returns a
@@ -521,7 +552,7 @@ uv run pytest tests/test_moba_kernel.py -q -k 'chunk_height or shared' 2>&1 | ta
 Expected: pass. That test asserts the height used fits and the next one up does
 not, so a changed constant fails it.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A
@@ -552,7 +583,7 @@ git commit -m "refactor: extract tuning.py from moba_fwd.py"
 | `_refs.py` | private-marked, and "refs" collides with `references/` and with `ref/naive.py`, which are three different things | `layout.py` |
 | `tolerance.py` | test policy shipped inside the package | `tests/tolerance.py` |
 
-- [ ] **Step 1: Re-verify tolerance.py has no non-test importer**
+- [x] **Step 1: Re-verify tolerance.py has no non-test importer**
 
 ```bash
 grep -rn 'import tolerance\|from moba.tolerance\|from .tolerance' src bench --include=*.py
@@ -560,7 +591,7 @@ grep -rn 'import tolerance\|from moba.tolerance\|from .tolerance' src bench --in
 
 Expected: no output. Any hit means stop and report.
 
-- [ ] **Step 2: Move the files**
+- [x] **Step 2: Move the files**
 
 ```bash
 git mv src/moba/heads.py src/moba/gqa.py
@@ -569,7 +600,7 @@ git mv src/moba/backends/_refs.py src/moba/backends/layout.py
 git mv src/moba/tolerance.py tests/tolerance.py
 ```
 
-- [ ] **Step 3: Repoint every importer**
+- [x] **Step 3: Repoint every importer**
 
 ```bash
 grep -rn 'moba\.heads\|moba\.packing\|_refs\|moba\.tolerance\|from \.heads\|from \.packing\|from \._refs\|from \.tolerance' \
@@ -582,11 +613,11 @@ Repoint each. Tests import tolerance as a sibling module now, so
 on that; if it is not, add `tests` to `pythonpath` there rather than using a
 relative import.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -610,7 +641,7 @@ package root.
 - Produces: `from moba import moba_attention, MoBAConfig` as the supported way
   in. Deep paths keep working; nothing is removed.
 
-- [ ] **Step 1: Write the exports**
+- [x] **Step 1: Write the exports**
 
 ```python
 """MoBA (Mixture of Block Attention) kernels and reference implementations.
@@ -633,7 +664,7 @@ __all__ = ["MoBAConfig", "moba_attention"]
 __version__ = "0.1.0"
 ```
 
-- [ ] **Step 2: Verify the front door works and costs nothing at import**
+- [x] **Step 2: Verify the front door works and costs nothing at import**
 
 ```bash
 uv run python -c "import moba; print(moba.__all__); print(moba.moba_attention)"
@@ -641,11 +672,11 @@ uv run python -c "import moba; print(moba.__all__); print(moba.moba_attention)"
 
 Expected: the two names, no Triton compilation triggered.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A
@@ -667,7 +698,7 @@ ordering, and mark the boundaries so the reader can see them.
 - Nothing changes but the order of definitions and the addition of banner
   comments. No signature, name or body is touched.
 
-- [ ] **Step 1: Adopt one banner form and one order**
+- [x] **Step 1: Adopt one banner form and one order**
 
 ```python
 # ---------------------------------------------------------------------------
@@ -680,13 +711,13 @@ code**, **launchers**, **autograd**, **public entry point**. This is NSA's
 order; it is what lets a reader open any file at any line and know which tier
 they are in.
 
-- [ ] **Step 2: Reorder each file, moving whole definitions only**
+- [x] **Step 2: Reorder each file, moving whole definitions only**
 
 Do not edit inside any function. If a definition must move above something it
 references at module scope, that is a real dependency -- leave the order and
 note it rather than reordering the constant.
 
-- [ ] **Step 3: Verify the diff is pure motion**
+- [x] **Step 3: Verify the diff is pure motion**
 
 ```bash
 git diff | grep -E '^[+-]' | grep -vE '^[+-]{3}' | \
@@ -697,11 +728,11 @@ git diff | grep -E '^[+-]' | grep -vE '^[+-]{3}' | \
 Expected: no output. Every non-banner line that left appears again, so the counts
 pair up. An odd count is a line that was changed, not moved.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Expected: `435 passed, 1 skipped`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -714,7 +745,7 @@ git commit -m "refactor: one tier order and section banners across the kernels"
 
 **Files:** none modified.
 
-- [ ] **Step 1: Full suite from a cold cache**
+- [x] **Step 1: Full suite from a cold cache**
 
 ```bash
 find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
@@ -724,7 +755,7 @@ uv run pytest -q -rs 2>&1 | tail -5
 Expected: `435 passed, 1 skipped`, and the one skip is
 `test_optional_backends.py:42: moonshot is available; nothing to check here`.
 
-- [ ] **Step 2: Same-session A/B on the stage benchmark**
+- [x] **Step 2: Same-session A/B on the stage benchmark**
 
 Renaming a `@triton.jit` function changes its cache key, so the first launch
 recompiles. That is a one-off; steady-state timing must not move. Run master and
@@ -738,11 +769,11 @@ uv run python bench/stages.py
 Expected: within the +/-3% this machine drifts by. Anything larger is a real
 finding -- investigate before merging, do not average it away.
 
-- [ ] **Step 3: Update the CLAUDE.md status line**
+- [x] **Step 3: Update the CLAUDE.md status line**
 
 One line, current. Name the new module layout so a fresh session finds it.
 
-- [ ] **Step 4: Merge with --no-ff**
+- [x] **Step 4: Merge with --no-ff**
 
 ```bash
 git checkout master
@@ -751,6 +782,48 @@ git merge --no-ff structure-refactor
 
 `--no-ff` deliberately: this touches most files in the package and should stay
 one revertible unit, as the token-major merge did.
+
+---
+
+## Outcome
+
+All tasks executed inline on branch `structure-refactor`, 2026-09-05.
+435 passed / 1 skipped at every checkpoint, skip count included.
+
+Same-session A/B on `bench/stages.py`, master against the branch:
+
+| S | dtype | master | branch |
+|---|---|---|---|
+| 1024 | f32 | 337 us | 338 us |
+| 1024 | bf16 | 261 us | 258 us |
+| 2048 | f32 | 707 us | 708 us |
+| 2048 | bf16 | 532 us | 536 us |
+| 4096 | f32 | 1451 us | 1446 us |
+| 4096 | bf16 | 1079 us | 1075 us |
+| 8192 | f32 | 2980 us | 2958 us |
+| 8192 | bf16 | 2198 us | 2178 us |
+
+-1.1% to +0.8%, straddling zero. A rename cost nothing, which is what a rename
+should cost.
+
+Three things the plan got wrong, all corrected during execution and recorded
+where they happened:
+
+1. The `_triton` suffix was disambiguating the oracle from the kernel, not
+   mislabelling a tier. Fixed by giving all three oracle/kernel pairs one rule
+   instead of one pair a new one. See the correction block in Task 2.
+2. Task 8 budgeted for reordering every module into tier order. Checked first:
+   all six were **already** in tier order. The order was right and nothing said
+   so, which is what the banners fix. Only `moba_fwd.py`'s host tier genuinely
+   moved -- it ran reduce, validate, allocate, attend.
+3. `moba_fwd.py` also carried a dead import (`round_up_to_tensor_core_tile`),
+   found while splitting out `tuning.py`.
+
+Two test modules keep stale names: `test_heads.py` covers `gqa.py` and
+`test_packing.py` covers `varlen.py`. Renaming them would collide with the
+existing feature-level `test_gqa.py` and `test_varlen.py`, so they were left
+rather than given an awkward scheme. Worth revisiting if those files are
+touched for another reason.
 
 ---
 

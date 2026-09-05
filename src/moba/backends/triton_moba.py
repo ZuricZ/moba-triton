@@ -15,7 +15,7 @@ import importlib.util
 
 import torch
 
-from moba.backends._refs import (
+from moba.backends.layout import (
     cu_seqlens_for,
     from_varlen,
     load_reference_module,

@@ -21,7 +21,7 @@ WHAT MAY SYNCHRONIZE, AND WHAT MAY NOT. `pack` and `from_nested` run once when a
 batch is built, and both must read a scalar -- the longest sequence -- so they
 synchronize. FA does the same, with `.item()` on `max_seqlen_in_batch`.
 `validate_cu_seqlens` runs on *every forward call* and must not: a host
-synchronization costs ~230 us on this box (measured in `moba.kernels.index_fused`,
+synchronization costs ~230 us on this box (measured in `moba.kernels.routing`,
 whose whole purpose is removing them), which against a ~2280 us forward would be
 a silent 10% tax that looked like a kernel regression.
 """

@@ -1,9 +1,13 @@
-"""Fused MoBA gate: score blocks and pick the top-k without materializing scores.
+"""Stage 2 of MoBA: score blocks against each query and keep the top-k.
 
-The PyTorch gate computes an `[B, H, S, num_blocks]` score matrix, writes it to
-HBM, reads it back to mask it, writes it again, sorts it, and writes a dense
-boolean mask. Profiling put ~40% of the gate's GPU time in `aten::copy_` and
-device-to-device memcpy -- moving intermediates, not computing anything.
+Consumes the block representatives `pooling.py` produces, and hands its choice
+to `routing.py`, which turns it into the structure the attention kernel walks.
+
+Fused: the score matrix is never materialized. The PyTorch gate computes an
+`[B, H, S, num_blocks]` score matrix, writes it to HBM, reads it back to mask
+it, writes it again, sorts it, and writes a dense boolean mask. Profiling put
+~40% of the gate's GPU time in `aten::copy_` and device-to-device memcpy --
+moving intermediates, not computing anything.
 
 This kernel never lets that matrix exist. It streams the block representatives
 past a resident query tile in chunks, keeps a running top-k on chip, and emits
@@ -43,7 +47,7 @@ occupancy no longer depends on sequence length.
 The loop that streaming introduces also admits an optimization the one-shot
 form cannot express at all: its trip count is a runtime value, so a query tile
 stops at the last block any of its queries can causally see instead of scoring
-every block and masking the future away afterwards. See `_moba_gate_fwd`.
+every block and masking the future away afterwards. See `gate_kernel`.
 """
 
 import torch
@@ -51,9 +55,9 @@ import triton
 import triton.language as tl
 
 from moba.config import MoBAConfig
-from moba.heads import head_group_size
-from moba.packing import validate_cu_seqlens
 from moba.device import TENSOR_CORE_TILE
+from moba.gqa import head_group_size
+from moba.varlen import validate_cu_seqlens
 
 # Queries per gate program. 32 rather than the 16 the one-shot gate used:
 # halving the program count halves how many times the representatives are
@@ -80,8 +84,13 @@ GATE_BLOCK_N = 32
 GATE_WARPS = 4
 
 
+# -------------------------------------------------------------------------
+# Device code
+# -------------------------------------------------------------------------
+
+
 @triton.jit
-def _moba_gate_fwd(
+def gate_kernel(
     Q, Kbar, BlockIdx, CuSeqlens,
     S, T, sm_scale,
     BLOCK_SIZE: tl.constexpr, BLOCK_M: tl.constexpr, D: tl.constexpr,
@@ -313,6 +322,11 @@ def _moba_gate_fwd(
         remaining = tl.where(remaining == nxt[:, None], N_BLOCKS, remaining)
 
 
+# -------------------------------------------------------------------------
+# Launcher
+# -------------------------------------------------------------------------
+
+
 def gate_select(
     q: torch.Tensor,
     kbar: torch.Tensor,
@@ -395,7 +409,7 @@ def gate_select(
 
     out = torch.empty((b, h, s, cfg.top_k), device=q.device, dtype=torch.int32)
 
-    _moba_gate_fwd[grid](
+    gate_kernel[grid](
         q, kbar, out, cu_seqlens if varlen else q,
         s, s,
         # The gate score is deliberately unscaled: softmax's 1/sqrt(D) is a
@@ -409,141 +423,5 @@ def gate_select(
         ALWAYS_CURRENT=cfg.always_select_current,
         H_Q=h, Q_PER_KV=q_per_kv, VARLEN=varlen,
         num_warps=GATE_WARPS,
-    )
-    return out
-
-
-@triton.jit
-def _block_representatives_fwd(
-    K, Kbar, CuSeqlens,
-    S, T, N_BLOCKS,
-    BLOCK_SIZE: tl.constexpr, BLOCK_POW2: tl.constexpr, D: tl.constexpr,
-    H_KV: tl.constexpr, VARLEN: tl.constexpr,
-):
-    """One program per (block, batch, key/value head). Mean-pools a block's keys.
-
-    The PyTorch version pads the sequence to a block multiple with `F.pad`,
-    which copies the entire key tensor, and then writes the final block's
-    occupancy from the host -- a device-to-host round trip costing ~230 us on
-    WSL. A kernel needs neither: it masks the tail instead of padding it, and
-    computes the occupancy from the sequence length it was already passed.
-
-    Packed mode changes only *where* a block's keys are. Blocks are cut per
-    sequence, so a block straddling a boundary would mix two documents into one
-    representative -- accepted by every downstream stage, finite, and wrong. The
-    batch comes from the grid, so the range is two arithmetic ops on values
-    already loaded rather than a lookup table.
-    """
-    blk = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-
-    offs_d = tl.arange(0, D)
-
-    # Token-major: heads sit D apart and tokens H_KV*D apart. Neither stride
-    # contains the sequence length, so the packed and padded loads differ only
-    # by a batch term that is zero when packed.
-    b = pid_bh // H_KV
-    h = pid_bh % H_KV
-
-    if VARLEN:
-        bos = tl.load(CuSeqlens + b)
-        eos = tl.load(CuSeqlens + b + 1)
-        if blk * BLOCK_SIZE >= eos - bos:
-            return          # a padded index slot; this block does not exist
-        lo = bos + blk * BLOCK_SIZE
-        hi = tl.minimum(lo + BLOCK_SIZE, eos)
-        kbase = h * D                           # K is [1, T, H_kv, D]
-    else:
-        lo = blk * BLOCK_SIZE
-        hi = tl.minimum(lo + BLOCK_SIZE, S)
-        kbase = b * S * H_KV * D + h * D        # K is [B, S, H_kv, D]
-
-    rows = lo + tl.arange(0, BLOCK_POW2)
-    live = (rows < hi) & (tl.arange(0, BLOCK_POW2) < BLOCK_SIZE)
-
-    # `Kbar`, the output, is ours and stays head-major -- see `moba.heads`.
-    k = tl.load(K + kbase + rows[:, None] * (H_KV * D) + offs_d[None, :],
-                mask=live[:, None], other=0.0)
-
-    # Accumulate in float32 regardless of input dtype, matching what torch's
-    # reduction does internally, then round to the input dtype before dividing.
-    # The rounding point is not cosmetic: the gate ranks these representatives,
-    # and rounding at a different step would flip near-ties, which the routing
-    # test compares for exact equality.
-    total = tl.sum(k.to(tl.float32), axis=0)
-    total = total.to(K.dtype.element_ty).to(tl.float32)
-
-    # A short final block averages only the positions that exist. Dividing by
-    # BLOCK_SIZE instead would shrink a 1-key tail block's representative
-    # toward zero and make it almost never selected -- a bug invisible whenever
-    # seq_len divides evenly by block_size.
-    # Under packing every *sequence* has such a tail, not just the batch, so
-    # this stops being a rare edge case and becomes one block in every row.
-    occupancy = hi - lo
-    mean = total / occupancy.to(tl.float32)
-
-    tl.store(Kbar + pid_bh * N_BLOCKS * D + blk * D + offs_d,
-             mean.to(Kbar.dtype.element_ty))
-
-
-def block_representatives_triton(
-    k: torch.Tensor,
-    cfg: MoBAConfig,
-    cu_seqlens: torch.Tensor | None = None,
-    max_seqlen: int | None = None,
-) -> torch.Tensor:
-    """Mean-pools each block's keys into one representative.
-
-    Args:
-        k: Keys shaped [B, S, H, D], contiguous, or [1, T, H, D] when packed.
-        cfg: Configuration supplying `block_size`.
-        cu_seqlens: Cumulative token counts, [num_sequences + 1] int32. When
-            given, `k` holds one packed batch and `B` must be 1.
-        max_seqlen: Longest sequence, required with `cu_seqlens`. It sizes the
-            output's block axis and the launch grid; deriving it from
-            `cu_seqlens` would cost a host synchronization.
-
-    Returns:
-        Block representatives, same dtype as `k`: `[B, H, num_blocks, D]`
-        padded, `[num_sequences, H, cdiv(max_seqlen, block_size), D]` packed.
-        The packed form is the *padded index* of a packed batch -- a sequence
-        with fewer blocks leaves the tail of its row unwritten, and the gate
-        never reads past that sequence's own block count.
-
-    Raises:
-        ValueError: If packed input has a batch axis above 1, or `max_seqlen`
-            is missing.
-    """
-    b, s, h, d = k.shape
-    k = k.contiguous()
-
-    if cu_seqlens is None:
-        n = cfg.num_blocks(s)
-        out = torch.empty((b, h, n, d), device=k.device, dtype=k.dtype)
-        _block_representatives_fwd[(n, b * h)](
-            k, out, k, s, s, n,
-            BLOCK_SIZE=cfg.block_size,
-            BLOCK_POW2=triton.next_power_of_2(cfg.block_size),
-            D=d, H_KV=h, VARLEN=False,
-        )
-        return out
-
-    if b != 1:
-        raise ValueError(
-            f"packed input must have batch 1, got {b}; every sequence lives on "
-            f"the token axis and cu_seqlens says where"
-        )
-    if max_seqlen is None:
-        raise ValueError("max_seqlen is required when cu_seqlens is given")
-    n_seq = validate_cu_seqlens(cu_seqlens, total_tokens=s,
-                                max_seqlen=max_seqlen)
-    n = cfg.num_blocks(max_seqlen)
-
-    out = torch.empty((n_seq, h, n, d), device=k.device, dtype=k.dtype)
-    _block_representatives_fwd[(n, n_seq * h)](
-        k, out, cu_seqlens, s, s, n,
-        BLOCK_SIZE=cfg.block_size,
-        BLOCK_POW2=triton.next_power_of_2(cfg.block_size),
-        D=d, H_KV=h, VARLEN=True,
     )
     return out

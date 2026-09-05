@@ -19,23 +19,21 @@ import triton
 from conftest import GATE_SWEEP, QUERY_CHUNK, make_qkv, sweep_cases
 from moba.config import MoBAConfig
 from moba.device import shared_memory_budget
-from moba.kernels.index import build_csc, csc_to_mask
-from moba.kernels.index_fused import build_csc_fused
+from moba.kernels.routing import build_csc, csc_to_mask, build_csc_fused
 from triton.runtime.errors import OutOfResources
 
 from moba.kernels.moba_fwd import (
     _GROUP_CACHE,
-    _moba_attn_fwd,
-    _moba_combine,
-    choose_combine_tile,
+    moba_fwd_kernel,
+    moba_combine_kernel,
     attend_partials,
-    group_candidates,
     combine_partials,
     empty_partials,
     moba_forward,
 )
+from moba.kernels.tuning import choose_combine_tile, group_candidates
 from moba.ref.naive import moba_selection
-from moba.tolerance import (
+from tolerance import (
     assert_selection_matches,
     assert_within_tolerance,
     reference_error,
@@ -270,7 +268,7 @@ def test_combine_does_not_spill_registers(device, head_dim, slots):
     # and the backward pass always asks for it, so the arm the training path
     # uses has to be the one that is checked.
     for write_lse in (False, True):
-        kernel = _moba_combine[(triton.cdiv(s, block_m), 2)](
+        kernel = moba_combine_kernel[(triton.cdiv(s, block_m), 2)](
             part_m, part_l, part_acc, out, lse, s,
             K_SLOTS=slots, D=head_dim, BLOCK_M=block_m, H_Q=2,
             WRITE_LSE=write_lse, num_warps=warps,
@@ -373,7 +371,7 @@ def _compile_attn(q, k, v, cfg, index, group):
     part_m, part_l, part_acc = empty_partials(
         q.shape, index.max_slots, q.device, q.dtype)
     part_m.fill_(float("-inf"))
-    return _moba_attn_fwd[(index.num_blocks, b * h_kv)](
+    return moba_fwd_kernel[(index.num_blocks, b * h_kv)](
         q, k, v, index.row_indices, index.head_indices, index.slot_of_pair,
         index.col_offsets, index.col_nnz, index.order, q,
         part_m, part_l, part_acc,

@@ -31,9 +31,8 @@ pattern.
 import torch
 
 from moba.config import MoBAConfig
-from moba.kernels.index import CSCIndex
-from moba.kernels.index_fused import build_csc_fused
 from moba.kernels.moba_bwd import moba_backward
+from moba.kernels.routing import CSCIndex, build_csc_fused
 from moba.kernels.moba_fwd import (
     _validate,
     attend_partials,
@@ -41,7 +40,7 @@ from moba.kernels.moba_fwd import (
 )
 
 
-class _MoBAAttention(torch.autograd.Function):
+class MoBAAttentionFunction(torch.autograd.Function):
     """Differentiable MoBA attention over the Triton kernels."""
 
     @staticmethod
@@ -119,5 +118,5 @@ def moba_attention(
         receive gradients with their own `H_kv` heads, each already summed over
         the query heads that shared it.
     """
-    return _MoBAAttention.apply(q, k, v, cfg, index, causal, cu_seqlens,
-                                max_seqlen)
+    return MoBAAttentionFunction.apply(
+        q, k, v, cfg, index, causal, cu_seqlens, max_seqlen)
