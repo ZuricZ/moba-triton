@@ -12,6 +12,7 @@ theoretically available win the implementation actually collects.
 """
 
 import math
+import time
 from dataclasses import asdict, dataclass
 
 import torch
@@ -183,8 +184,32 @@ def _blank_row(
     )
 
 
+def warm_up_device(seconds: float = 2.0) -> None:
+    """Runs throwaway work until the GPU reaches its sustained clock.
+
+    Without this the first backend measured absorbs the clock ramp, and this
+    suite measures the dense baseline first for every config -- so the ramp
+    landed on the denominator of every speedup it has ever reported. Measured
+    at S=4096: the same dense call took 1.182 ms on the first pass and settled
+    at 0.741-0.767 ms over the next four, a 1.59x spread. `ours` moved 1.10x
+    across the same passes because by then the clocks were already up.
+
+    `do_bench` warms the callable it is given, which is not the same thing: the
+    ramp is a property of the device, so only the first measurement in a
+    process pays it.
+    """
+    a = torch.randn((2048, 2048), device="cuda", dtype=torch.bfloat16)
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        a = a @ a.T if a.shape[0] == a.shape[1] else a
+        a = a / a.abs().amax().clamp_min(1e-6)
+    torch.cuda.synchronize()
+
+
 def _measure(backend, q, k, v, cfg) -> tuple[float, float]:
     """Times one backend and reports its peak memory.
+
+    Assumes `warm_up_device` has already run; see why there.
 
     Returns:
         A tuple of (median_ms, peak_mb).
@@ -216,6 +241,7 @@ def run_suite(
         One BenchRow per (config, backend), including skipped and errored ones.
     """
     device_row = DeviceInfo.probe(0).as_row()
+    warm_up_device()
     rows: list[BenchRow] = []
 
     for shape in shapes:
