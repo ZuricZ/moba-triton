@@ -51,3 +51,6 @@ bench_out/
 # Triton perf_report writes this stub beside its plot; the plots go to
 # results/, which is already ignored, but a stray run can drop one here.
 results.html
+
+# --- Local scratch notes, not part of the repo ---
+REMOTE.md
