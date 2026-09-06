@@ -185,8 +185,116 @@ def _blank_row(
     )
 
 
+# Fraction of total VRAM a config may be estimated to need before it is
+# skipped. A fraction rather than a constant: the same sweep has to run on a
+# 4 GB laptop and an 80 GB A100 without editing a number, and what matters is
+# leaving room for the allocator, not an absolute size.
+MEMORY_BUDGET_FRACTION = 0.75
+
+
+def total_memory_mb(device=None) -> float:
+    """Total VRAM on the device, in MiB."""
+    return torch.cuda.get_device_properties(device).total_memory / BYTES_PER_MIB
+
+
+def default_memory_budget_mb(device=None) -> float:
+    """Memory a config may need before the sweep skips it.
+
+    Was a hardcoded 3000.0, which is 75% of this laptop's 4 GB and 3.7% of an
+    80 GB A100 -- so on rented hardware it would have skipped almost the entire
+    interesting sweep while looking like it ran fine.
+    """
+    return MEMORY_BUDGET_FRACTION * total_memory_mb(device)
+
+
+def default_seq_lens(device=None, longest: int = 131072) -> list[int]:
+    """Powers of two the device can plausibly hold, for the dense baselines.
+
+    Sized off the *dense* backends, not ours. Attention memory for a fused
+    dense kernel grows linearly in S but its compute grows quadratically, while
+    our partial buffers grow linearly and stay small -- 64 MB at S=8192. So the
+    limit on how far a comparison sweep can run is set by what the baselines
+    survive, and a card that holds more should sweep further.
+
+    Both references sweep powers of two; FlashMoBA runs 4K-512K at batch 2.
+
+    Args:
+        device: CUDA device to size against.
+        longest: Upper bound regardless of memory, so a very large card does
+            not silently start a sweep that takes hours.
+
+    Returns:
+        Ascending powers of two from 1024.
+    """
+    gib = total_memory_mb(device) / 1024
+    # Empirical: S=8192 is comfortable on this 4 GB card, and the ceiling rises
+    # roughly with memory. Conservative by design -- a skipped row is reported
+    # with its reason, an OOM mid-sweep loses the run.
+    ceiling = 8192 * max(1, int(gib // 4))
+    ceiling = min(ceiling, longest)
+    lens, s = [], 1024
+    while s <= ceiling:
+        lens.append(s)
+        s *= 2
+    return lens
+
+
 COOLDOWN_TARGET_C = 76
 COOLDOWN_CAP_S = 180
+
+
+_CLOCKS_LOCKED = False
+
+
+def lock_clocks() -> bool:
+    """Pins the SM clock to its maximum, so timings stop depending on history.
+
+    THE PROPER FIX, WHERE IT IS AVAILABLE. Everything below -- the cooldown,
+    the short warm-up, best-of-3 -- exists because a laptop GPU's clock swings
+    with its thermal and power state, so a measurement depends on whatever ran
+    before it. A datacenter card in a container with the capability lets you
+    remove the variable outright: lock the clock and every measurement is taken
+    under identical conditions.
+
+    Needs `nvidia-smi -lgc`, which requires elevated permissions and is
+    normally refused on a consumer laptop under WDDM. Returns False there, and
+    the thermal protocol carries the load instead.
+
+    Returns:
+        True if the clock is now pinned.
+    """
+    global _CLOCKS_LOCKED
+    try:
+        query = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.max.sm", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        max_mhz = int(query.stdout.strip().splitlines()[0])
+        locked = subprocess.run(
+            ["nvidia-smi", "-lgc", f"{max_mhz},{max_mhz}"],
+            capture_output=True, text=True, timeout=20,
+        )
+        _CLOCKS_LOCKED = locked.returncode == 0
+        return _CLOCKS_LOCKED
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return False
+
+
+def unlock_clocks() -> None:
+    """Returns the GPU to its own clock management. Safe to call unlocked."""
+    global _CLOCKS_LOCKED
+    if not _CLOCKS_LOCKED:
+        return
+    try:
+        subprocess.run(["nvidia-smi", "-rgc"], capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _CLOCKS_LOCKED = False
+
+
+def clocks_are_locked() -> bool:
+    """Whether this process pinned the clock; the thermal dance is then moot."""
+    return _CLOCKS_LOCKED
 
 
 def gpu_temperature() -> int | None:
@@ -238,7 +346,7 @@ def cool_down_device(target_c: int = COOLDOWN_TARGET_C,
     `nvidia-smi`, or a device that does not report one. Benchmarks still run;
     they are simply not protected.
     """
-    if gpu_temperature() is None:
+    if _CLOCKS_LOCKED or gpu_temperature() is None:
         return
     deadline = time.perf_counter() + cap_s
     while time.perf_counter() < deadline:
@@ -312,7 +420,7 @@ def run_suite(
     shapes: list[tuple[int, int, int, int]],
     gates: list[tuple[int, int]],
     dtype: torch.dtype = torch.bfloat16,
-    memory_budget_mb: float = 3000.0,
+    memory_budget_mb: float | None = None,
 ) -> list[BenchRow]:
     """Benchmarks every available backend over the config sweep.
 
@@ -323,12 +431,20 @@ def run_suite(
         shapes: List of (batch, seq_len, heads, head_dim).
         gates: List of (block_size, top_k).
         dtype: Compute dtype.
-        memory_budget_mb: Configs estimated above this are skipped.
+        memory_budget_mb: Configs estimated above this are skipped. Defaults
+            to a fraction of the card's own memory, so the same sweep runs on
+            a 4 GB laptop and an 80 GB A100 -- the old hardcoded 3000.0 was
+            75% of this laptop and 3.7% of an A100, which would have skipped
+            almost every interesting row while appearing to succeed.
 
     Returns:
         One BenchRow per (config, backend), including skipped and errored ones.
     """
+    if memory_budget_mb is None:
+        memory_budget_mb = default_memory_budget_mb()
     device_row = DeviceInfo.probe(0).as_row()
+    if lock_clocks():
+        print("clocks locked to max -- thermal protocol not needed")
     warm_up_device()
     rows: list[BenchRow] = []
 

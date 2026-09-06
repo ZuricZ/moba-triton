@@ -33,13 +33,20 @@ A sparse kernel scores higher on the first and lower on the second. Neither is
 wrong; mixing them is.
 """
 
+import os
 from pathlib import Path
 
 import torch
 import triton
 import triton.testing
 
-from bench.suite import cool_down_device, warm_up_device
+from bench.suite import (
+    cool_down_device,
+    default_seq_lens,
+    lock_clocks,
+    unlock_clocks,
+    warm_up_device,
+)
 from implementations.base import all_backends
 from moba.config import MoBAConfig
 
@@ -51,9 +58,15 @@ from moba.config import MoBAConfig
 CFG = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
 BATCH, HEADS, HEAD_DIM = 1, 4, 64
 
-# Powers of two, as both references sweep. FlashMoBA runs 4K-512K at batch 2;
-# 8192 is where a 4 GB card stops holding the naive implementations.
-SEQ_LENS = [1024, 2048, 4096, 8192]
+# Powers of two, as both references sweep, sized to the card this lands
+# on. A 4 GB laptop stops at 8192, where the naive backends stop fitting;
+# an 80 GB A100 carries into the range FlashMoBA publishes (4K-512K).
+# Override with MOBA_SEQ_LENS=4096,8192,16384 to pin a sweep.
+SEQ_LENS = (
+    [int(x) for x in os.environ["MOBA_SEQ_LENS"].split(",")]
+    if os.environ.get("MOBA_SEQ_LENS")
+    else default_seq_lens()
+)
 
 QUANTILES = [0.5, 0.2, 0.8]
 
@@ -379,11 +392,25 @@ def throughput_table() -> None:
 
 
 if __name__ == "__main__":
+    # Pin the clock if the card and container allow it; that removes the
+    # variable the thermal protocol works around, and cool_down_device
+    # then returns immediately.
+    if lock_clocks():
+        print("clocks locked to max -- thermal protocol not needed")
+    else:
+        print("clocks not lockable -- cool/warm protocol per measurement")
+    print(f"sequence lengths: {SEQ_LENS}")
     print(f"providers: {', '.join(PROVIDERS)}\n")
-    Path("results").mkdir(exist_ok=True)
-    benchmark.run(print_data=True, save_path="results")
-    throughput_table()
-    if SKIPPED:
-        print("\nno number produced:")
-        for key, why in sorted(SKIPPED.items()):
-            print(f"  {key:<20} {why}")
+    try:
+        Path("results").mkdir(exist_ok=True)
+        benchmark.run(print_data=True, save_path="results")
+        throughput_table()
+        if SKIPPED:
+            print("\nno number produced:")
+            for key, why in sorted(SKIPPED.items()):
+                print(f"  {key:<20} {why}")
+    finally:
+        # Leave the card as we found it, even on Ctrl-C: a locked
+        # clock persists after the process exits and would affect
+        # whatever runs next on this machine.
+        unlock_clocks()
