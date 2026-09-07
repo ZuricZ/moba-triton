@@ -272,7 +272,8 @@ MODELS = {
     "sdpa_dense": traffic_fused_dense,
     "fa2_minimal": traffic_fused_dense,
     "naive_torch": traffic_materializing,
-    "moonshot": traffic_materializing,
+    "moonshot_naive": traffic_materializing,
+    "moonshot_efficient": traffic_flash_moba,
 }
 
 
@@ -299,7 +300,8 @@ def flops_performed(name, batch, seq_len, heads, head_dim, cfg) -> float:
     crediting it with the dense equivalent would place it to the right of its
     true intensity and flatter it exactly where the plot is meant to be honest.
     """
-    if name in ("sdpa_dense", "fa2_minimal", "naive_torch", "moonshot"):
+    if name in ("sdpa_dense", "fa2_minimal", "naive_torch",
+                "moonshot_naive"):
         # QK^T and PV, two FLOPs per MAC, halved for causal.
         return 2.0 * 2.0 * batch * heads * seq_len * seq_len * head_dim / 2.0
     attended = min(cfg.top_k, cfg.num_blocks(seq_len)) * cfg.block_size
@@ -381,6 +383,7 @@ def print_table(points: list[Point], c: Ceilings) -> None:
     print(f"  {'backend':<13} {'S':>6} {'ms':>8} {'GB moved':>9} "
           f"{'FLOP/byte':>10} {'TFLOP/s':>8} {'roof':>8} {'of roof':>8}  bound")
     print("  " + "-" * 88)
+    over = [p for p in points if p.fraction_of_roof(c) > 1.0]
     for p in sorted(points, key=lambda p: (p.seq_len, p.name)):
         roof = c.roof(p.intensity) / 1e12
         mark = "" if p.traffic.exact else " ~"
@@ -389,6 +392,21 @@ def print_table(points: list[Point], c: Ceilings) -> None:
               f"{p.intensity:>10.1f}{mark:<2} {p.achieved / 1e12:>6.2f} "
               f"{roof:>8.2f} {p.fraction_of_roof(c):>7.0%}  {p.bound_by(c)}")
     print("  ~ = traffic model is a lower bound; see the module docstring.")
+    if over:
+        # A free correctness check on the whole figure. Nothing can beat the
+        # roof, so a point above it means the *ceiling* is wrong, not the
+        # kernel -- and the usual cause is that the ceilings were measured
+        # while something else had the GPU. Caught exactly that way on
+        # 2026-09-07, when a test suite was still running in another process
+        # and peak_flops came out at 8.55 TFLOP/s against 14.16 on a quiet box.
+        worst = max(p.fraction_of_roof(c) for p in over)
+        print("")
+        print(f"  WARNING: {len(over)} point(s) exceed the roof, worst "
+              f"{worst:.0%}. Nothing can beat the roof, so the ceiling")
+        print("  measurement is wrong -- almost always because another "
+              "process had the GPU")
+        print("  while it was taken. Re-run on a quiet box before "
+              "believing any row.")
 
 
 def print_breakdown(points: list[Point], seq_len: int) -> None:

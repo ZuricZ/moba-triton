@@ -26,7 +26,7 @@ all implemented and tested against a PyTorch oracle. **440 tests pass.**
 `block_size=128, top_k=8` (FlashMoBA's published configuration), bf16,
 shape `[1, S, 4, 64]`, forward pass:
 
-| S | blocks | ours | FlashMoBA (CUDA) | torch SDPA | MoonshotAI MoBA |
+| S | blocks | ours | FlashMoBA (CUDA) | torch SDPA | MoonshotAI (naive) |
 |---:|---:|---:|---:|---:|---:|
 | 1024 | 8 | 0.293 ms | 1.418 ms | 0.083 ms | 4.386 ms |
 | 2048 | 16 | 0.476 ms | 1.655 ms | 0.231 ms | 9.619 ms |
@@ -43,8 +43,13 @@ Three things this table says, and one it does not:
   the routing overhead of pretending there is. Dense attention should win, and
   it does. The kernel overtakes dense between S=4096 and S=8192, and the gap
   widens from there, which is the regime MoBA exists for.
-- **Against the reference MoBA implementation it is 15–240× faster**, growing
-  with sequence length.
+- **Against MoonshotAI's *naive* path it is 15–240× faster** — but read that
+  with care. MoonshotAI ship two implementations: `moba_naive.py`, written to
+  be read, which materialises the score matrix; and `moba_efficient.py`, which
+  fuses onto FlashAttention and is what their library actually runs. Only the
+  naive one is measured above, because the fused one needs flash-attn 2.6.3.
+  **A 240× number against code written for clarity is not a claim about their
+  fast path**, and the honest comparison is still pending.
 - **The numbers scale the way the algorithm says they should.** MoBA attends
   `top_k × block_size` = 1024 keys per query whatever S is, so cost is linear
   rather than quadratic — and 0.766 → 1.596 ms across a doubling of S is a

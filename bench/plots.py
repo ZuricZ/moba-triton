@@ -40,10 +40,11 @@ SERIES = {
     "ours": "#2a78d6",          # blue    -- the subject
     "flash_moba": "#eb6834",    # orange  -- the CUDA target
     "triton_moba": "#1baf7a",   # aqua    -- the other Triton MoBA
-    "moonshot": "#eda100",      # yellow  -- the algorithm's reference
+    "moonshot_efficient": "#eda100",   # yellow  -- their fused path
+    "moonshot_naive": "#4a3aa7",       # violet  -- their readable path
     "sdpa_dense": "#e87ba4",    # magenta -- dense baseline
     "fa2_minimal": "#008300",   # green   -- our own dense baseline
-    "naive_torch": "#4a3aa7",   # violet  -- the oracle
+    "naive_torch": "#8c5a3c",   # brown   -- our oracle
 }
 FALLBACK = INK_SOFT
 
@@ -53,7 +54,8 @@ ROLE = {
     "ours": (2.4, "-"),
     "flash_moba": (1.8, (0, (5, 2))),
     "triton_moba": (1.8, (0, (5, 2))),
-    "moonshot": (1.5, (0, (1, 2))),
+    "moonshot_efficient": (1.8, (0, (5, 2))),
+    "moonshot_naive": (1.4, (0, (6, 2, 1, 2))),
     "sdpa_dense": (1.5, (0, (1, 2))),
     "fa2_minimal": (1.5, (0, (1, 2))),
     "naive_torch": (1.4, (0, (6, 2, 1, 2))),

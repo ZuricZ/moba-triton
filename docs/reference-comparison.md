@@ -86,7 +86,7 @@ Cooling first restores it, and cheaply:
 Hence `cool_down_device()` then `warm_up_device()` before **every**
 measurement, not once per run. One short measurement does not re-cook the
 card; a provider running hundreds of milliseconds a rep does, which is how
-`moonshot` at 690 ms poisoned every backend measured after it.
+`moonshot_naive` at 690 ms poisoned every backend measured after it.
 
 ### Tight error bars around a wrong number
 
@@ -140,7 +140,7 @@ included for the first time. All six backends monotonic in S.
 
 **Forward:**
 
-| S | blocks | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot |
+| S | blocks | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot_naive |
 |---|---|---|---|---|---|---|---|
 | 1024 | 8 | 0.293 ms | 1.418 ms | 0.083 ms | 0.077 ms | 2.164 ms | 4.386 ms |
 | 2048 | 16 | 0.476 ms | 1.655 ms | 0.231 ms | 0.221 ms | 4.738 ms | 9.619 ms |
@@ -149,7 +149,7 @@ included for the first time. All six backends monotonic in S.
 
 **Backward** (`forward().backward(dO)`, the full step, as NSA reports it):
 
-| S | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot |
+| S | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot_naive |
 |---|---|---|---|---|---|---|
 | 1024 | 0.575 ms | 2.531 ms | 0.305 ms | 0.629 ms | 3.793 ms | 11.035 ms |
 | 2048 | 1.160 ms | 2.601 ms | 0.813 ms | 2.029 ms | 9.240 ms | 33.227 ms |
@@ -162,11 +162,25 @@ included for the first time. All six backends monotonic in S.
 |---|---|---|
 | vs `sdpa_dense` | **1.77x** | **2.02x** |
 | vs `flash_moba` | 2.94x | 1.40x |
-| vs `moonshot` | 240x | 592x |
+| vs `moonshot_naive` | 240x | 592x |
 
-`moonshot` is MoonshotAI's own MoBA -- the algorithm's reference
-implementation, in PyTorch. `naive_torch` is our oracle. `fa2_minimal` is our
-from-scratch FlashAttention-2, a second dense baseline.
+`moonshot_naive` is MoonshotAI's readable reference, in PyTorch. `naive_torch`
+is our oracle. `fa2_minimal` is our from-scratch FlashAttention-2, a second
+dense baseline.
+
+**The Moonshot column is their slow path, and the tables above say so only
+because the name now does.** They ship two implementations: `moba_naive.py`
+materialises the score matrix and exists to be read; `moba_efficient.py` fuses
+onto FlashAttention and is what their library runs. Until 2026-09-07 this
+backend was registered as plain `moonshot`, which claimed the naive path *was*
+MoonshotAI's MoBA and turned a comparison against reference code into a
+headline 240x. Renamed to `moonshot_naive`, with `moonshot_efficient` now
+registered beside it and reporting itself unavailable until flash-attn 2.6.3
+exists.
+
+That single dependency gates two backends -- `moonshot_efficient` and
+`triton_moba` -- which is the argument for building it on the rented card even
+though it is an hour of compile time.
 
 ### Two independent checks that this run is sound
 
@@ -197,7 +211,7 @@ sm_80/90, where their tile choice is the one they designed for.
 
 Large, and widening with sequence length. Both are correct implementations of
 the same algorithm; the difference is entirely that theirs materializes what
-ours keeps on chip. Treat the exact multiples as approximate -- `moonshot`'s
+ours keeps on chip. Treat the exact multiples as approximate -- `moonshot_naive`'s
 own time moved 31.9 / 33.8 / 46.9 ms across three runs at S=4096, being naive
 PyTorch with no fused kernel. The order of magnitude is the result.
 

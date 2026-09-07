@@ -40,6 +40,7 @@ import torch
 import triton
 import triton.testing
 
+from bench import plots
 from bench.suite import (
     cool_down_device,
     default_seq_lens,
@@ -227,20 +228,24 @@ def _callable(backend, backward: bool):
     return backend.forward
 
 
-# What each line *is*, which decides how it is drawn. A dense baseline is not
-# a competitor -- it is the reference line the sparse kernels are trying to
-# beat -- and our own oracle is a correctness check that happens to be
-# runnable. Drawing all three groups identically invites reading the plot as a
-# seven-way race, which it is not.
-_GROUPS = {
-    "ours":        ("#d62728", "-"),    # the subject, solid red
-    "flash_moba":  ("#1f77b4", "--"),   # MoBA, CUDA          -- the perf target
-    "triton_moba": ("#9467bd", "--"),   # MoBA, Triton+CUDA FA
-    "moonshot":    ("#8c564b", "--"),   # MoBA, plain PyTorch -- the reference
-    "sdpa_dense":  ("#7f7f7f", ":"),    # dense baseline
-    "fa2_minimal": ("#2ca02c", ":"),    # dense baseline, ours
-    "naive_torch": ("#bcbd22", "-."),   # our oracle
-}
+def _style(name: str) -> tuple[str, object]:
+    """Returns (colour, dash) for one line, from the shared palette.
+
+    Was a local table of matplotlib's default hues. Two things were wrong with
+    it and both are fixed by deferring to `bench.plots`: the colours were not
+    checked for colour-vision separation, and they lived here rather than
+    beside the ones the roofline uses, so the same backend could be a different
+    colour in two figures of the same experiment.
+
+    What the table got right is kept: a dense baseline is not a competitor, it
+    is the line the sparse kernels are trying to beat, and our oracle is a
+    correctness check that happens to run. Drawing all three groups identically
+    invites reading the plot as a seven-way race, which it is not. That
+    distinction now lives in `plots.ROLE` as a dash pattern, which survives
+    greyscale printing where colour alone does not.
+    """
+    _, dash = plots.line_style(name)
+    return plots.color(name), dash
 
 
 def _bench(mode: str) -> triton.testing.Benchmark:
@@ -262,7 +267,7 @@ def _bench(mode: str) -> triton.testing.Benchmark:
         line_arg="provider",
         line_vals=[f"{n}{suffix}" for n in names],
         line_names=names,                      # the suffix is the plot, not the line
-        styles=[_GROUPS.get(n, ("black", "-")) for n in names],
+        styles=[_style(n) for n in names],
         xlabel="sequence length",
         ylabel="latency (ms)",
         y_log=True,

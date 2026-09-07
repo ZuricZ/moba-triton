@@ -1,4 +1,4 @@
-"""MoonshotAI/MoBA as a backend -- the algorithm's reference implementation.
+"""MoonshotAI/MoBA, naive path -- the algorithm's readable reference.
 
 We load `moba_naive.py` directly by path rather than importing their package.
 Their package is also named `moba`, and their `__init__.py` pulls in
@@ -6,9 +6,17 @@ Their package is also named `moba`, and their `__init__.py` pulls in
 and math, so loading just that file gives us a runnable third-party MoBA with
 no heavy dependencies and no name collision. See `layout.load_reference_module`.
 
-Their efficient path (`moba_efficient.py`) does need flash-attn 2.6.3 and is
-deliberately not wired up here; the naive path is what matters for checking
-semantics against ours.
+WHY THE NAME CARRIES `_naive`. This backend was called plain `moonshot` until
+2026-09-07, which quietly claimed it was MoonshotAI's MoBA. It is not: they
+ship two, and this is the one written to be *read*. `moba_efficient.py` is the
+one written to be fast, and it lives in `moonshot_efficient.py` beside this.
+Reporting a speedup against the readable one under the unqualified name of its
+authors overstated our result, and the fix belongs in the name rather than in a
+footnote nobody reads.
+
+Keep this backend anyway. It materializes the score matrix, so it is the
+clearest statement of what MoBA means, and it needs no compiled dependency --
+which makes it the one that always runs.
 """
 
 import torch
@@ -31,10 +39,10 @@ def _load():
     return load_reference_module(_MODULE_ALIAS, _RELATIVE_PATH)
 
 
-class MoonshotBackend:
+class MoonshotNaiveBackend:
     """MoonshotAI's naive MoBA, adapted from varlen to [B, S, H, D]."""
 
-    name = "moonshot"
+    name = "moonshot_naive"
     vendored = True
     computes_moba = True
 
@@ -58,7 +66,7 @@ class MoonshotBackend:
     ) -> torch.Tensor:
         ok, reason = self.is_available(cfg)
         if not ok:
-            raise RuntimeError(f"moonshot backend not available: {reason}")
+            raise RuntimeError(f"moonshot_naive backend not available: {reason}")
 
         module = _load()
         b, s, h, d = q.shape        # token-major
@@ -74,4 +82,4 @@ class MoonshotBackend:
         return from_varlen(out, b, s)
 
 
-register(MoonshotBackend())
+register(MoonshotNaiveBackend())

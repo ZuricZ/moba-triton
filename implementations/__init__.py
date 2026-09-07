@@ -27,7 +27,8 @@ from implementations import ours as _ours  # noqa: F401
 # skip-with-reason rather than an ImportError at package import time.
 from implementations import fa2_minimal as _fa2_minimal  # noqa: F401
 from implementations import flash_moba as _flash_moba  # noqa: F401
-from implementations import moonshot as _moonshot  # noqa: F401
+from implementations import moonshot_efficient as _moonshot_efficient  # noqa: F401
+from implementations import moonshot_naive as _moonshot_naive  # noqa: F401
 from implementations import triton_moba as _triton_moba  # noqa: F401
 
 __all__ = [

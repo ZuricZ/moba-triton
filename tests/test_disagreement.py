@@ -29,7 +29,7 @@ from conftest import make_qkv
 # so an fp32 comparison is exact while anything finer is bounded by fp32
 # epsilon rather than by the input dtype.
 EXPECTED_AGREEMENT = {
-    ("moonshot", "naive_torch"): 1e-6,
+    ("moonshot_naive", "naive_torch"): 1e-6,
 }
 
 
