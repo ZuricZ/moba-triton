@@ -8,13 +8,24 @@ and needs `combine_partials`, a pass that is pure bandwidth. Until now we have
 asserted that trade is worth it and observed that wall-clock agrees. A roofline
 says *why*, and says which ceiling we are actually pinned against.
 
-THE MODEL IS COMPULSORY TRAFFIC, NOT MEASURED TRAFFIC. Every byte is counted
-once per time the algorithm must move it between HBM and the SMs. Real traffic
-is higher: L2 misses, re-reads of a tile that did not stay resident, write
-allocation. So the arithmetic intensities here are *upper bounds*, and a
-backend's true position is at or to the left of where it is plotted.
-`bench/profile.py` measures the truth with Nsight Compute; the gap between the
-two is itself the interesting number.
+THE MODEL IS REQUESTED TRAFFIC, NOT MEASURED TRAFFIC. Every byte is counted
+once per time the algorithm *asks* for it. That is not the same as DRAM
+traffic, and it errs in different directions for different terms:
+
+* **Terms too large to cache are accurate.** This card has 2 MiB of L2. The
+  partials are 32 MiB each way at S=8192, so every one of those bytes really
+  does cross the bus.
+* **Re-read terms are overstated.** `ours` pulls each query row `top_k` times,
+  but the whole of Q is only 4 MiB, so L2 absorbs some of it. Real Q traffic is
+  at or below the modelled figure.
+* **Dense kernels are understated.** A FlashAttention query tile re-reads
+  earlier K/V tiles, which is quadratic in S and only partly cached; the four
+  tensors are a floor, not the truth.
+
+So the arrows point opposite ways for sparse and dense, which is exactly why
+the model cannot settle the comparison on its own. `bench/profile.py` measures
+DRAM traffic with Nsight Compute's hardware counters; the gap between modelled
+and measured is itself the interesting number.
 
 READ THE PLOT LIKE THIS. A point under the sloped roof is memory bound -- it
 cannot go faster without moving fewer bytes. A point under the flat roof is
@@ -149,7 +160,8 @@ def _tensor_bytes(batch, seq_len, heads, head_dim, itemsize) -> int:
     return batch * seq_len * heads * head_dim * itemsize
 
 
-def traffic_ours(batch, seq_len, heads, head_dim, cfg, kv_heads=None) -> Traffic:
+def traffic_ours(batch, seq_len, heads, head_dim, cfg, kv_heads=None,
+                 partials_dtype=None) -> Traffic:
     """Compulsory traffic for the KV-block-major kernel plus its combine.
 
     Four distinct movements, and the interesting result is which dominates.
@@ -161,18 +173,28 @@ def traffic_ours(batch, seq_len, heads, head_dim, cfg, kv_heads=None) -> Traffic
     * **K and V are read exactly once each.** Each block is loaded by the one
       program that owns it. This is the inversion's payoff, and it is why the
       utilization argument holds.
-    * **The partials round-trip.** `part_acc` is [B, H, S, top_k, D] in float32
-      -- written by the attend pass, read back by the combine. Float32 because
-      an un-normalized accumulator cannot afford bf16's range.
+    * **The partials round-trip.** `part_acc` is [B, H, S, top_k, D], written by
+      the attend pass and read back by the combine. Stored at the *compute*
+      dtype, not float32: `attend_partials` defaults `partials_dtype` to
+      `q.dtype`, which `moba_fwd`'s docstring records as worth ~22% end to end.
+      Only `empty_partials` says float32, and only because it has no query to
+      read a dtype from. Modelling it as float32 -- as the first version of
+      this file did -- doubles the largest term and moves the whole verdict.
+      `part_m` and `part_l` stay float32 but are a factor of `head_dim`
+      smaller, so they are folded in rather than listed.
     * **O is written once.**
     """
     kv_heads = kv_heads or heads
     itemsize = torch.tensor([], dtype=cfg.dtype).element_size()
+    partials_dtype = partials_dtype or cfg.dtype
+    pitem = torch.tensor([], dtype=partials_dtype).element_size()
     num_blocks = cfg.num_blocks(seq_len)
     slots = min(cfg.top_k, num_blocks)
 
     q_row = batch * heads * seq_len * head_dim * itemsize
-    partial = batch * heads * seq_len * slots * head_dim * FP32
+    partial = batch * heads * seq_len * slots * head_dim * pitem
+    # part_m and part_l: [B, H, S, slots] float32 each, both directions.
+    partial += 2 * 2 * batch * heads * seq_len * slots * FP32 // (2 * head_dim)
     return Traffic({
         "Q (gathered, x top_k)": slots * q_row,
         "K": _tensor_bytes(batch, seq_len, kv_heads, head_dim, itemsize),
