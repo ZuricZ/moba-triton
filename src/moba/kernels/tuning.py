@@ -88,13 +88,25 @@ def estimate_shared_memory(
 def choose_group(
     cfg: MoBAConfig, head_dim: int, itemsize: int, device=None
 ) -> int:
-    """Picks the largest inner-loop chunk height that fits in shared memory.
+    """Returns the largest inner-loop chunk height that fits in shared memory.
+
+    NOT NECESSARILY THE ONE THE KERNEL USES. This is an upper bound from the
+    shared-memory budget; `attend_partials` times the candidates that compile
+    and keeps the fastest, which on sm_86 is consistently 64 rather than this
+    function's 128. Largest-that-fits was the policy until 2026-09-07 and cost
+    up to 15% -- a tile that large spills registers, and an SM hosting one
+    resident block has nothing to hide memory latency behind. See `_AUTOTUNE`
+    in `moba_fwd`.
+
+    Still worth computing: it bounds the search, and `bench/load_balance.py`
+    needs the tile height to simulate the kernel's job sizes.
 
     `group` is how many queries are processed per iteration -- NOT how many
     selected this block. The loop iterates as many times as needed either way,
     and K/V load once *outside* it, so a larger group buys no extra
     amortization; it only trims loop overhead. What it costs is shared memory,
-    because the gathered q tile is pipelined.
+    because the gathered q tile is pipelined, and registers, which is what
+    actually decides.
 
     This is why an earlier `GROUP = top_k * block_size` was wrong: it sized a
     tile from a consumer count. Uncapped it asked for 112 KiB against a 99 KiB

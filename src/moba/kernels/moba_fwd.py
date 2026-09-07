@@ -31,6 +31,8 @@ What it gives up is output ownership: a query's contributions come from several
 programs and must be merged afterwards (D10).
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -366,10 +368,103 @@ def empty_partials(
     )
 
 
-# Chunk heights the compiler has already accepted, keyed by everything
-# that can change the allocation. Populated by `attend_partials` on the
-# first successful launch of each configuration.
+# The chunk height chosen for each configuration, keyed by everything that can
+# change the allocation. Populated by `attend_partials` the first time a
+# configuration is seen, and reused for the life of the process.
 _GROUP_CACHE: dict[tuple, int] = {}
+
+# Whether to time the candidates rather than take the first that compiles.
+#
+# WHY THIS EXISTS. `group_candidates` returns heights largest-first, and the
+# loop used to keep the first the compiler accepted -- so the policy was
+# "largest tile that fits shared memory". That is the wrong objective.
+# Measured on sm_86 at S=4096, the attend pass alone:
+#
+#     block_size 128, top_k 8,  D=64     128: 0.458 ms   64: 0.390 ms
+#     block_size 64,  top_k 8,  D=64     128: 0.256 ms   64: 0.239 ms
+#     block_size 128, top_k 12, D=128    128: does not compile
+#
+# 64 wins or ties everywhere tried, by up to 15%, and the curve is not
+# monotonic -- 32 and 16 are worse than both. The reason is in `tuning.py`:
+# GROUP=128 at D=64 measured 255 registers with 8 spills, which leaves an SM
+# hosting almost nothing concurrently, and with no other warps resident there
+# is nothing to hide memory latency behind. A bigger tile does less work per
+# second despite doing more work per iteration.
+#
+# Rather than replace one guess with another -- `MAX_GROUP = 64` would be a
+# magic number tied to this card's register file -- the launcher times the
+# candidates that compile and keeps the winner. This is the lesson
+# `PIPELINE_STAGES` already records, applied to the knob next to it.
+#
+# Set MOBA_AUTOTUNE=0 to take the first compiling candidate instead, which
+# makes a run reproducible when bisecting.
+_AUTOTUNE = os.environ.get("MOBA_AUTOTUNE", "1") != "0"
+
+# Timed launches per candidate. Three is enough to separate 0.39 from 0.46 ms
+# and cheap enough to pay once per configuration.
+_AUTOTUNE_REPS = 3
+
+# How much faster a candidate must be to displace the incumbent.
+#
+# WITHOUT THIS THE CHOICE IS NOT REPRODUCIBLE. Chunk height is *nearly* inert
+# numerically -- it decides how many queries a program handles per iteration,
+# not what each query computes -- but `tl.dot` selects different instruction
+# sequences for different tile shapes, so the accumulation order inside the dot
+# product changes with it. Measured at block_size 32, top_k 8, D=64: heights 16
+# and 32 agree bitwise, 64 and 128 agree bitwise, and the two pairs differ by
+# 1.2e-4. That is far inside bf16's own epsilon of ~8e-3, so it is not an
+# accuracy problem -- but it is observable.
+#
+# Selection is by measured time, and measured time is noisy. Without a margin,
+# two runs of the same program could pick different heights and produce
+# different numbers, which `config.py` already argues is the worst kind of bug:
+# indistinguishable from a race condition when debugging.
+#
+# 5% is comfortably below the 15-19% that separates 64 from 128 on sm_86, and
+# comfortably above run-to-run noise. Candidates are visited largest-first, so
+# a tie leaves the old largest-that-fits policy in place.
+_AUTOTUNE_MARGIN = 0.05
+
+
+def _fastest(launch, candidates: list[int]) -> int:
+    """Returns the candidate with the lowest median launch time.
+
+    Times with CUDA events rather than `triton.testing.do_bench`, because
+    `src/moba` is the library: it may not import from `bench/`, and pulling in
+    a benchmark harness on the first forward pass of a training run would be
+    the wrong dependency in the wrong direction.
+
+    Args:
+        launch: Callable taking a chunk height and running the kernel.
+        candidates: Heights already known to compile.
+
+    Returns:
+        The fastest height by more than `_AUTOTUNE_MARGIN`. Anything closer
+        than that leaves the incumbent in place, and since candidates arrive
+        largest-first, a near-tie reproduces the old largest-that-fits policy.
+    """
+    def elapsed(group: int) -> float:
+        launch(group)                       # warm: caches, and any lazy init
+        torch.cuda.synchronize()
+        samples = []
+        for _ in range(_AUTOTUNE_REPS):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            launch(group)
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end))
+        # Minimum, not mean: interference from other work on the device can
+        # only ever make a launch look slower, so the error is one-sided.
+        return min(samples)
+
+    best, best_time = candidates[0], elapsed(candidates[0])
+    for group in candidates[1:]:
+        current = elapsed(group)
+        if current < best_time * (1.0 - _AUTOTUNE_MARGIN):
+            best, best_time = group, current
+    return best
 
 
 def attend_partials(
@@ -460,8 +555,19 @@ def attend_partials(
     #
     # The head group is in the key even though it changes no allocation: a
     # stale entry would be very hard to diagnose, and the key is free.
+    #
+    # `varlen` is deliberately NOT in the key. It changes where a block's keys
+    # start, not how much shared memory a tile needs, so it cannot change which
+    # heights compile. Keying on it meant the packed and unpacked paths tuned
+    # independently, at different moments, and could settle on different
+    # heights -- which `test_autotuning_moves_the_result_by_far_less_than_the
+    # _dtype_does` shows is observable at ~1e-4. That broke the bitwise
+    # equality `test_packed_forward_under_gqa` asserts between a packed batch
+    # and the same sequences run one at a time, and that equality is worth more
+    # than the freedom to tune the two paths apart: it is the check that
+    # packing composes with head sharing rather than merely coexisting.
     key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
-           varlen, torch.cuda.get_device_capability(q.device))
+           torch.cuda.get_device_capability(q.device))
     cached = _GROUP_CACHE.get(key)
     candidates = ([cached] if cached is not None
                   else group_candidates(cfg, d, q.element_size(), q.device))
@@ -470,31 +576,58 @@ def attend_partials(
     # shrinks this grid by the group size and lengthens each program's column
     # by the same factor -- identical total work, `group` times fewer K and V
     # loads, which is the whole gain.
+    def launch(group: int) -> None:
+        moba_fwd_kernel[(index.num_blocks, n_seq * h_kv)](
+            q, k, v,
+            index.row_indices, index.head_indices, index.slot_of_pair,
+            index.col_offsets, index.col_nnz, index.order,
+            index.cu_seqlens if varlen else q,
+            part_m, part_l, part_acc,
+            s, index.row_indices.shape[-1], s,
+            d ** -0.5 * LOG2_E,
+            index.num_blocks,
+            BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
+            K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
+            VARLEN=varlen,
+        )
+
+    if cached is not None:
+        try:
+            launch(cached)
+            return part_m, part_l, part_acc
+        except OutOfResources:
+            # Cannot happen from `varlen` alone, but a cached height is now
+            # shared across paths, so failing over is cheaper than trusting it.
+            candidates = group_candidates(cfg, d, q.element_size(), q.device)
+            cached = None
+
+    viable: list[int] = []
     for group in candidates:
         try:
-            moba_fwd_kernel[(index.num_blocks, n_seq * h_kv)](
-                q, k, v,
-                index.row_indices, index.head_indices, index.slot_of_pair,
-                index.col_offsets, index.col_nnz, index.order,
-                index.cu_seqlens if varlen else q,
-                part_m, part_l, part_acc,
-                s, index.row_indices.shape[-1], s,
-                d ** -0.5 * LOG2_E,
-                index.num_blocks,
-                BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-                K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
-                VARLEN=varlen,
-            )
+            launch(group)
         except OutOfResources:
             continue
-        _GROUP_CACHE[key] = group
-        return part_m, part_l, part_acc
+        viable.append(group)
+        if cached is not None or not _AUTOTUNE:
+            _GROUP_CACHE[key] = group
+            return part_m, part_l, part_acc
 
-    raise ValueError(
-        f"no chunk height in {candidates} compiles for block_size "
-        f"{cfg.block_size} at head_dim {d}; every one exceeded this GPU's "
-        f"shared memory"
-    )
+    if not viable:
+        raise ValueError(
+            f"no chunk height in {candidates} compiles for block_size "
+            f"{cfg.block_size} at head_dim {d}; every one exceeded this GPU's "
+            f"shared memory"
+        )
+
+    best = viable[0] if len(viable) == 1 else _fastest(launch, viable)
+    _GROUP_CACHE[key] = best
+    if best != viable[0]:
+        # The last launch above was some other candidate, so the buffers hold
+        # its output. Identical values either way -- `group` changes only how
+        # the work is tiled -- but re-running keeps "what is in the buffers"
+        # answerable without reasoning about which candidate ran last.
+        launch(best)
+    return part_m, part_l, part_acc
 
 
 def combine_partials(
