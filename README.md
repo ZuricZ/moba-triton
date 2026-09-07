@@ -276,6 +276,7 @@ Written to be read in order.
 | [learning/03 — GQA and the column merge](docs/learning/03-gqa-and-the-column-merge.md) | How grouped-query attention changes the CSC columns, and what stays the same. |
 | [learning/04 — packed sequences and where the work goes](docs/learning/04-packed-sequences-and-where-the-work-goes.md) | Variable-length packing, and what it does to the block boundaries. |
 | [learning/05 — the backward pass](docs/learning/05-the-backward-pass.md) | Recomputation, and why dQ needs a different strategy than dK/dV. |
+| [environment](docs/environment.md) | Every version pin and where it is decided, including the reference commits each published number was measured against. |
 | [flashmoba-digest](docs/flashmoba-digest.md) | What FlashMoBA's CUDA actually does, cited line by line. |
 | [reference-comparison](docs/reference-comparison.md) | The head-to-head, and three measurement artifacts that flattered us. |
 | [divergence-measurements](docs/divergence-measurements.md) | Routing divergence measured from real selection masks. |
