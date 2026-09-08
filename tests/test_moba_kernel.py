@@ -24,7 +24,8 @@ from triton.runtime.errors import OutOfResources
 
 from moba.kernels import moba_fwd
 from moba.kernels.moba_fwd import (
-    _GROUP_CACHE,
+    AUTOTUNE_GROUPS,
+    _prune_by_shared_memory,
     moba_fwd_kernel,
     moba_combine_kernel,
     attend_partials,
@@ -323,7 +324,7 @@ def test_combine_ignores_garbage_in_slots_no_program_wrote(device):
 @pytest.mark.parametrize("gate", GATE_SWEEP)
 @pytest.mark.parametrize("head_dim", [64, 128])
 def test_the_chunk_height_that_ran_fits_shared_memory(device, gate, head_dim):
-    """Whatever height was chosen, the kernel it compiled has to fit.
+    """Whatever the autotuner chose, the kernel it compiled has to fit.
 
     An earlier version compared `estimate_shared_memory` against the kernel's
     reported `metadata.shared`, and immediately showed why that comparison is
@@ -331,9 +332,10 @@ def test_the_chunk_height_that_ran_fits_shared_memory(device, gate, head_dim):
     and 4 deep at 64, so no constant depth is both safe and tight. Modelling it
     conservatively is what cost 12% by rejecting GROUP=64.
 
-    So this asserts the property that survives any selection policy. Shared
-    memory overflow fails a launch outright rather than degrading, which makes
-    this the invariant worth guarding.
+    So this asserts the property that survives any selection policy, and the
+    policy has now changed twice. Shared-memory overflow fails a launch
+    outright rather than degrading, which makes this the invariant worth
+    guarding whoever is doing the choosing.
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
@@ -342,11 +344,8 @@ def test_the_chunk_height_that_ran_fits_shared_memory(device, gate, head_dim):
     index = build_csc_fused(q, k, cfg)
     budget = shared_memory_budget(q.device)
 
-    _GROUP_CACHE.clear()
     attend_partials(q, k, v, cfg, index)
-    key = (block_size, head_dim, q.element_size(), index.max_slots, True, 1,
-           torch.cuda.get_device_capability(q.device))
-    used = _GROUP_CACHE[key]
+    used = moba_fwd_kernel.best_config.kwargs["GROUP"]
 
     kernel = _compile_attn(q, k, v, cfg, index, used)
     assert kernel.metadata.shared <= budget, (
@@ -357,44 +356,28 @@ def test_the_chunk_height_that_ran_fits_shared_memory(device, gate, head_dim):
 
 @pytest.mark.parametrize("gate", GATE_SWEEP)
 @pytest.mark.parametrize("head_dim", [64, 128])
-def test_without_autotuning_the_height_is_the_largest_that_compiles(
-    device, gate, head_dim, monkeypatch
-):
-    """The fallback policy, which MOBA_AUTOTUNE=0 selects, is still exact.
+def test_the_pruner_never_returns_an_empty_config_list(device, gate, head_dim):
+    """`early_config_prune` must return at least one config or Triton raises.
 
-    This test used to be unconditional and was named "...and is the largest
-    that does". That stopped being true on 2026-09-07: `attend_partials` now
-    times the candidates that compile and keeps the fastest, which on sm_86 is
-    64 where the largest that fits is 128 -- worth up to 15%, because a tile
-    that large spills registers and leaves an SM with nothing resident to hide
-    memory latency behind.
-
-    The old contract is still the fallback, and a fallback nobody tests is a
-    fallback that quietly rots, so it is asserted here with autotuning off
-    rather than deleted.
+    The pruner drops chunk heights whose estimated shared memory exceeds the
+    budget. At head_dim 128 with a large block that can reject everything, and
+    an empty list is an AutotunerError rather than a fallback -- so the pruner
+    keeps the smallest candidate and lets the compiler deliver the verdict.
+    That branch is only reachable on hardware smaller than this card, so it is
+    asserted directly rather than waiting for such a machine to exist.
     """
-    monkeypatch.setattr(moba_fwd, "_AUTOTUNE", False)
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
-    q, k, v = make_qkv((1, 1024, 1, head_dim), dtype=torch.bfloat16,
-                       device=device)
-    index = build_csc_fused(q, k, cfg)
-
-    _GROUP_CACHE.clear()
-    attend_partials(q, k, v, cfg, index)
-    key = (block_size, head_dim, q.element_size(), index.max_slots, True, 1,
-           torch.cuda.get_device_capability(q.device))
-    used = _GROUP_CACHE[key]
-
-    bigger = [g for g in group_candidates(cfg, head_dim, q.element_size(),
-                                          q.device) if g > used]
-    for g in bigger:
-        with pytest.raises(OutOfResources):
-            _compile_attn(q, k, v, cfg, index, g)
+    kept = _prune_by_shared_memory(
+        list(moba_fwd_kernel.configs), {},
+        BLOCK_SIZE=cfg.block_size, D=head_dim,
+    )
+    assert kept, "pruner returned nothing; Triton would raise AutotunerError"
+    assert all(c.kwargs["GROUP"] in AUTOTUNE_GROUPS for c in kept)
 
 
 @pytest.mark.parametrize("gate", GATE_SWEEP)
-def test_autotuning_moves_the_result_by_far_less_than_the_dtype_does(
+def test_chunk_height_moves_the_result_by_far_less_than_the_dtype_does(
     device, gate
 ):
     """The autotuner's freedom has to be numerically negligible, and is.
@@ -409,25 +392,25 @@ def test_autotuning_moves_the_result_by_far_less_than_the_dtype_does(
     1.2e-4 against bfloat16's epsilon of ~8e-3 is a difference the storage
     format cannot represent as a distinction, which is the standard this
     project already applies elsewhere: error is judged against what the dtype
-    already costs, not against zero. The stricter guarantee that *does* hold --
-    that a given choice is stable run to run -- is enforced by
-    `_AUTOTUNE_MARGIN` rather than by numerics.
+    already costs, not against zero.
+
+    Compares the extreme heights directly rather than tuned-versus-untuned,
+    because with the choice now inside `triton.autotune` there is no "off".
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
     q, k, v = make_qkv((1, 1024, 2, 64), dtype=torch.bfloat16, device=device)
     index = build_csc_fused(q, k, cfg)
 
-    _GROUP_CACHE.clear()
-    tuned = combine_partials(*attend_partials(q, k, v, cfg, index), q.dtype)
+    outputs = []
+    for group in (max(AUTOTUNE_GROUPS), min(AUTOTUNE_GROUPS)):
+        parts = empty_partials(q.shape, index.max_slots, q.device, q.dtype)
+        parts[0].fill_(float("-inf"))
+        _compile_attn(q, k, v, cfg, index, group, parts)
+        outputs.append(combine_partials(*parts, q.dtype))
 
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(moba_fwd, "_AUTOTUNE", False)
-        _GROUP_CACHE.clear()
-        plain = combine_partials(*attend_partials(q, k, v, cfg, index), q.dtype)
-
-    scale = plain.float().abs().max().item()
-    err = (tuned.float() - plain.float()).abs().max().item()
+    scale = outputs[0].float().abs().max().item()
+    err = (outputs[0].float() - outputs[1].float()).abs().max().item()
     epsilon = torch.finfo(torch.bfloat16).eps
     assert err <= epsilon * scale, (
         f"chunk height moved the result by {err:.2e} against a bfloat16 "
@@ -435,14 +418,27 @@ def test_autotuning_moves_the_result_by_far_less_than_the_dtype_does(
     )
 
 
-def _compile_attn(q, k, v, cfg, index, group):
-    """Launches the attention kernel at a given chunk height."""
+def _compile_attn(q, k, v, cfg, index, group, parts=None):
+    """Launches the attention kernel at a fixed chunk height.
+
+    Launches through `moba_fwd_kernel.fn`, the JITFunction the autotuner
+    wraps. Going through the autotuner instead raises "Conflicting
+    meta-parameters: GROUP" -- it refuses a value the caller supplies for a
+    symbol it owns, which is the correct behaviour and the reason a test that
+    wants a *specific* height has to step around it.
+
+    Args:
+        parts: Buffers to write into, so a caller can read the result. Fresh
+            ones are allocated when omitted.
+    """
     b, s, h_q, d = q.shape
     h_kv = k.shape[2]
-    part_m, part_l, part_acc = empty_partials(
-        q.shape, index.max_slots, q.device, q.dtype)
-    part_m.fill_(float("-inf"))
-    return moba_fwd_kernel[(index.num_blocks, b * h_kv)](
+    part_m, part_l, part_acc = (
+        parts if parts is not None
+        else empty_partials(q.shape, index.max_slots, q.device, q.dtype))
+    if parts is None:
+        part_m.fill_(float("-inf"))
+    return moba_fwd_kernel.fn[(index.num_blocks, b * h_kv)](
         q, k, v, index.row_indices, index.head_indices, index.slot_of_pair,
         index.col_offsets, index.col_nnz, index.order, q,
         part_m, part_l, part_acc,

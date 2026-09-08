@@ -36,13 +36,22 @@ import os
 import torch
 import triton
 import triton.language as tl
-from triton.runtime.errors import OutOfResources
+import triton.testing
 
 from moba.config import MoBAConfig
-from moba.device import TENSOR_CORE_TILE, check_gathered_head_dim
+from moba.device import (
+    TENSOR_CORE_TILE,
+    check_gathered_head_dim,
+    shared_memory_budget,
+)
 from moba.gqa import head_group_size
 from moba.kernels.routing import CSCIndex, build_csc_fused
-from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
+from moba.kernels.tuning import (
+    LOG2_E,
+    choose_combine_tile,
+    estimate_shared_memory,
+    group_candidates,
+)
 from moba.varlen import validate_cu_seqlens
 
 
@@ -51,6 +60,166 @@ from moba.varlen import validate_cu_seqlens
 # -------------------------------------------------------------------------
 
 
+# Chunk heights offered to the autotuner, largest first. Not a claim that any
+# of them fits: `estimate_shared_memory` is a lower bound on what the compiler
+# allocates, so the pruner below drops the obviously impossible and Triton's
+# own OutOfResources handling scores whatever is left but still fails as
+# infinite time. Powers of two because the kernel calls `tl.arange(0, GROUP)`.
+AUTOTUNE_GROUPS = (128, 64, 32, 16)
+
+# `num_warps` is NOT tuned, and that is a measured decision rather than an
+# oversight. Measured on sm_86 at S=8192, block_size 128, top_k 8, D=64,
+# attend pass only:
+#
+#     GROUP 128, warps 2 -> 3.146 ms      GROUP 64, warps 2 -> 0.961 ms
+#     GROUP 128, warps 4 -> 0.873 ms      GROUP 64, warps 4 -> 0.707 ms
+#     GROUP 128, warps 8 -> 0.787 ms      GROUP 64, warps 8 -> 1.422 ms
+#
+# The axes interact hard -- the best warp count at one height is the worst at
+# the other, across a 4.5x spread -- but Triton's default of 4 is already
+# optimal at the height that wins, so tuning it as well bought 0.7%. What it
+# cost was every configuration compiling three kernels instead of one, and the
+# kernel test file went from 30 s to 500 s: at twelve distinct shapes, that is
+# 144 compilations, and compilation rather than benchmarking is what dominates.
+#
+# So the tuned axis is the one that pays. Widening to `num_warps=w for w in
+# (2, 4, 8)` is a one-line change in the configs below, and is worth making on
+# hardware where the default is not already the answer -- an A100 has five
+# times the SMs and no reason to agree with this card. Do it on evidence.
+AUTOTUNE_WARPS = (4,)
+
+
+def _prune_by_shared_memory(configs, named_args, **kwargs):
+    """Drops chunk heights that cannot fit, before anything is compiled.
+
+    Triton would score an over-large config as infinite time anyway, so this is
+    an optimisation rather than a correctness measure -- but compiling to find
+    out costs seconds per configuration, and the estimate is free.
+
+    Deliberately keeps anything the estimate merely *doubts*: the estimate is a
+    lower bound, so a config it allows may still be rejected by the compiler,
+    and that is the compiler's call to make. See `PIPELINE_STAGES` for what
+    modelling this too confidently cost.
+
+    Args:
+        configs: Every `triton.Config` offered.
+        named_args: Positional kernel arguments, unused here.
+        **kwargs: The constexprs, which is where `BLOCK_SIZE` and `D` arrive.
+
+    Returns:
+        The surviving configs, never empty -- if the estimate rejects every
+        one, the smallest is kept so the compiler produces the error rather
+        than the autotuner.
+    """
+    del named_args
+    block_size, head_dim = kwargs["BLOCK_SIZE"], kwargs["D"]
+    itemsize = 2 if kwargs.get("ITEMSIZE") is None else kwargs["ITEMSIZE"]
+    budget = shared_memory_budget()
+    kept = [c for c in configs
+            if estimate_shared_memory(block_size, c.kwargs["GROUP"], head_dim,
+                                      itemsize) <= budget]
+    if kept:
+        return kept
+    return [min(configs, key=lambda c: c.kwargs["GROUP"])]
+
+
+def _best_of_three(fn, quantiles=None, **kwargs):
+    """Benchmarks `fn` three times and keeps the fastest run.
+
+    Handed to `triton.autotune` as its `do_bench`, replacing the single
+    measurement per config it takes by default.
+
+    WHY ONE MEASUREMENT IS NOT ENOUGH HERE. The autotuner walks its configs in
+    order, and a slow one leaves the GPU hot for whatever follows: on this
+    laptop `GROUP=128, num_warps=2` runs at 4 ms a rep, so it holds the card at
+    full load for about a second immediately before the `GROUP=64` rows are
+    timed. Those then measured 1.04 ms against 0.71 timed on a settled card --
+    enough to change which config wins, and to lose 5% end to end.
+
+    Timing error is one-sided: nothing makes a kernel finish faster than it
+    can, so the minimum of several runs is the least contaminated sample rather
+    than an optimistic pick. The same argument `bench/compare.py` records.
+
+    This is timing hygiene, not a benchmark harness -- `src/moba` may not
+    import from `bench/`, and the thermal protocol that belongs there stays
+    there.
+
+    Args:
+        fn: Callable to time.
+        quantiles: Passed through to `triton.testing.do_bench`.
+        **kwargs: Ditto.
+
+    Returns:
+        Whatever `do_bench` returns, from the fastest of three runs.
+    """
+    runs = [triton.testing.do_bench(fn, quantiles=quantiles, **kwargs)
+            for _ in range(3)]
+    if quantiles is None:
+        return min(runs)
+    return min(runs, key=lambda r: r[0])
+
+
+@triton.autotune(
+    configs=[triton.Config({"GROUP": group}, num_warps=warps)
+             for group in AUTOTUNE_GROUPS for warps in AUTOTUNE_WARPS],
+    # Every constexpr that changes the *shape of the work* is here. The
+    # autotuner's cache is keyed on these argument values plus the dtypes of
+    # tensor arguments and nothing else, so a name left out means two
+    # configurations share one tuned result -- which is sometimes exactly what
+    # is wanted.
+    #
+    # `CAUSAL` and `VARLEN` are deliberately absent. They change which branches
+    # the kernel compiles, not how much shared memory a tile needs or how much
+    # work a program does, so they cannot change which height is fastest by
+    # enough to matter. Including them cost twice over: it doubled the number
+    # of shapes to tune, and -- because chunk height is observable at ~1e-4 --
+    # it let the packed and unpacked paths settle on different heights, which
+    # breaks the bitwise equality `test_packed_forward_under_gqa` asserts
+    # between a packed batch and the same sequences run one at a time. That
+    # equality is the check that packing composes with head sharing rather than
+    # merely coexisting, and it is worth more than tuning the two apart.
+    key=["BLOCK_SIZE", "D", "K_SLOTS", "H_Q", "H_KV"],
+    prune_configs_by={"early_config_prune": _prune_by_shared_memory},
+    # No `restore_value`. The obvious candidate is `PartM`, which the launcher
+    # fills with -inf before the kernel runs and which the autotuner then runs
+    # against many times off that single fill -- but the kernel only ever
+    # `tl.store`s to it and never loads it, so repeated launches are idempotent
+    # and there is nothing to restore.
+    #
+    # Declaring it anyway was not free. `restore_value` installs a pre-hook
+    # that clones the tensor and a post-hook that copies it back, both *inside*
+    # the timed region, and the timings came out wrong in a way that changed
+    # the winner: every GROUP=64 config measured about 2.6x slower than the
+    # same config timed directly, while the GROUP=128 rows agreed within 5%.
+    # A benchmark harness has to measure the kernel and not itself.
+    # Persisting the winner to disk is off by default, and that is the
+    # opposite of what it looks like it should be.
+    #
+    # It is genuinely attractive: tuning is paid once per machine instead of
+    # once per process, and a second test run of one file went from 59 s to
+    # 7.5 s. It is also the one property the hand-rolled search this replaces
+    # could not offer.
+    #
+    # But a cached choice is only as good as the conditions of the single run
+    # that made it, and those are not controllable. Measured on this card, same
+    # code, same machine:
+    #
+    #     tuned while the test suite held the GPU -> GROUP=128, 1.579 ms
+    #     tuned on a quiet box                    -> GROUP=64,  1.384 ms
+    #
+    # The first is the whole 14% given back, written to disk, silently, for
+    # every later run on that machine -- and the first thing that ever tunes is
+    # usually the test suite. Re-tuning per process is merely slow; a cached
+    # wrong answer is permanent and invisible, which is the worse failure for a
+    # project whose output is measurements.
+    #
+    # Set MOBA_TUNE_CACHE=1 where conditions are stable -- a datacenter card
+    # with `nvidia-smi -lgc` locked clocks, which is what `bench/suite.py`
+    # arranges on hardware that allows it. Clear a bad cache by removing
+    # ~/.triton/cache or setting TRITON_CACHE_DIR.
+    cache_results=os.environ.get("MOBA_TUNE_CACHE", "0") == "1",
+    do_bench=_best_of_three,
+)
 @triton.jit
 def moba_fwd_kernel(
     Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,
@@ -368,105 +537,6 @@ def empty_partials(
     )
 
 
-# The chunk height chosen for each configuration, keyed by everything that can
-# change the allocation. Populated by `attend_partials` the first time a
-# configuration is seen, and reused for the life of the process.
-_GROUP_CACHE: dict[tuple, int] = {}
-
-# Whether to time the candidates rather than take the first that compiles.
-#
-# WHY THIS EXISTS. `group_candidates` returns heights largest-first, and the
-# loop used to keep the first the compiler accepted -- so the policy was
-# "largest tile that fits shared memory". That is the wrong objective.
-# Measured on sm_86 at S=4096, the attend pass alone:
-#
-#     block_size 128, top_k 8,  D=64     128: 0.458 ms   64: 0.390 ms
-#     block_size 64,  top_k 8,  D=64     128: 0.256 ms   64: 0.239 ms
-#     block_size 128, top_k 12, D=128    128: does not compile
-#
-# 64 wins or ties everywhere tried, by up to 15%, and the curve is not
-# monotonic -- 32 and 16 are worse than both. The reason is in `tuning.py`:
-# GROUP=128 at D=64 measured 255 registers with 8 spills, which leaves an SM
-# hosting almost nothing concurrently, and with no other warps resident there
-# is nothing to hide memory latency behind. A bigger tile does less work per
-# second despite doing more work per iteration.
-#
-# Rather than replace one guess with another -- `MAX_GROUP = 64` would be a
-# magic number tied to this card's register file -- the launcher times the
-# candidates that compile and keeps the winner. This is the lesson
-# `PIPELINE_STAGES` already records, applied to the knob next to it.
-#
-# Set MOBA_AUTOTUNE=0 to take the first compiling candidate instead, which
-# makes a run reproducible when bisecting.
-_AUTOTUNE = os.environ.get("MOBA_AUTOTUNE", "1") != "0"
-
-# Timed launches per candidate. Three is enough to separate 0.39 from 0.46 ms
-# and cheap enough to pay once per configuration.
-_AUTOTUNE_REPS = 3
-
-# How much faster a candidate must be to displace the incumbent.
-#
-# WITHOUT THIS THE CHOICE IS NOT REPRODUCIBLE. Chunk height is *nearly* inert
-# numerically -- it decides how many queries a program handles per iteration,
-# not what each query computes -- but `tl.dot` selects different instruction
-# sequences for different tile shapes, so the accumulation order inside the dot
-# product changes with it. Measured at block_size 32, top_k 8, D=64: heights 16
-# and 32 agree bitwise, 64 and 128 agree bitwise, and the two pairs differ by
-# 1.2e-4. That is far inside bf16's own epsilon of ~8e-3, so it is not an
-# accuracy problem -- but it is observable.
-#
-# Selection is by measured time, and measured time is noisy. Without a margin,
-# two runs of the same program could pick different heights and produce
-# different numbers, which `config.py` already argues is the worst kind of bug:
-# indistinguishable from a race condition when debugging.
-#
-# 5% is comfortably below the 15-19% that separates 64 from 128 on sm_86, and
-# comfortably above run-to-run noise. Candidates are visited largest-first, so
-# a tie leaves the old largest-that-fits policy in place.
-_AUTOTUNE_MARGIN = 0.05
-
-
-def _fastest(launch, candidates: list[int]) -> int:
-    """Returns the candidate with the lowest median launch time.
-
-    Times with CUDA events rather than `triton.testing.do_bench`, because
-    `src/moba` is the library: it may not import from `bench/`, and pulling in
-    a benchmark harness on the first forward pass of a training run would be
-    the wrong dependency in the wrong direction.
-
-    Args:
-        launch: Callable taking a chunk height and running the kernel.
-        candidates: Heights already known to compile.
-
-    Returns:
-        The fastest height by more than `_AUTOTUNE_MARGIN`. Anything closer
-        than that leaves the incumbent in place, and since candidates arrive
-        largest-first, a near-tie reproduces the old largest-that-fits policy.
-    """
-    def elapsed(group: int) -> float:
-        launch(group)                       # warm: caches, and any lazy init
-        torch.cuda.synchronize()
-        samples = []
-        for _ in range(_AUTOTUNE_REPS):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            launch(group)
-            end.record()
-            end.synchronize()
-            samples.append(start.elapsed_time(end))
-        # Minimum, not mean: interference from other work on the device can
-        # only ever make a launch look slower, so the error is one-sided.
-        return min(samples)
-
-    best, best_time = candidates[0], elapsed(candidates[0])
-    for group in candidates[1:]:
-        current = elapsed(group)
-        if current < best_time * (1.0 - _AUTOTUNE_MARGIN):
-            best, best_time = group, current
-    return best
-
-
 def attend_partials(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -547,86 +617,25 @@ def attend_partials(
     # nothing measurable.
     part_m.fill_(float("-inf"))
 
-    # Largest chunk height first, letting the compiler reject what will not
-    # fit. `estimate_shared_memory` is a lower bound, so the head of this list
-    # is a proposal; Triton raises OutOfResources at compile time, before any
-    # argument is read, so a rejected attempt leaves nothing to undo. The
-    # winner is cached, making this a one-time cost per configuration.
-    #
-    # The head group is in the key even though it changes no allocation: a
-    # stale entry would be very hard to diagnose, and the key is free.
-    #
-    # `varlen` is deliberately NOT in the key. It changes where a block's keys
-    # start, not how much shared memory a tile needs, so it cannot change which
-    # heights compile. Keying on it meant the packed and unpacked paths tuned
-    # independently, at different moments, and could settle on different
-    # heights -- which `test_autotuning_moves_the_result_by_far_less_than_the
-    # _dtype_does` shows is observable at ~1e-4. That broke the bitwise
-    # equality `test_packed_forward_under_gqa` asserts between a packed batch
-    # and the same sequences run one at a time, and that equality is worth more
-    # than the freedom to tune the two paths apart: it is the check that
-    # packing composes with head sharing rather than merely coexisting.
-    key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
-           torch.cuda.get_device_capability(q.device))
-    cached = _GROUP_CACHE.get(key)
-    candidates = ([cached] if cached is not None
-                  else group_candidates(cfg, d, q.element_size(), q.device))
-
-    # One program per (KV block, batch, kv head). Grouped-query attention
-    # shrinks this grid by the group size and lengthens each program's column
-    # by the same factor -- identical total work, `group` times fewer K and V
-    # loads, which is the whole gain.
-    def launch(group: int) -> None:
-        moba_fwd_kernel[(index.num_blocks, n_seq * h_kv)](
-            q, k, v,
-            index.row_indices, index.head_indices, index.slot_of_pair,
-            index.col_offsets, index.col_nnz, index.order,
-            index.cu_seqlens if varlen else q,
-            part_m, part_l, part_acc,
-            s, index.row_indices.shape[-1], s,
-            d ** -0.5 * LOG2_E,
-            index.num_blocks,
-            BLOCK_SIZE=cfg.block_size, GROUP=group, D=d,
-            K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
-            VARLEN=varlen,
-        )
-
-    if cached is not None:
-        try:
-            launch(cached)
-            return part_m, part_l, part_acc
-        except OutOfResources:
-            # Cannot happen from `varlen` alone, but a cached height is now
-            # shared across paths, so failing over is cheaper than trusting it.
-            candidates = group_candidates(cfg, d, q.element_size(), q.device)
-            cached = None
-
-    viable: list[int] = []
-    for group in candidates:
-        try:
-            launch(group)
-        except OutOfResources:
-            continue
-        viable.append(group)
-        if cached is not None or not _AUTOTUNE:
-            _GROUP_CACHE[key] = group
-            return part_m, part_l, part_acc
-
-    if not viable:
-        raise ValueError(
-            f"no chunk height in {candidates} compiles for block_size "
-            f"{cfg.block_size} at head_dim {d}; every one exceeded this GPU's "
-            f"shared memory"
-        )
-
-    best = viable[0] if len(viable) == 1 else _fastest(launch, viable)
-    _GROUP_CACHE[key] = best
-    if best != viable[0]:
-        # The last launch above was some other candidate, so the buffers hold
-        # its output. Identical values either way -- `group` changes only how
-        # the work is tiled -- but re-running keeps "what is in the buffers"
-        # answerable without reasoning about which candidate ran last.
-        launch(best)
+    # GROUP and num_warps are chosen by `triton.autotune` on the decorator,
+    # not here: the launcher passes neither. Everything that changes the shape
+    # of the work is in the autotuner's `key`, so a new configuration tunes
+    # once and every later call with the same shape reuses the winner --
+    # persisted to disk, so it is decided once per machine rather than once
+    # per process.
+    moba_fwd_kernel[(index.num_blocks, n_seq * h_kv)](
+        q, k, v,
+        index.row_indices, index.head_indices, index.slot_of_pair,
+        index.col_offsets, index.col_nnz, index.order,
+        index.cu_seqlens if varlen else q,
+        part_m, part_l, part_acc,
+        s, index.row_indices.shape[-1], s,
+        d ** -0.5 * LOG2_E,
+        index.num_blocks,
+        BLOCK_SIZE=cfg.block_size, D=d,
+        K_SLOTS=slots, H_Q=h_q, H_KV=h_kv, CAUSAL=causal,
+        VARLEN=varlen,
+    )
     return part_m, part_l, part_acc
 
 
