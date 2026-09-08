@@ -35,15 +35,22 @@ against 64 MB at S=8192 -- so carrying it from the forward is far cheaper than
 writing the accumulator twice.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
-from triton.runtime.errors import OutOfResources
 
 from moba.config import MoBAConfig
 from moba.gqa import head_group_size
 from moba.kernels.routing import CSCIndex
-from moba.kernels.tuning import LOG2_E, choose_combine_tile, group_candidates
+from moba.device import shared_memory_budget
+from moba.kernels.moba_fwd import _best_of_three
+from moba.kernels.tuning import (
+    LOG2_E,
+    choose_combine_tile,
+    estimate_shared_memory,
+)
 
 # Queries per program for the preprocess and dQ-reduce passes. Both are pure
 # streaming over [B, H, S, ...] with no matmul, so this only trades program
@@ -84,11 +91,38 @@ BWD_KEY_TILE = 64
 # four matmuls per iteration where the forward does two, so it wants more warps
 # on a narrower tile; the forward wants the opposite. Nothing about one kernel's
 # tuning transfers to the other.
-BWD_GROUP = 32
-BWD_WARPS = 8
-BWD_STAGES = 3
+# Chunk heights offered to the autotuner. Capped below the forward's 128: this
+# kernel gathers two tiles an iteration (q and dO) where the forward gathers
+# one, so the same height needs more shared memory here.
+BWD_AUTOTUNE_GROUPS = (64, 32, 16)
 
-_BWD_GROUP_CACHE: dict[tuple, int] = {}
+# Warp counts and pipeline depths. Both are tuned rather than fixed, and both
+# were fixed until 2026-09-07 at values that measurement no longer supports.
+#
+# The comment above used to justify `32 queries over 8 warps` as a measured
+# result. It was measured -- before the thermal protocol existed, on a card
+# whose clock depended on whatever had just run. Re-measured under cool, warm,
+# best-of-three, forward plus backward at S=8192:
+#
+#     GROUP 64, warps 4, stages 2 -> 3.895 ms      <- best
+#     GROUP 32, warps 4, stages 3 -> 3.993 ms
+#     GROUP 32, warps 8, stages 3 -> 4.649 ms      <- what shipped
+#     GROUP 64, warps 8, stages 3 -> 5.637 ms
+#
+# 19% was sitting in three constants. `num_warps` dominates -- 4 beats 8 at
+# every height -- which is the opposite of what the old comment argued from the
+# matmul count, and a good reason to let the machine decide.
+#
+# `num_stages` is tuned too because it interacts: 2 wins at GROUP=64 and loses
+# at GROUP=32, an 8% swing either way.
+BWD_AUTOTUNE_WARPS = (4, 8)
+
+# Pipeline depth is fixed, not tuned, and that is a cost decision. It swings
+# ~8% and it interacts -- 2 wins at GROUP=64, 3 wins at GROUP=32 -- but 64 is
+# the height that wins overall, so 2 is the right constant to freeze. Tuning it
+# as well doubled the configs and took the test suite from 162 s to 651 s,
+# because compilation rather than benchmarking is what a config list costs.
+BWD_STAGES = 2
 
 
 # -------------------------------------------------------------------------
@@ -125,6 +159,54 @@ def moba_bwd_preprocess_kernel(O, DO, Delta, S, D: tl.constexpr,
     tl.store(Delta + pid_bh * S + offs_m, delta, mask=live)
 
 
+def _bwd_prune_by_shared_memory(configs, named_args, **kwargs):
+    """Drops chunk heights that cannot fit, before anything is compiled.
+
+    Same role as the forward's pruner, with a larger per-height cost: this
+    kernel holds q and dO tiles at once. `estimate_shared_memory` covers one
+    gathered tile, so the height is charged twice.
+
+    Args:
+        configs: Every `triton.Config` offered.
+        named_args: Positional kernel arguments, unused.
+        **kwargs: The constexprs, where `BLOCK_SIZE` and `D` arrive.
+
+    Returns:
+        Surviving configs, never empty -- the smallest is kept if the estimate
+        rejects everything, so the compiler gives the verdict.
+    """
+    del named_args
+    block_size, head_dim = kwargs["BLOCK_SIZE"], kwargs["D"]
+    budget = shared_memory_budget()
+    kept = [c for c in configs
+            if 2 * estimate_shared_memory(block_size, c.kwargs["GROUP"],
+                                          head_dim, 2) <= budget]
+    if not kept:
+        return [min(configs, key=lambda c: c.kwargs["GROUP"])]
+
+    # Only the two largest surviving heights are worth benchmarking. Measured,
+    # the gap between the best height and the next is ~5% while the gap between
+    # warp counts is ~45%, so a third height buys little and costs two more
+    # compilations per shape. The smaller heights stay in the config list
+    # because they are the fallback when nothing larger fits -- they just are
+    # not raced when something larger does.
+    heights = sorted({c.kwargs["GROUP"] for c in kept}, reverse=True)[:2]
+    return [c for c in kept if c.kwargs["GROUP"] in heights]
+
+
+@triton.autotune(
+    configs=[triton.Config({"GROUP": group}, num_warps=warps,
+                           num_stages=BWD_STAGES)
+             for group in BWD_AUTOTUNE_GROUPS
+             for warps in BWD_AUTOTUNE_WARPS],
+    # `CAUSAL` and `VARLEN` are absent for the reason `moba_fwd` records: they
+    # change which branches compile, not the size of a tile, and including them
+    # doubles the shapes to tune for no gain.
+    key=["BLOCK_SIZE", "KEY_TILE", "D", "K_SLOTS", "H_Q", "H_KV"],
+    prune_configs_by={"early_config_prune": _bwd_prune_by_shared_memory},
+    do_bench=_best_of_three,
+    cache_results=os.environ.get("MOBA_TUNE_CACHE", "0") == "1",
+)
 @triton.jit
 def moba_bwd_kernel(
     Q, K, V, DO, Lse, Delta,
@@ -462,40 +544,22 @@ def moba_backward(
     dq_part = torch.empty((b, h_q, s, slots * tiles, d), device=q.device,
                           dtype=q.dtype)
 
-    # Same try-and-fall-back as the forward, and the ceiling is lower here:
-    # this kernel gathers two tiles per iteration (q and dO) where the forward
-    # gathers one, so a chunk height the forward accepts may not compile. The
-    # compiler is the authority either way.
-    key = (cfg.block_size, d, q.element_size(), slots, causal, h_q // h_kv,
-           varlen, torch.cuda.get_device_capability(q.device))
-    cached = _BWD_GROUP_CACHE.get(key)
-    candidates = ([cached] if cached is not None
-                  else [g for g in group_candidates(
-                      cfg, d, q.element_size(), q.device) if g <= BWD_GROUP]
-                  or [BWD_GROUP])
-
-    for group in candidates:
-        try:
-            moba_bwd_kernel[(index.num_blocks * tiles, n_seq * h_kv)](
-                q, k, v, dout, lse, delta,
-                index.row_indices, index.head_indices, index.slot_of_pair,
-                index.col_offsets, index.col_nnz, index.order,
-                index.cu_seqlens if varlen else q,
-                dk, dv, dq_part,
-                s, index.row_indices.shape[-1], s,
-                d ** -0.5, d ** -0.5 * LOG2_E, index.num_blocks,
-                BLOCK_SIZE=cfg.block_size, KEY_TILE=key_tile, GROUP=group,
-                D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles,
-                H_Q=h_q, H_KV=h_kv, CAUSAL=causal, VARLEN=varlen,
-                num_warps=BWD_WARPS, num_stages=BWD_STAGES,
-            )
-        except OutOfResources:
-            continue
-        _BWD_GROUP_CACHE[key] = group
-        return reduce_dq(dq_part, part_m, q.dtype), dk, dv
-
-    raise ValueError(
-        f"no chunk height in {candidates} compiles for the backward at "
-        f"block_size {cfg.block_size}, head_dim {d}; every one exceeded this "
-        f"GPU's shared memory"
+    # GROUP, num_warps and num_stages come from `triton.autotune` on the
+    # decorator; the launcher passes none of them. The backward tunes
+    # separately from the forward and lands somewhere else -- 64 queries over
+    # 4 warps here against the forward's 64 over 4 with different pipelining --
+    # which is the argument for measuring each kernel rather than sharing a
+    # constant between them.
+    moba_bwd_kernel[(index.num_blocks * tiles, n_seq * h_kv)](
+        q, k, v, dout, lse, delta,
+        index.row_indices, index.head_indices, index.slot_of_pair,
+        index.col_offsets, index.col_nnz, index.order,
+        index.cu_seqlens if varlen else q,
+        dk, dv, dq_part,
+        s, index.row_indices.shape[-1], s,
+        d ** -0.5, d ** -0.5 * LOG2_E, index.num_blocks,
+        BLOCK_SIZE=cfg.block_size, KEY_TILE=key_tile,
+        D=d, K_SLOTS=slots, DQ_SLOTS=slots * tiles,
+        H_Q=h_q, H_KV=h_kv, CAUSAL=causal, VARLEN=varlen,
     )
+    return reduce_dq(dq_part, part_m, q.dtype), dk, dv

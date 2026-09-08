@@ -13,7 +13,7 @@ program owns a *key* block and gathers the queries that chose it, rather than
 owning a query tile and loading the union of whatever its queries wanted.
 
 Forward and backward, grouped-query attention, and variable-length packing are
-all implemented and tested against a PyTorch oracle. **440 tests pass.**
+all implemented and tested against a PyTorch oracle. **461 tests pass.**
 
 > **Scope.** This is a learning project, and the numbers below come from an
 > RTX 3050 Ti laptop (20 SMs, 4 GB). Read the *ratios*; the absolute times mean
@@ -256,7 +256,7 @@ src/moba/                 the library, and nothing else
 implementations/          uniform adapters for the head-to-head — ours, the
                           three references, and two dense baselines
 bench/                    benchmark drivers; run as modules (python -m bench.compare)
-tests/                    440 tests, plus the tolerance policy
+tests/                    461 tests, plus the tolerance policy
 docs/                     measurements and learning notes
 ```
 
