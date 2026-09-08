@@ -349,6 +349,10 @@ def measure(name: str, seq_len: int, cfg: MoBAConfig) -> float | None:
         q, k, v = (torch.randn(BATCH, seq_len, HEADS, HEAD_DIM, generator=g,
                                device="cuda", dtype=cfg.dtype) for _ in range(3))
         fn = lambda: backend.forward(q, k, v, cfg)      # noqa: E731
+        # Settle the device before the first launch, because that launch is
+        # what triggers autotuning for our backend -- see bench/compare.py.
+        cool_down_device()
+        warm_up_device()
         fn()
         cool_down_device()
         warm_up_device()

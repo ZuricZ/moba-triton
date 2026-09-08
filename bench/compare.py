@@ -302,7 +302,15 @@ def benchmark(seq_len, provider):
             fn = lambda: call(q, k, v, CFG).backward(do)  # noqa: E731
         else:
             fn = lambda: call(q, k, v, CFG)  # noqa: E731
-        fn()                      # surface an unsupported path before timing
+        # Settle the device BEFORE this call, not after. `fn()` is the first
+        # launch, so it is what triggers `triton.autotune` -- and the config it
+        # picks is then measured for the rest of the sweep. Choosing on a cold
+        # or heat-soaked card and measuring carefully afterwards is measuring
+        # the wrong kernel precisely: on this box, tuning while the GPU was
+        # busy picked GROUP=128 and gave back the whole 14%.
+        cool_down_device()
+        warm_up_device()
+        fn()                      # surface an unsupported path, and tune
         # Cool, then briefly warm, before *every* measurement. The device's
         # thermal state is shared, and a sweep hands it from one provider to
         # the next: `moonshot` at 690 ms a rep runs full-tilt for tens of
@@ -318,6 +326,7 @@ def benchmark(seq_len, provider):
         # `cool_down_device` handles a card with no headroom left; the short
         # warm-up handles one that has dropped to its idle clock. See both
         # docstrings in bench/suite.py.
+        # Again: tuning just ran the kernel a dozen times and heated the card.
         cool_down_device()
         warm_up_device()
         # Best of BEST_OF, not one measurement. Cooling cuts the contamination
