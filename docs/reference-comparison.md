@@ -142,27 +142,33 @@ included for the first time. All six backends monotonic in S.
 
 | S | blocks | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot_naive |
 |---|---|---|---|---|---|---|---|
-| 1024 | 8 | 0.293 ms | 1.418 ms | 0.083 ms | 0.077 ms | 2.164 ms | 4.386 ms |
-| 2048 | 16 | 0.476 ms | 1.655 ms | 0.231 ms | 0.221 ms | 4.738 ms | 9.619 ms |
-| 4096 | 32 | 0.766 ms | 2.438 ms | 0.776 ms | 0.786 ms | 16.399 ms | 31.686 ms |
-| 8192 | 64 | **1.596 ms** | 4.698 ms | 2.830 ms | 3.034 ms | 62.811 ms | 382.931 ms |
+| 1024 | 8 | 0.280 ms | 1.392 ms | 0.084 ms | 0.077 ms | 2.160 ms | 3.784 ms |
+| 2048 | 16 | 0.439 ms | 1.726 ms | 0.230 ms | 0.223 ms | 4.833 ms | 10.067 ms |
+| 4096 | 32 | 0.693 ms | 2.503 ms | 0.763 ms | 0.786 ms | 16.493 ms | 31.972 ms |
+| 8192 | 64 | **1.377 ms** | 4.377 ms | 2.814 ms | 3.057 ms | 62.712 ms | 321.059 ms |
 
 **Backward** (`forward().backward(dO)`, the full step, as NSA reports it):
 
 | S | ours | flash_moba | sdpa_dense | fa2_minimal | naive_torch | moonshot_naive |
 |---|---|---|---|---|---|---|
-| 1024 | 0.575 ms | 2.531 ms | 0.305 ms | 0.629 ms | 3.793 ms | 11.035 ms |
-| 2048 | 1.160 ms | 2.601 ms | 0.813 ms | 2.029 ms | 9.240 ms | 33.227 ms |
-| 4096 | 2.323 ms | 3.715 ms | 2.700 ms | 7.513 ms | 32.558 ms | 115.565 ms |
-| 8192 | **4.883 ms** | 6.820 ms | 9.853 ms | 29.043 ms | 512.335 ms | 2889.160 ms |
+| 1024 | 0.536 ms | 2.666 ms | 0.305 ms | 0.629 ms | 3.864 ms | 11.188 ms |
+| 2048 | 1.010 ms | 2.636 ms | 0.808 ms | 2.034 ms | 9.229 ms | 32.846 ms |
+| 4096 | 1.944 ms | 3.725 ms | 2.674 ms | 7.481 ms | 32.461 ms | 116.055 ms |
+| 8192 | **4.044 ms** | 6.856 ms | 9.911 ms | 29.005 ms | 511.572 ms | 2898.887 ms |
 
 **Ratios at S=8192**, the only length here with real sparsity:
 
 | | forward | backward |
 |---|---|---|
-| vs `sdpa_dense` | **1.77x** | **2.02x** |
-| vs `flash_moba` | 2.94x | 1.40x |
-| vs `moonshot_naive` | 240x | 592x |
+| vs `sdpa_dense` | **2.04x** | **2.45x** |
+| vs `flash_moba` | 3.18x | 1.70x |
+| vs `moonshot_naive` | 233x | 717x |
+
+Re-measured 2026-09-07 after both kernels moved to `triton.autotune`: the
+forward gained 14% and the backward 19% by tuning chunk height and warp count
+instead of taking the largest tile that fits shared memory. The crossover
+against dense moved down a step -- `ours` now wins at S=4096 (0.693 against
+0.763 ms) where it previously tied.
 
 `moonshot_naive` is MoonshotAI's readable reference, in PyTorch. `naive_torch`
 is our oracle. `fa2_minimal` is our from-scratch FlashAttention-2, a second
@@ -192,8 +198,8 @@ taken on a different day by a different driver, to within 3%:
 
 **Against arithmetic, which needs no prior record.** MoBA attends
 `top_k * block_size` = 1024 keys per query *whatever S is*, so total work grows
-linearly, and S=8192 must cost about twice S=4096. Measured: 0.766 -> 1.596 ms,
-a factor of 2.08. A contaminated run of 2026-09-05 reported 1.754 ms at S=4096
+linearly, and S=8192 must cost about twice S=4096. Measured: 0.693 -> 1.377 ms,
+a factor of 1.99. A contaminated run of 2026-09-05 reported 1.754 ms at S=4096
 against 1.639 ms at S=8192 -- more work taking less time -- and that violation
 is what exposed it. Worth keeping as a habit: dense attention is quadratic in
 S, MoBA is linear, and either constraint catches a bad cell on a machine with
@@ -201,7 +207,7 @@ no history at all.
 
 ### On beating flash_moba here
 
-2.94x on the forward, on 20 SMs and 99 KiB of shared memory. Their
+3.18x on the forward, on 20 SMs and 99 KiB of shared memory. Their
 `decide_lg_block_m` selects a 512-query tile at S=8192, sized for the 164 KiB
 an A100 provides. **This says our kernel suits this card, not that it is faster
 than theirs.** The comparison that would mean something needs the rented

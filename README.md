@@ -28,21 +28,22 @@ shape `[1, S, 4, 64]`, forward pass:
 
 | S | blocks | ours | FlashMoBA (CUDA) | torch SDPA | MoonshotAI (naive) |
 |---:|---:|---:|---:|---:|---:|
-| 1024 | 8 | 0.293 ms | 1.418 ms | 0.083 ms | 4.386 ms |
-| 2048 | 16 | 0.476 ms | 1.655 ms | 0.231 ms | 9.619 ms |
-| 4096 | 32 | 0.766 ms | 2.438 ms | 0.776 ms | 31.686 ms |
-| 8192 | 64 | **1.596 ms** | 4.698 ms | 2.830 ms | 382.931 ms |
+| 1024 | 8 | 0.280 ms | 1.392 ms | 0.084 ms | 3.784 ms |
+| 2048 | 16 | 0.439 ms | 1.726 ms | 0.230 ms | 10.067 ms |
+| 4096 | 32 | 0.693 ms | 2.503 ms | 0.763 ms | 31.972 ms |
+| 8192 | 64 | **1.377 ms** | 4.377 ms | 2.814 ms | 321.059 ms |
 
-At S=8192 — the only length here with real sparsity — that is **1.77× torch
-SDPA on the forward and 2.02× on the backward**.
+At S=8192 — the length with the most sparsity here — that is **2.04× torch
+SDPA on the forward and 2.45× on the backward**, and 3.18× / 1.70× against
+FlashMoBA's CUDA.
 
 Three things this table says, and one it does not:
 
 - **Sparsity is not free below the crossover.** At S=1024 there are 8 blocks
   and `top_k=8` selects *all of them* — there is no sparsity to exploit, only
   the routing overhead of pretending there is. Dense attention should win, and
-  it does. The kernel overtakes dense between S=4096 and S=8192, and the gap
-  widens from there, which is the regime MoBA exists for.
+  it does. The kernel overtakes dense at S=4096 and the gap widens from there,
+  which is the regime MoBA exists for.
 - **Against MoonshotAI's *naive* path it is 15–240× faster** — but read that
   with care. MoonshotAI ship two implementations: `moba_naive.py`, written to
   be read, which materialises the score matrix; and `moba_efficient.py`, which
@@ -52,8 +53,8 @@ Three things this table says, and one it does not:
   fast path**, and the honest comparison is still pending.
 - **The numbers scale the way the algorithm says they should.** MoBA attends
   `top_k × block_size` = 1024 keys per query whatever S is, so cost is linear
-  rather than quadratic — and 0.766 → 1.596 ms across a doubling of S is a
-  factor of 2.08.
+  rather than quadratic — and 0.693 → 1.377 ms across a doubling of S is a
+  factor of 1.99.
 - It does **not** mean we are faster than FlashMoBA. Their kernel picks a
   512-query tile at S=8192, sized for the 164 KiB of shared memory an A100
   has; this card has 99 KiB and 20 SMs. That comparison needs the rented card.
