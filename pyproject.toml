@@ -10,7 +10,18 @@ requires-python = ">=3.13"
 dependencies = ["torch", "triton", "numpy"]
 
 [dependency-groups]
-dev = ["pytest"]
+# Not runtime dependencies of `moba` -- nothing under src/ imports these, and
+# the package must stay installable without them. uv sync installs this group
+# by default, which is what the benchmark harness and the vendored references
+# need.
+#
+#   matplotlib  bench/plots.py. Absent from a fresh box, which is how the first
+#               A100 sweep died: it had only ever run where the venv happened
+#               to have it already.
+#   einops      imported by MoonshotAI's moba_efficient.py and by Triton-MoBA.
+#               Both extensions can build and still leave those backends
+#               unavailable for want of a pure-Python import.
+dev = ["pytest", "matplotlib", "einops"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
