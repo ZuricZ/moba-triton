@@ -32,6 +32,11 @@ from bench import plots
 # ---------------------------------------------------------------------------
 
 RESULTS = "results"
+
+# Below this sequence length the measured step is substantially harness rather
+# than kernel: bench/_small_s_dip put the gap between the autograd step and the
+# sum of its kernels at 47% (S=1024), 21% (2048), 11% (4096) and ~0 from 8192.
+HARNESS_LIMIT = 8192
 SUFFIX = " (latency (ms))"
 
 # What the reader should take away, per pass. The subtitle carries it so the
@@ -95,20 +100,47 @@ def read(path: str) -> tuple[list[float], dict[str, list[float | None]]]:
 
 
 def crossover(seq_lens, ours, baseline) -> float | None:
-    """Returns the sequence length where `ours` first beats `baseline`.
+    """Returns the sequence length where `ours` overtakes `baseline`.
 
     The crossover is the project's headline claim -- a sparse kernel is slower
     than a dense one until the context is long enough for sparsity to pay for
     its routing -- so the figure marks it rather than leaving the reader to
     find where two lines swap order.
 
+    It is **interpolated**, not snapped to a measured point. The sweep samples
+    powers of two, so the crossing almost never lands on one: the forward
+    ratio is 1.189 at S=8192 and 0.586 at S=16384, and returning 16384 -- the
+    first point where we are already ahead -- overstates how long dense holds
+    on by 69%. Reporting a grid point as the crossing quietly reports the
+    sweep's resolution as a property of the kernel.
+
+    Interpolation is linear in log-log space, which is the right model rather
+    than a convenience: both curves are near power laws over this range (dense
+    is quadratic in S, ours is linear), so their ratio is near-linear in log S
+    and a straight line between two brackets is a good local fit. Linear
+    interpolation on the raw values would bias the answer toward the larger
+    bracket, since the x-grid doubles at every step.
+
     Returns:
-        The first sequence length at which ours is faster, or None if it never
-        is within the sweep.
+        The interpolated sequence length at which the two are equal, or None
+        if `ours` never overtakes within the sweep. If `ours` is already ahead
+        at the first point, that point is returned -- the true crossing is
+        below the sweep and cannot be located from this data.
     """
-    for seq_len, mine, theirs in zip(seq_lens, ours, baseline):
-        if mine is not None and theirs is not None and mine < theirs:
-            return seq_len
+    import math
+
+    pairs = [(s, m, t) for s, m, t in zip(seq_lens, ours, baseline)
+             if m is not None and t is not None]
+    if not pairs:
+        return None
+    if pairs[0][1] < pairs[0][2]:
+        return pairs[0][0]
+    for (s0, m0, t0), (s1, m1, t1) in zip(pairs, pairs[1:]):
+        r0, r1 = math.log(m0 / t0), math.log(m1 / t1)
+        if r0 >= 0 > r1:
+            # Fraction of the way from s0 to s1 at which log(ratio) hits zero.
+            frac = r0 / (r0 - r1)
+            return math.exp(math.log(s0) + frac * (math.log(s1) - math.log(s0)))
     return None
 
 
@@ -151,13 +183,29 @@ def draw(seq_lens, series, mode: str, path: str) -> str:
     # Room on the right for the direct labels, which sit outside the data.
     ax.set_xlim(seq_lens[0] * 0.92, seq_lens[-1] * 2.6)
 
+    # Below this the measurement is not measuring the kernel. bench/_small_s_dip
+    # timed the autograd step against the sum of the kernels it launches: the
+    # gap is 47% of the total at S=1024, 21% at 2048, 11% at 4096 and gone by
+    # 8192. That overhead is why the backward curve *falls* from S=1024 to
+    # S=4096 while the work doubles -- a rising kernel cost outrun by a
+    # faster-falling harness cost. Shading it is the honest fix: the dip is
+    # real data and hiding it would be worse, but a reader is entitled to know
+    # that region reports Python as much as CUDA.
+    if seq_lens[0] < HARNESS_LIMIT:
+        ax.axvspan(seq_lens[0] * 0.92, HARNESS_LIMIT, color=plots.INK_FAINT,
+                   alpha=0.10, zorder=0, linewidth=0)
+        ax.text(seq_lens[0] * 0.98, ax.get_ylim()[1] * 0.55,
+                "harness overhead\nis 11-47% here", color=plots.INK_SOFT,
+                fontsize=8.5, va="top", ha="left")
+
     if "ours" in series and "sdpa_dense" in series:
         at = crossover(seq_lens, series["ours"], series["sdpa_dense"])
         if at is not None:
             ax.axvline(at, color=plots.INK_FAINT, linewidth=0.9,
                        linestyle=(0, (3, 3)), zorder=1)
             ax.text(at * 1.06, ax.get_ylim()[0] * 1.5,
-                    f"we pass dense attention here\nS = {at}",
+                    f"we pass dense attention here\n"
+                    f"S ~ {round(at / 100) * 100:,} (interpolated)",
                     color=plots.INK_SOFT, fontsize=9, va="bottom")
 
     plots.label_points(ax, tips_x, tips_y, tips_label, log=True, dx=8, dy=-3)
