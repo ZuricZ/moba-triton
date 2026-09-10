@@ -479,9 +479,14 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     # it. At mid-height it landed on whichever implementation happened to have
     # an intensity near the ridge -- on the A100 that was flash_moba, and the
     # two strings printed through each other.
-    ax.text(c.ridge * 1.12, ax.get_ylim()[0] * 1.4,
+    # Just left of its own line, reading upward. Two horizontal placements
+    # have now collided with something -- a data point at mid-height, the
+    # legend at the foot -- because the ridge is a vertical line through the
+    # busiest part of the figure. Setting the text along it avoids competing
+    # for horizontal space at all.
+    ax.text(c.ridge * 0.93, c.peak_flops / 1e12 * 0.045,
             f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT,
-            fontsize=9, va="bottom")
+            fontsize=9, rotation=90, va="bottom", ha="center")
 
     plots.titles(
         ax,
@@ -508,8 +513,19 @@ def main() -> None:
     parser.add_argument("--seq-lens", default="2048,4096,8192",
                         help="comma separated")
     parser.add_argument("--out", default="results/roofline.png")
+    parser.add_argument("--from-log", default=None,
+                        help="redraw a finished run's log instead of "
+                             "measuring; needs no GPU")
     args = parser.parse_args()
     seq_lens = [int(x) for x in args.seq_lens.split(",")]
+
+    if args.from_log:
+        points, ceilings = parse_log(args.from_log)
+        print_ceilings(ceilings)
+        print_table(points, ceilings)
+        print()
+        print(f"wrote {plot(points, ceilings, args.out)}")
+        return
 
     if lock_clocks():
         print("clocks locked to max")
@@ -541,6 +557,70 @@ def main() -> None:
         print(f"\nwrote {plot(points, ceilings, args.out)}")
     finally:
         unlock_clocks()
+
+
+
+# ---------------------------------------------------------------------------
+# Replotting a finished run
+# ---------------------------------------------------------------------------
+
+
+def parse_log(path: str) -> tuple[list[Point], Ceilings]:
+    """Rebuilds the points and ceilings of a finished run from its log.
+
+    WHY THIS EXISTS. The ceilings and every point are measured on the GPU, so
+    redrawing the figure used to mean having that GPU. This project's A100 is
+    rented by the hour, and three of the reruns it paid for changed nothing but
+    the position of a text label. The log already contains every number the
+    figure needs -- both ceilings and, per row, arithmetic intensity and
+    achieved throughput -- so a run's data can outlive the machine that
+    produced it.
+
+    Reconstruction is partial by design. `Point` normally derives intensity
+    and throughput from `flops` and a `Traffic` breakdown; the log carries the
+    two derived values but not the breakdown, so the totals are back-solved to
+    reproduce them exactly. That is enough for `plot`, which reads only
+    `intensity` and `achieved`, and not enough for `print_breakdown`, which is
+    why this returns points fit for drawing rather than for re-analysis.
+
+    Args:
+        path: A log written by a previous `main()` run.
+
+    Returns:
+        A tuple of (points, ceilings).
+
+    Raises:
+        ValueError: If the ceiling lines are missing, so a caller never gets a
+            figure drawn against a roof that was silently defaulted.
+    """
+    bandwidth = peak = None
+    points: list[Point] = []
+
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            fields = line.split()
+            if "HBM bandwidth" in line:
+                bandwidth = float(fields[2]) * BYTES_PER_GIB
+            elif "bf16 peak" in line:
+                peak = float(fields[2]) * 1e12
+            elif len(fields) >= 8 and fields[0] in MODELS:
+                # backend S ms GB FLOP/byte [~] TFLOP/s roof pct bound
+                numbers = [f for f in fields[1:] if f not in ("~",)]
+                try:
+                    seq_len, ms = int(numbers[0]), float(numbers[1])
+                    intensity, achieved = float(numbers[3]), float(numbers[4])
+                except (ValueError, IndexError):
+                    continue
+                flops = achieved * 1e12 * ms * 1e-3
+                # Back-solve the traffic total so `intensity` comes out right.
+                traffic = Traffic(parts={"total": round(flops / intensity)},
+                                  exact=False, note="reconstructed from log")
+                points.append(Point(fields[0], seq_len, ms, flops, traffic))
+
+    if bandwidth is None or peak is None:
+        raise ValueError(f"{path} has no ceiling lines; refusing to draw a "
+                         "roofline against an assumed roof")
+    return points, Ceilings(bandwidth, peak)
 
 
 if __name__ == "__main__":
