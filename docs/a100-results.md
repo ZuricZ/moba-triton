@@ -5,54 +5,103 @@
 driver 595.58.03, CUDA 12.6.77
 **Config:** `block_size=128, top_k=8` (FlashMoBA's published gate), bf16,
 `[1, S, 4, 64]`
-**Source:** `bench/compare.py`, raw log in `results/a100-sweep.log`
+**Source:** `bench/compare.py`, run twice against two flash-attn builds.
+Raw logs in `results/a100-twopass.log` and `results/a100-pass2.log`; per-pass
+CSVs in `results/fa283-*.csv` and `results/fa263-*.csv`.
 
 Every previous number in this repo came from a 20-SM laptop with 4 GB and
 99 KiB of shared memory. Those measured a kernel entangled with one card. This
 is the first run on hardware the references were designed for, and the first
-with four MoBA implementations live at once.
+with **all five** MoBA implementations live at once.
 
 ---
 
 ## Forward
 
-| S | blocks | **ours** | flash_moba | moonshot_efficient | moonshot_naive | sdpa_dense | fa2_minimal |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1024 | 8 | 0.214 | 0.486 | 1.908 | 1.122 | 0.027 | 0.031 |
-| 2048 | 16 | 0.220 | 0.540 | 1.919 | 2.178 | 0.044 | 0.067 |
-| 4096 | 32 | 0.252 | 0.671 | 2.018 | 6.222 | 0.144 | 0.156 |
-| 8192 | 64 | 0.421 | 1.082 | 2.569 | 20.070 | 0.361 | 0.465 |
-| 16384 | 128 | **0.699** | 2.126 | 5.280 | 69.432 | 1.210 | 1.613 |
-| 32768 | 256 | **1.261** | 5.111 | 17.246 | OOM | 4.171 | 5.871 |
-| 65536 | 512 | **2.736** | 12.198 | 57.254 | OOM | 15.456 | 21.789 |
+All five MoBA implementations, plus two dense baselines. Latency in ms; lower is
+better.
+
+| S | blocks | **ours** | flash_moba | triton_moba | moonshot_eff | moonshot_naive | sdpa_dense | fa2_minimal |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 8 | **0.163** | 0.454 | 1.664 | 1.740 | 0.989 | 0.027 | 0.031 |
+| 2048 | 16 | **0.207** | 0.507 | 1.672 | 1.734 | 1.987 | 0.043 | 0.067 |
+| 4096 | 32 | **0.250** | 0.640 | 1.787 | 1.849 | 5.829 | 0.144 | 0.155 |
+| 8192 | 64 | **0.419** | 1.030 | 2.387 | 2.422 | 19.342 | 0.352 | 0.455 |
+| 16384 | 128 | **0.692** | 2.108 | 4.669 | 5.063 | 67.685 | 1.182 | 1.561 |
+| 32768 | 256 | **1.262** | 5.080 | 13.573 | 17.144 | OOM | 4.062 | 5.694 |
+| 65536 | 512 | **2.727** | 12.419 | 47.876 | 57.162 | OOM | 15.180 | 21.579 |
 
 ## Backward (`forward().backward(dO)`, the full step)
 
-| S | **ours** | flash_moba | moonshot_efficient | sdpa_dense | fa2_minimal |
-|---:|---:|---:|---:|---:|---:|
-| 8192 | 0.807 | 1.453 | 4.167 | 1.212 | 5.005 |
-| 16384 | **1.416** | 2.779 | 8.342 | 3.923 | 15.400 |
-| 32768 | **2.631** | 6.338 | 24.668 | 14.324 | 58.449 |
-| 65536 | **5.446** | 14.278 | 76.044 | 55.025 | 233.363 |
+| S | **ours** | flash_moba | triton_moba | moonshot_eff | sdpa_dense | fa2_minimal |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | **0.551** | 0.845 | 3.099 | 2.702 | 0.111 | 0.378 |
+| 2048 | **0.539** | 0.879 | 3.106 | 2.809 | 0.184 | 0.734 |
+| 4096 | **0.502** | 0.977 | 3.585 | 2.863 | 0.400 | 1.523 |
+| 8192 | **0.846** | 1.423 | 4.454 | 4.000 | 1.171 | 5.008 |
+| 16384 | **1.373** | 2.719 | 10.497 | 8.236 | 3.828 | 15.446 |
+| 32768 | **2.654** | 6.311 | 34.289 | 24.516 | 13.821 | 57.896 |
+| 65536 | **5.237** | 14.343 | 131.464 | 75.270 | 53.921 | 231.015 |
 
-## The ratios
+## The ratios (forward, x times slower than ours)
 
-| S | vs `sdpa_dense` | vs `flash_moba` | vs `moonshot_efficient` |
-|---:|---:|---:|---:|
-| 8192 | 0.86x | 2.57x | 6.10x |
-| 16384 | **1.73x** | 3.04x | 7.55x |
-| 32768 | **3.31x** | 4.05x | 13.7x |
-| 65536 | **5.65x** | 4.46x | 20.9x |
+| S | sdpa_dense | flash_moba | triton_moba | moonshot_eff |
+|---:|---:|---:|---:|---:|
+| 8192 | 0.84x | 2.46x | 5.70x | 6.16x |
+| 16384 | **1.71x** | 3.05x | 6.74x | 7.26x |
+| 32768 | **3.22x** | 4.03x | 10.76x | 14.06x |
+| 65536 | **5.57x** | 4.55x | **17.56x** | **20.73x** |
 
-**The central claim holds and strengthens with context**, which is what the
-loop-inversion argument predicted and what no laptop measurement could confirm:
-0.57x -> 0.86x -> 1.73x -> 3.31x -> **5.65x** against dense.
+**The central claim holds and strengthens with context.** Against dense the
+margin runs 0.84x -> 1.71x -> 3.22x -> 5.57x. Interpolated in log-log space,
+`ours` overtakes `sdpa_dense` at **S ~ 9,700** forward; the backward crossover
+is around S ~ 5,400 but sits inside the harness-dominated region below, so
+treat it as a lower bound.
 
----
+**Read the small-S rows with care.** Below S=8192 a large part of the measured
+step is harness rather than kernel -- 47% at S=1024, 21% at 2048, 11% at 4096,
+and gone by 8192 (`bench/_small_s_dip.py`, `results/a100-dip-overhead.log`).
+That is why the backward column *falls* from S=1024 to S=4096 while the work
+doubles: a rising kernel cost outrun by a faster-falling harness cost. The
+figures shade that region. Every headline number above is quoted from S >=
+16384, where the overhead is negligible and the ratios are larger anyway.
+
+## The two passes, and what a cross-pass comparison is worth
+
+`moonshot_efficient` needs flash-attn 2.6.x and `triton_moba` needs >= 2.7, so
+no single environment runs both (`docs/environment.md`). The sweep therefore ran
+twice, switching flash-attn between passes; the `moonshot_eff` column comes from
+the second pass and every other column from the first.
+
+Four backends -- `ours`, `flash_moba`, `sdpa_dense`, `fa2_minimal` -- do not
+depend on flash-attn and were measured identically in both. Their spread is a
+free estimate of run-to-run reproducibility on this box:
+
+| backend | forward median / worst | backward median / worst |
+|---|---|---|
+| `ours` | 1.1% / **6.5%** | 1.3% / **13.7%** |
+| `flash_moba` | 0.2% / 1.2% | 1.2% / 7.9% |
+| `sdpa_dense` | 0.1% / 0.8% | 0.3% / 0.8% |
+| `fa2_minimal` | 0.0% / 1.0% | 0.0% / 0.8% |
+
+**The worst cases fall on exactly the two implementations that route.** The
+dense kernels reproduce to under a percent across runs an hour apart; the sparse
+ones do not. That is not thermal, which would hit everything equally -- it is
+that a gate near a scoring tie can pick different blocks between runs, changing
+column lengths and therefore load balance. `sdpa_dense` does the same arithmetic
+every time; `ours` does slightly different arithmetic every time.
+
+So the error bar is **~1% for dense, up to ~14% for anything that routes**, and
+it applies only across the pass boundary. Consequences:
+
+* `ours` vs `flash_moba` and `ours` vs `triton_moba` are **within one pass** --
+  same process, same card state -- and need no such allowance.
+* `triton_moba` vs `moonshot_efficient` **crosses the boundary** and they differ
+  by 4-19%. Those two are **tied**, and are reported as tied.
 
 ## Why beating FlashMoBA is not suspicious
 
-A 4.46x win over a CUDA kernel from the lab that published the paper on making
+A 4.55x win over a CUDA kernel from the lab that published the paper on making
 MoBA fast deserves scrutiny before it is written down. Three checks.
 
 ### It is computing the same thing
@@ -111,7 +160,7 @@ would have suggested a measurement artefact instead.
 
 **Cost is linear in S, and the measurement says so.** MoBA attends
 `top_k * block_size` = 1024 keys per query whatever S is, so doubling S should
-roughly double the time: 0.699 -> 1.261 -> 2.736 ms is 1.80x then 2.17x.
+roughly double the time: 0.692 -> 1.262 -> 2.727 ms is 1.82x then 2.16x.
 
 **The dense baselines die where predicted.** `naive_torch` and
 `moonshot_naive` both OOM at S=32768 trying to allocate 16 GiB -- attention
@@ -134,46 +183,87 @@ crossover -- which is precisely why one machine could not settle this.
 
 ---
 
-## Triton-MoBA did not run, and cannot alongside MoonshotAI
+## Triton against Triton, which is the cleanest comparison here
 
 `triton_moba` is the fifth implementation and the most directly comparable of
-all -- Triton against Triton. It failed:
+all, because it holds the *language* constant. A sceptic can attribute part of
+the FlashMoBA gap to CUDA-versus-Triton, to hand-tuning, to a more mature
+compiler path. None of that applies here: both are Triton, both call into the
+same ecosystem, both were compiled by the same triton 3.7.1.
 
-    ValueError: too many values to unpack (expected 4)
+It is **5.7x to 17.6x slower than ours**, and the shape of that column is the
+argument:
 
-Their `triton_moba.py` unpacks **four** values from flash-attn's private
-`_flash_attn_varlen_forward`. Version 2.6.3 returns **eight**. Four is the 2.7
-signature -- and their own `requirements.txt` pins 2.6.3.
+| S | ours | triton_moba | ratio |
+|---:|---:|---:|---:|
+| 8192 | 0.419 | 2.387 | 5.70x |
+| 16384 | 0.692 | 4.669 | 6.74x |
+| 32768 | 1.262 | 13.573 | 10.76x |
+| 65536 | 2.727 | 47.876 | **17.56x** |
 
-Their repo is internally inconsistent about this: `efficient_moba.py` in the
-same package unpacks eight. But that file is not an alternative, because it is
-a **byte-identical copy of MoonshotAI's `moba_efficient.py`** apart from the
-function name (verified by diff). Benchmarking it would re-measure
-`moonshot_efficient` under a different label.
+**A constant-factor advantage would show as a flat ratio.** Better tiling, a
+luckier autotune, cheaper Python -- all of those scale with the work and leave
+the ratio roughly where it started. This ratio *grows*, from 5.7x to 17.6x over
+three doublings, which means the two implementations differ in how they scale on
+the sparsity rather than in their constants.
 
-So the versions are mutually exclusive:
+That is what the loop-order argument predicts. Triton-MoBA reuses
+FlashAttention's varlen kernel for the attention itself, which is query-major: a
+tile owns a range of queries and loads the union of every block any of them
+selected. As `num_blocks = S / block_size` grows, the queries inside one tile
+agree less about which `top_k` blocks they want, the union grows, and the useful
+fraction of each loaded tile shrinks. A KV-block-major program owns one block
+and gathers exactly the queries that chose it, so its useful fraction is 100% at
+every S.
 
-| flash-attn | `moonshot_efficient` | `triton_moba` |
+**`triton_moba` is also slower than dense attention at long context** -- 47.9 ms
+against `sdpa_dense`'s 15.2 ms at S=65536. A MoBA implementation losing to the
+dense kernel it is supposed to replace means its sparsity is not paying for its
+routing at all, which is precisely the state of affairs FlashMoBA's paper
+describes as the motivation for its own existence.
+
+### The three tiers are loop order, not language
+
+`triton_moba` and `moonshot_efficient` land within 19% of each other at every
+sequence length -- 1.664 vs 1.740 at S=1024, 47.9 vs 57.2 at S=65536 -- which is
+inside the cross-pass error bar above. They are tied. That is not a coincidence:
+**both delegate the attention to FlashAttention's varlen kernel** and differ only
+in how they compute the gate. Same attention, same loop order, same ceiling.
+
+So the five sort into three tiers by loop order:
+
+| tier | implementations | at S=65536 |
 |---|---|---|
-| 2.6.3 (what we built) | works | fails |
-| >= 2.7 | would fail | would work |
+| query-major on FA-varlen | `triton_moba`, `moonshot_efficient` | 17.6x, 20.7x |
+| query-major, hand-written CUDA with a tuned tile | `flash_moba` | 4.6x |
+| **KV-block-major** | **ours** | **1x** |
 
-Getting both means running the sweep twice against two flash-attn builds. That
-is now what happens -- `bootstrap_remote.sh --fa=` builds either version and
-`--use-fa=` switches between them in a second, because flash-attn is reached
-through a `.pth` file rather than installed, so torch and triton stay
-bit-identical across the two passes. `docs/environment.md` has the API table
-and why a compatibility shim was rejected.
+Language explains the gap *within* the first two tiers. It does not explain the
+gap between them and us.
 
-The first pass, the one in the tables above, used 2.6.3: MoonshotAI's fused path
-is the reference implementation the field actually uses, and it was the
-comparison pending since `moonshot` was renamed to `moonshot_naive`. The
-`triton_moba` column is measured in a second pass and is **not** in the tables
-above -- when it lands it goes in its own table, with the flash-attn version
-named, because a number measured under a different dependency does not belong in
-the same row as one that was not.
+### The roofline says the same thing independently
 
----
+`flash_moba` and `moonshot_efficient` sit at **186.2 FLOP/byte** -- above the
+A100's measured ridge of 153.5, so nominally compute bound -- while achieving
+**4% and 2% of roof**. High arithmetic intensity with low attainment is the
+roofline's way of reporting that the bytes being moved are the wrong bytes: a
+query-major tile loads the union and masks most of it away. `ours` sits at 75.8
+FLOP/byte and 21% of roof, memory bound and collecting a far larger share of
+what its position allows. See `results/roofline.png`.
+
+## Environment: two passes, because flash-attn cannot serve both
+
+`triton_moba` unpacks four values from the private
+`_flash_attn_varlen_forward`; `moonshot_efficient` unpacks eight. The signature
+changed at flash-attn 2.7, so the two are mutually exclusive and the sweep runs
+twice -- `bootstrap_remote.sh --fa=` builds either, `--use-fa=` switches in a
+second. `docs/environment.md` carries the API table, why a compatibility shim
+was rejected, and why FA3 and FA4 are unavailable on sm_80.
+
+Both backends now gate on the *signature* rather than on whether `flash_attn`
+imports. It imports fine against either build and fails at call time, which
+previously surfaced as fourteen failing correctness tests instead of one
+unavailable backend.
 
 ## Caveats
 
@@ -184,6 +274,11 @@ the same row as one that was not.
 * **Clocks were not lockable**, so the cool/warm/best-of-3 thermal protocol ran
   here as on the laptop. A racked A100 is far more stable, so this is belt and
   braces rather than load-bearing.
+* **Small S measures the harness.** Below S=8192, 11-47% of the backward step
+  is Python rather than CUDA. Headline numbers are quoted from S >= 16384.
+* **Two passes.** The `moonshot_efficient` column was measured in a separate run
+  from the rest; see the reproducibility control above before comparing it
+  across that boundary.
 * **One config.** `block_size=128, top_k=8` throughout, and `[1, S, 4, 64]` for
   the sweep. The shape check above covers H=32, D=128 and batch 4 for the
   FlashMoBA comparison only.

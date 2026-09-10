@@ -26,22 +26,27 @@ all implemented and tested against a PyTorch oracle. **461 tests pass.**
 `block_size=128, top_k=8` (FlashMoBA's published configuration), bf16,
 shape `[1, S, 4, 64]`, forward pass, on an A100-40GB:
 
-| S | blocks | **ours** | FlashMoBA (CUDA) | MoonshotAI (fused) | torch SDPA |
-|---:|---:|---:|---:|---:|---:|
-| 4096 | 32 | 0.252 ms | 0.671 ms | 2.018 ms | 0.144 ms |
-| 8192 | 64 | 0.421 ms | 1.082 ms | 2.569 ms | 0.361 ms |
-| 16384 | 128 | **0.699 ms** | 2.126 ms | 5.280 ms | 1.210 ms |
-| 32768 | 256 | **1.261 ms** | 5.111 ms | 17.246 ms | 4.171 ms |
-| 65536 | 512 | **2.736 ms** | 12.198 ms | 57.254 ms | 15.456 ms |
+| S | blocks | **ours** | FlashMoBA (CUDA) | Triton-MoBA | MoonshotAI (fused) | torch SDPA |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4096 | 32 | 0.250 ms | 0.640 ms | 1.787 ms | 1.849 ms | 0.144 ms |
+| 8192 | 64 | 0.419 ms | 1.030 ms | 2.387 ms | 2.422 ms | 0.352 ms |
+| 16384 | 128 | **0.692 ms** | 2.108 ms | 4.669 ms | 5.063 ms | 1.182 ms |
+| 32768 | 256 | **1.262 ms** | 5.080 ms | 13.573 ms | 17.144 ms | 4.062 ms |
+| 65536 | 512 | **2.727 ms** | 12.419 ms | 47.876 ms | 57.162 ms | 15.180 ms |
 
-At S=65536 that is **5.65× torch SDPA, 4.46× FlashMoBA's CUDA kernel, and
-20.9× MoonshotAI's own fused implementation** — and the margin grows with
-context, which is the regime MoBA exists for.
+At S=65536 that is **5.57x torch SDPA, 4.55x FlashMoBA's CUDA kernel, 17.6x the
+community Triton port, and 20.7x MoonshotAI's own fused implementation** -- and
+the margin grows with context, which is the regime MoBA exists for.
+
+Triton-MoBA is the comparison that isolates the idea from the language: it is
+also Triton, compiled by the same compiler, and it is 17.6x slower. That ratio
+*grows* with context (5.7x at S=8192), which a constant-factor advantage in
+tiling or tuning could not produce -- it is the loop order.
 
 Four things this table says:
 
 - **The advantage compounds with sequence length**, exactly as the
-  loop-inversion argument predicts: 0.86× → 1.73× → 3.31× → 5.65× against
+  loop-inversion argument predicts: 0.84× → 1.71× → 3.22× → 5.57× against
   dense. Below the crossover there is no sparsity to exploit — at S=1024,
   `top_k=8` selects all 8 blocks — so dense should win, and does.
 - **The win is in the attention kernel, not the gate.** Timing the pipelines'
