@@ -140,3 +140,51 @@ def cu_seqlens_for(batch: int, seq_len: int, device: torch.device) -> torch.Tens
     return torch.arange(
         0, (batch + 1) * seq_len, seq_len, device=device, dtype=torch.int32
     )
+
+
+def flash_attn_generation() -> tuple[int, str]:
+    """Reports which flash-attn API generation is installed, if any.
+
+    Two MoBA references call the *private* `_flash_attn_varlen_forward` and
+    unpack its return tuple positionally, so they are pinned to opposite sides
+    of a signature change made at 2.7:
+
+        2.6.x   window_size=(left, right)     forward returns 8 values
+        >= 2.7  window_size_left/right ints   forward returns 4
+
+    `moonshot_efficient` unpacks eight and `triton_moba` unpacks four, so
+    exactly one of them works against any given build. Checking that
+    `flash_attn` merely imports is not enough -- it imports fine either way and
+    then raises `ValueError: too many values to unpack` at call time, which
+    presents as a wall of failing correctness tests rather than as one
+    unavailable backend.
+
+    The parameter names are inspected rather than the version string, because
+    the signature is the thing that actually breaks and a fork or a patched
+    build can carry either shape under any version number.
+
+    Returns:
+        A tuple of (generation, detail), where generation is 26 for the 2.6.x
+        shape, 27 for the >= 2.7 shape, and 0 if flash-attn is absent or its
+        signature matches neither. `detail` is a human-readable reason,
+        suitable for an `is_available` message.
+    """
+    import inspect
+
+    try:
+        from flash_attn.flash_attn_interface import _flash_attn_varlen_forward
+    except Exception as exc:                    # noqa: BLE001 - never raises
+        return 0, f"flash-attn not importable ({type(exc).__name__}: {exc})"
+
+    try:
+        params = inspect.signature(_flash_attn_varlen_forward).parameters
+    except (TypeError, ValueError) as exc:
+        return 0, f"flash-attn signature unreadable ({exc})"
+
+    version = getattr(
+        __import__("flash_attn"), "__version__", "unknown")
+    if "window_size" in params:
+        return 26, f"flash-attn {version} has the 2.6.x signature"
+    if "window_size_left" in params:
+        return 27, f"flash-attn {version} has the >= 2.7 signature"
+    return 0, f"flash-attn {version} has an unrecognised signature"

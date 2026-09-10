@@ -17,6 +17,7 @@ import torch
 
 from implementations.layout import (
     cu_seqlens_for,
+    flash_attn_generation,
     from_varlen,
     load_reference_module,
     to_varlen,
@@ -47,6 +48,12 @@ class TritonMoBABackend:
             return False, f"not vendored: run scripts/fetch_references.sh ({exc})"
         except Exception as exc:  # noqa: BLE001 - must never raise
             return False, f"import failed: {type(exc).__name__}: {exc}"
+        # The mirror of the check in `moonshot_efficient`: this one unpacks
+        # four values where 2.6.x returns eight. Their own requirements.txt
+        # pins 2.6.3, which their code cannot actually run against.
+        generation, detail = flash_attn_generation()
+        if generation != 27:
+            return False, f"needs the flash-attn >= 2.7 signature: {detail}"
         return True, ""
 
     def forward(

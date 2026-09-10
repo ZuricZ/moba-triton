@@ -31,6 +31,7 @@ import torch
 from implementations.base import register
 from implementations.layout import (
     cu_seqlens_for,
+    flash_attn_generation,
     from_varlen,
     load_reference_module,
     to_varlen,
@@ -74,6 +75,14 @@ class MoonshotEfficientBackend:
             )
         except Exception as exc:  # noqa: BLE001 - must never raise
             return False, f"import failed: {type(exc).__name__}: {exc}"
+        # Importing is not enough. This path unpacks eight return values from
+        # the private `_flash_attn_varlen_forward`, and >= 2.7 returns four --
+        # it imports cleanly against either and then raises at call time. Left
+        # unchecked that presents as fourteen failing correctness tests rather
+        # than as one unavailable backend, which is what it actually is.
+        generation, detail = flash_attn_generation()
+        if generation != 26:
+            return False, f"needs the flash-attn 2.6.x signature: {detail}"
         return True, ""
 
     def forward(
