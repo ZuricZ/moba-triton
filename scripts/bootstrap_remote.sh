@@ -69,6 +69,13 @@ site_packages() {
 # be on sys.path at a time. One .pth, rewritten, enforces that by construction.
 use_flash_attn() {
   local version="$1" link="$BUILD_ROOT/site-fa-$1"
+  # Adopt the unversioned farm an older revision of this script built. It was
+  # always 2.6.3. Without this, a box carrying a perfectly good 2.6.3 install
+  # reports it as not built, and --use-fa=2.6.3 fails -- which is exactly what
+  # happened, silently, in the middle of a two-pass sweep.
+  if [ "$version" = "2.6.3" ] && [ ! -d "$link" ] && [ -d "$BUILD_ROOT/site-fa" ]; then
+    mv "$BUILD_ROOT/site-fa" "$link"
+  fi
   [ -d "$link" ] || { echo "flash-attn $version not built: no $link" >&2
                       echo "  build it with: $0 --all --fa=$version" >&2; exit 1; }
   echo "$link" > "$(site_packages)/flash-attn-local.pth"
