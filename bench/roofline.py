@@ -472,7 +472,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     # off the axes transform, which is not final until the scales and limits
     # are.
     ax.text(lo * 2.4, c.bandwidth * lo * 2.4 / 1e12 * 0.5, "memory bound",
-            color=plots.INK_SOFT, fontsize=9.5, rotation=slope_degrees(ax),
+            color=plots.INK_SOFT, fontsize=9.5, rotation=plots.slope_degrees(ax),
             rotation_mode="anchor", ha="left", va="top")
     ax.text(c.ridge * 1.6, c.peak_flops / 1e12 * 0.62, "compute bound",
             color=plots.INK_SOFT, fontsize=9.5, va="top")
