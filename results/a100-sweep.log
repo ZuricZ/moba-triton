@@ -1,0 +1,111 @@
+/home/moba-triton/references/MoBA/moba/moba_efficient.py:133: UserWarning: index_reduce() is in beta and the API may change at any time. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/cuda/Indexing.cu:1478.)
+  max_lse_1d = max_lse_1d.index_reduce(
+[W910 15:05:29.985644324 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 14697431040, total: 42405855232).
+[W910 15:05:29.302729241 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 6879248384, total: 42405855232).
+[W910 15:05:29.303077110 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 6879248384, total: 42405855232).
+[W910 15:06:12.436320722 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 24052826112, total: 42405855232).
+[W910 15:06:12.457948044 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 24291901440, total: 42405855232).
+[W910 15:06:14.557253702 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 7112032256, total: 42405855232).
+[W910 15:06:14.557621189 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 7112032256, total: 42405855232).
+[W910 15:10:08.446427896 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 11373445120, total: 42405855232).
+[W910 15:10:08.633908229 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 15683092480, total: 42405855232).
+[W910 15:10:10.739460053 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 8589934592 bytes (free: 7093157888, total: 42405855232).
+[W910 15:10:10.739811899 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 8589934592 bytes (free: 7093157888, total: 42405855232).
+[W910 15:10:45.788805435 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 7084769280, total: 42405855232).
+[W910 15:10:46.599182908 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 37157928960, total: 42405855232).
+[W910 15:10:46.606818195 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 15683092480, total: 42405855232).
+[W910 15:10:46.607463987 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 15683092480, total: 42405855232).
+clocks not lockable -- cool/warm protocol per measurement
+sequence lengths: [1024, 2048, 4096, 8192, 16384, 32768, 65536]
+providers: fa2_minimal, flash_moba, moonshot_efficient, moonshot_naive, naive_torch, ours, sdpa_dense, triton_moba, fa2_minimal_bwd, flash_moba_bwd, moonshot_efficient_bwd, moonshot_naive_bwd, naive_torch_bwd, ours_bwd, sdpa_dense_bwd
+
+moba-fwd:
+   seq_len  fa2_minimal (latency (ms))  flash_moba (latency (ms))  moonshot_efficient (latency (ms))  moonshot_naive (latency (ms))  naive_torch (latency (ms))  ours (latency (ms))  sdpa_dense (latency (ms))  triton_moba (latency (ms))
+0   1024.0                    0.030720                   0.486400                           1.907712                       1.122304                    0.704512             0.214016                   0.026624                         NaN
+1   2048.0                    0.066560                   0.539648                           1.918976                       2.178048                    1.014784             0.220160                   0.044032                         NaN
+2   4096.0                    0.155648                   0.670720                           2.018304                       6.221824                    2.644992             0.251904                   0.144384                         NaN
+3   8192.0                    0.465408                   1.082368                           2.569216                      20.070400                    9.610752             0.420864                   0.361472                         NaN
+4  16384.0                    1.612800                   2.125824                           5.280256                      69.432320                   33.256449             0.699392                   1.210368                         NaN
+5  32768.0                    5.871104                   5.110784                          17.246208                            NaN                  126.654465             1.260544                   4.170752                         NaN
+6  65536.0                   21.789184                  12.197888                          57.253887                            NaN                         NaN             2.736128                  15.456256                         NaN
+moba-bwd:
+   seq_len  fa2_minimal (latency (ms))  flash_moba (latency (ms))  moonshot_efficient (latency (ms))  moonshot_naive (latency (ms))  naive_torch (latency (ms))  ours (latency (ms))  sdpa_dense (latency (ms))
+0   1024.0                    0.377856                   1.108992                           2.742784                       3.800064                    1.374208             0.655360                   0.115712
+1   2048.0                    0.736256                   1.104896                           2.777088                       7.116800                    1.572864             0.608256                   0.184320
+2   4096.0                    1.524224                   1.127424                           3.018752                      22.007297                    4.486144             0.535552                   0.404480
+3   8192.0                    5.005312                   1.453056                           4.167168                      72.857597                   16.371200             0.806912                   1.212416
+4  16384.0                   15.400448                   2.779136                           8.341504                     272.506866                   59.231232             1.416192                   3.922944
+5  32768.0                   58.448895                   6.337536                          24.667647                            NaN                         NaN             2.630656                  14.323712
+6  65536.0                  233.363449                  14.278144                          76.044289                            NaN                         NaN             5.445632                  55.024639
+
+Forward, block_size=128 top_k=8, B=1 H=4 D=64
+  'dense' counts FLOPs the dense equivalent would do (FlashMoBA's convention);
+  'attended' counts only what ran (ours). They differ by the sparsity ratio.
+
+  backend            S  blocks  attends        ms  x dense  TF/s dense  TF/s attn
+  --------------------------------------------------------------------------------
+  fa2_minimal     1024       8        8     0.031    0.87x       17.48      34.95
+  flash_moba      1024       8        8     0.486    0.05x        1.10       2.21
+  moonshot_efficient   1024       8        8     1.908    0.01x        0.28       0.56
+  moonshot_naive   1024       8        8     1.122    0.02x        0.48       0.96
+  naive_torch     1024       8        8     0.705    0.04x        0.76       1.52
+  ours            1024       8        8     0.214    0.12x        2.51       5.02
+  sdpa_dense      1024       8        8     0.027    1.00x       20.16      40.33
+  triton_moba     1024       8        8         -        -           -          -
+                  1024  <- top_k clamps to num_blocks: every block selected, no sparsity to exploit
+  fa2_minimal     2048      16        8     0.067    0.66x       32.26      32.26
+  flash_moba      2048      16        8     0.540    0.08x        3.98       3.98
+  moonshot_efficient   2048      16        8     1.919    0.02x        1.12       1.12
+  moonshot_naive   2048      16        8     2.178    0.02x        0.99       0.99
+  naive_torch     2048      16        8     1.015    0.04x        2.12       2.12
+  ours            2048      16        8     0.220    0.20x        9.75       9.75
+  sdpa_dense      2048      16        8     0.044    1.00x       48.77      48.77
+  triton_moba     2048      16        8         -        -           -          -
+  fa2_minimal     4096      32        8     0.156    0.93x       55.19      27.59
+  flash_moba      4096      32        8     0.671    0.22x       12.81       6.40
+  moonshot_efficient   4096      32        8     2.018    0.07x        4.26       2.13
+  moonshot_naive   4096      32        8     6.222    0.02x        1.38       0.69
+  naive_torch     4096      32        8     2.645    0.05x        3.25       1.62
+  ours            4096      32        8     0.252    0.57x       34.10      17.05
+  sdpa_dense      4096      32        8     0.144    1.00x       59.49      29.75
+  triton_moba     4096      32        8         -        -           -          -
+  fa2_minimal     8192      64        8     0.465    0.78x       73.83      18.46
+  flash_moba      8192      64        8     1.082    0.33x       31.74       7.94
+  moonshot_efficient   8192      64        8     2.569    0.14x       13.37       3.34
+  moonshot_naive   8192      64        8    20.070    0.02x        1.71       0.43
+  naive_torch     8192      64        8     9.611    0.04x        3.58       0.89
+  ours            8192      64        8     0.421    0.86x       81.64      20.41
+  sdpa_dense      8192      64        8     0.361    1.00x       95.06      23.76
+  triton_moba     8192      64        8         -        -           -          -
+  fa2_minimal    16384     128        8     1.613    0.75x       85.22      10.65
+  flash_moba     16384     128        8     2.126    0.57x       64.65       8.08
+  moonshot_efficient  16384     128        8     5.280    0.23x       26.03       3.25
+  moonshot_naive  16384     128        8    69.432    0.02x        1.98       0.25
+  naive_torch    16384     128        8    33.256    0.04x        4.13       0.52
+  ours           16384     128        8     0.699    1.73x      196.51      24.56
+  sdpa_dense     16384     128        8     1.210    1.00x      113.55      14.19
+  triton_moba    16384     128        8         -        -           -          -
+  fa2_minimal    32768     256        8     5.871    0.71x       93.64       5.85
+  flash_moba     32768     256        8     5.111    0.82x      107.57       6.72
+  moonshot_efficient  32768     256        8    17.246    0.24x       31.88       1.99
+  moonshot_naive  32768     256        8         -        -           -          -
+  naive_torch    32768     256        8   126.654    0.03x        4.34       0.27
+  ours           32768     256        8     1.261    3.31x      436.13      27.26
+  sdpa_dense     32768     256        8     4.171    1.00x      131.81       8.24
+  triton_moba    32768     256        8         -        -           -          -
+  fa2_minimal    65536     512        8    21.789    0.71x      100.92       3.15
+  flash_moba     65536     512        8    12.198    1.27x      180.28       5.63
+  moonshot_efficient  65536     512        8    57.254    0.27x       38.41       1.20
+  moonshot_naive  65536     512        8         -        -           -          -
+  naive_torch    65536     512        8         -        -           -          -
+  ours           65536     512        8     2.736    5.65x      803.70      25.12
+  sdpa_dense     65536     512        8    15.456    1.00x      142.27       4.45
+  triton_moba    65536     512        8         -        -           -          -
+
+no number produced:
+  moonshot_naive       OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  moonshot_naive_bwd   OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  naive_torch          OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  naive_torch_bwd      OutOfMemoryError: CUDA out of memory. Tried to allocate 8.00 GiB. GPU 0 has a total capacity of 39
+  triton_moba          ValueError: too many values to unpack (expected 4)
+  triton_moba_bwd      ValueError: too many values to unpack (expected 4)
