@@ -54,6 +54,7 @@ from bench.suite import cool_down_device, warm_up_device
 from moba.config import MoBAConfig
 from moba.kernels.moba_bwd import compute_delta, moba_backward
 from moba.kernels.moba_fwd import attend_partials, combine_partials
+from moba.kernels.attention import moba_attention
 from moba.kernels.routing import build_csc_fused
 
 CFG = MoBAConfig(block_size=128, top_k=8, dtype=torch.bfloat16)
@@ -162,6 +163,38 @@ def main() -> None:
 
     print(f"\nbwd config(s) chosen: {winning_config(bwd_module.moba_bwd_kernel)}")
     print("one entry means one config served every shape, as the key predicts")
+
+    # The stages above are monotone in S, so whatever the sweep saw is not in
+    # them. Time the step the way `bench/compare.py` does -- through the
+    # autograd Function, forward().backward(dO) -- and subtract. What is left
+    # is everything the kernel timings do not contain: Python dispatch, graph
+    # construction, allocation, and any window where the GPU has nothing
+    # queued because the CPU has not caught up.
+    print("\nthe autograd step, against the sum of the kernels it launches:")
+    print(f"  {'S':>7} {'step':>9} {'kernels':>9} {'gap':>9} {'gap %':>7}")
+    for r in sorted(ascending, key=lambda r: r["seq_len"]):
+        seq_len = r["seq_len"]
+        g = torch.Generator(device="cuda").manual_seed(0)
+        q, k, v = (torch.randn(BATCH, seq_len, HEADS, HEAD_DIM, generator=g,
+                               device="cuda", dtype=CFG.dtype,
+                               requires_grad=True) for _ in range(3))
+        dout = torch.randn(BATCH, seq_len, HEADS, HEAD_DIM, device="cuda",
+                           dtype=CFG.dtype)
+
+        def step():
+            for t in (q, k, v):
+                t.grad = None
+            moba_attention(q, k, v, CFG).backward(dout)
+
+        measured = time_ms(step)
+        kernels = r["route"] + r["fwd"] + r["delta"] + r["bwd"]
+        gap = measured - kernels
+        print(f"  {seq_len:>7} {measured:>9.3f} {kernels:>9.3f} {gap:>9.3f} "
+              f"{gap / measured:>6.1%}")
+        del q, k, v, dout
+        torch.cuda.empty_cache()
+    print("  A gap that shrinks as S grows is the card being starved at small")
+    print("  S: fixed per-launch cost the GPU work is too short to hide.")
 
 
 if __name__ == "__main__":
