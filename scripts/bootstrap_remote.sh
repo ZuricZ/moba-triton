@@ -34,6 +34,15 @@ done
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
+# The venv's site-packages, resolved rather than globbed at the point of
+# use. See the .pth writes below for why that distinction cost a build.
+site_packages() {
+  local dir
+  dir="$(echo "$REPO"/.venv/lib/python3.*/site-packages)"
+  [ -d "$dir" ] || { echo "no site-packages under $REPO/.venv" >&2; exit 1; }
+  printf '%s' "$dir"
+}
+
 # ---------------------------------------------------------------------------
 # 0. What are we on?
 # ---------------------------------------------------------------------------
@@ -147,7 +156,12 @@ if [ "$BENCH_ONLY" -eq 0 ] && [ -n "${CUDA_HOME:-}" ]; then
   for so in "$BUILD_ROOT"/flash-moba/flash_moba_cuda*.so; do
     [ -e "$so" ] && ln -sfn "$so" "$LINK/$(basename "$so")"
   done
-  echo "$LINK" > "$REPO"/.venv/lib/python3.*/site-packages/flash-moba-local.pth
+  # Expand the directory, then append the filename. Globbing the whole
+  # path cannot work: a glob only matches paths that already exist, and
+  # the .pth is the file being created -- so the pattern matched nothing,
+  # bash used it literally, and set -e killed the run after a ten-minute
+  # build had already succeeded.
+  echo "$LINK" > "$(site_packages)/flash-moba-local.pth"
   echo "linked flash_moba"
 fi
 
@@ -174,7 +188,7 @@ if [ "$WITH_FLASH_ATTN" -eq 1 ] && [ -n "${CUDA_HOME:-}" ]; then
   for so in "$BUILD_ROOT"/flash-attn/flash_attn_2_cuda*.so; do
     [ -e "$so" ] && ln -sfn "$so" "$LINK/$(basename "$so")"
   done
-  echo "$LINK" > "$REPO"/.venv/lib/python3.*/site-packages/flash-attn-local.pth
+  echo "$LINK" > "$(site_packages)/flash-attn-local.pth"
   echo "linked flash_attn"
 fi
 
