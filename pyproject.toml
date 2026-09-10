@@ -21,7 +21,14 @@ dependencies = ["torch", "triton", "numpy"]
 #   einops      imported by MoonshotAI's moba_efficient.py and by Triton-MoBA.
 #               Both extensions can build and still leave those backends
 #               unavailable for want of a pure-Python import.
-dev = ["pytest", "matplotlib", "einops"]
+dev = ["pytest", "matplotlib", "einops", "pandas"]
+
+# A note on how these three were found, because static analysis cannot find
+# them. Nothing in this repo imports einops or pandas -- they are needed by
+# code we *call*: `triton.testing.perf_report(print_data=True)` imports pandas
+# internally, and the vendored references import einops. An import audit of our
+# own source reports a clean bill and the fresh box still dies. Declare what
+# the call paths need, not what the files import.
 
 [tool.setuptools.packages.find]
 where = ["src"]

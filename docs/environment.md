@@ -14,6 +14,7 @@ duplicated here — each row points at the file that actually decides.
 | numpy | `2.5.2` | [`uv.lock`](../uv.lock) |
 | matplotlib | `3.11.1` | [`uv.lock`](../uv.lock), dev group |
 | einops | `0.8.2` | [`uv.lock`](../uv.lock), dev group |
+| pandas | (locked) | [`uv.lock`](../uv.lock), dev group |
 | CUDA runtime (wheel) | `12.6.77` | [`uv.lock`](../uv.lock) |
 | wheel index | `download.pytorch.org/whl/cu126` | [`pyproject.toml`](../pyproject.toml) |
 | flash-attn | `v2.6.3` | [`scripts/bootstrap_remote.sh`](../scripts/bootstrap_remote.sh) |
@@ -26,6 +27,13 @@ harness and the vendored references get what they need. `matplotlib` is for
 `bench/plots.py`; `einops` is imported by MoonshotAI's `moba_efficient.py` and
 by Triton-MoBA. Both were missing on the first A100 run, which built two CUDA
 extensions successfully and then could not use either backend.
+
+**Two of the three cannot be found by auditing our imports**, which is worth
+saying because the audit comes back clean and the fresh box still fails.
+Nothing in this repo imports `einops` or `pandas`. They are needed by code we
+*call*: `triton.testing.perf_report(print_data=True)` imports pandas
+internally, and the vendored references import einops. Declare what the call
+paths need, not what the files import.
 
 `pyproject.toml` lists `dependencies = ["torch", "triton", "numpy"]` with **no
 version bounds**. That is deliberate and not a gap: `uv.lock` holds the exact
