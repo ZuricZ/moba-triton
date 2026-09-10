@@ -93,7 +93,13 @@ Applies to prose in conversation and to `docs/learning/*.md` alike.
   work; watch for OOM before scaling up). This box is for correctness and
   learning, not for the final benchmark numbers — those need a rented
   H100/A100 later, so don't over-index on absolute speed measured here.
-- Benchmark: `triton.testing.do_bench`; profile: Nsight Compute (`ncu`)
+- Benchmark: `triton.testing.do_bench`. Profiling: **`ncu` has been refused on
+  every machine tried** — the laptop (WDDM, driver restricts counters to
+  admins) and the rented A100 (container had neither `CAP_SYS_ADMIN` nor
+  `CAP_PERFMON`). Don't plan around it. `torch.profiler` reaches CUPTI's
+  *activity* records, which is a different API to `ncu`'s permission-gated
+  metrics, and that is where occupancy came from (`docs/occupancy-measurements.md`).
+  DRAM traffic is still modelled rather than measured.
 
 ## Canonical references — cite by name when borrowing a pattern
 Papers (in order of relevance to this project):
@@ -204,4 +210,4 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: **The A100 head-to-head is done** (`docs/a100-results.md`, raw logs on branch `a100-results`). At S=65536 `ours` is 2.736 ms forward / 5.446 ms backward -- **5.65x torch SDPA, 4.46x FlashMoBA's CUDA, 20.9x MoonshotAI's fused path**, and the margin *grows* with context (0.86x -> 1.73x -> 3.31x -> 5.65x from S=8192 to 65536). Three checks say the FlashMoBA win is real: identical error against the oracle (0.0478 for all three), the gap widens at realistic shapes (3.12x at H=32 D=128 batch 4), and it is concentrated in the **attention** stage (3.2-3.4x) not the gate (1.9-2.1x) -- which is the loop inversion doing exactly what it was designed to, against their query-major tile that discards 77% of its tensor-core work. `naive_torch` OOMs at S=32768; ours runs 65536 in 2.7 ms. Triton-MoBA could not run: it needs flash-attn >=2.7 while MoonshotAI's fused path needs 2.6.x, and the two are mutually exclusive. `ncu` was refused on the A100 too, so occupancy came from `torch.profiler`: the attend kernel keeps 8 of 48 warps resident, but raising that makes it *slower* (`docs/occupancy-measurements.md`), and the gather pattern is worth only 9% -- both hypotheses closed. Next: the comment pass (50% of `src/` vs 4-5% in the references), and pinning the real compute ceiling, since the roofline's flat roof is drawn with a 4096^3 GEMM that nothing in this kernel resembles.
+> Status: **A100 head-to-head done; second flash-attn pass in flight.** At S=65536 `ours` is 2.736 ms forward / 5.446 ms backward -- 5.65x torch SDPA, 4.46x FlashMoBA's CUDA, 20.9x MoonshotAI's fused path, and the margin *grows* with context (`docs/a100-results.md`; three checks say the FlashMoBA win is real). `triton_moba` still has not run: it needs flash-attn >=2.7 and MoonshotAI's fused path needs 2.6.x, so `bootstrap_remote.sh` now takes `--fa=` to build either and `--use-fa=` to switch in a second (a `.pth` rewrite, not a second venv, so torch and triton stay identical across the two passes). FA 2.8.3 is building now; FA3 and FA4 are Hopper/Blackwell only and off the table on sm_80 (`docs/environment.md`). Sweep plots are redrawn through `bench/plots.py` instead of `perf_report`'s defaults. **Open:** the backward gets 18% *faster* from S=1024 to S=4096 while work doubles, forward unaffected -- retuning and atomics both ruled out from source, `bench/_small_s_dip.py` waits on a quiet card; the autotune key contains nothing S-dependent, so one config raced at S=1024 serves S=65536; the comment pass (50% of `src/` vs 4-5% in the references); and the roofline's flat roof is still a 4096^3 GEMM that nothing in this kernel resembles.
