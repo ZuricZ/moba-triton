@@ -440,10 +440,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
                linestyle=(0, (3, 3)), zorder=2)
     ax.text(c.ridge * 1.1, c.peak_flops / 1e12 * 0.045,
             f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT, fontsize=9)
-    ax.text(lo * 2.0, c.bandwidth * lo * 2.0 / 1e12 * 1.5, "memory bound",
-            color=plots.INK_SOFT, fontsize=9.5, rotation=32)
-    ax.text(c.ridge * 1.35, c.peak_flops / 1e12 * 1.18, "compute bound",
-            color=plots.INK_SOFT, fontsize=9.5)
+
 
     seen, biggest = set(), max(p.seq_len for p in points)
     for p in sorted(points, key=lambda p: p.name):
@@ -464,11 +461,30 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     ax.set_yscale("log")
     ax.set_xlim(lo, hi)
     ax.set_ylim(c.peak_flops / 1e12 * 1e-4, c.peak_flops / 1e12 * 2.2)
+
+    # Region labels last, and both *under* the roof. The roof is a ceiling, so
+    # the area above it is unattainable: a label printed up there names a
+    # region no kernel can occupy, and reads as "compute bound means faster
+    # than the machine can go". The two regions being named are the halves of
+    # the space below the line, split at the ridge.
+    #
+    # After set_xscale/set_ylim, not before -- the sloped label's angle is read
+    # off the axes transform, which is not final until the scales and limits
+    # are.
+    ax.text(lo * 2.4, c.bandwidth * lo * 2.4 / 1e12 * 0.5, "memory bound",
+            color=plots.INK_SOFT, fontsize=9.5, rotation=slope_degrees(ax),
+            rotation_mode="anchor", ha="left", va="top")
+    ax.text(c.ridge * 1.6, c.peak_flops / 1e12 * 0.62, "compute bound",
+            color=plots.INK_SOFT, fontsize=9.5, va="top")
+
     plots.titles(
         ax,
         "Roofline -- MoBA forward pass",
-        f"Marker size is sequence length ({min(p.seq_len for p in points)}"
-        f"-{biggest}). Labels mark S={biggest}. "
+        # One sequence length is the common case and "8192-8192" reads as a
+        # bug rather than as a range of one.
+        (f"S = {biggest}. " if min(p.seq_len for p in points) == biggest else
+         f"Marker size is sequence length, {min(p.seq_len for p in points)} to "
+         f"{biggest}; labels mark S={biggest}. ") +
         "Higher is faster; the roof is what this card can do.",
         "arithmetic intensity (FLOP per byte of compulsory HBM traffic)",
         "achieved throughput (TFLOP/s)")

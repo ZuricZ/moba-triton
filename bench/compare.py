@@ -40,7 +40,7 @@ import torch
 import triton
 import triton.testing
 
-from bench import plots
+from bench import plots, sweep_plot
 from bench.suite import (
     cool_down_device,
     default_seq_lens,
@@ -429,6 +429,10 @@ if __name__ == "__main__":
     try:
         Path("results").mkdir(exist_ok=True)
         benchmark.run(print_data=True, save_path="results")
+        # save_path makes perf_report write a CSV *and* a plot. The CSV is
+        # what we want; the plot it draws is matplotlib's defaults with a
+        # legend over the data, so redraw it. See bench/sweep_plot.py.
+        sweep_plot.main()
         throughput_table()
         if SKIPPED:
             print("\nno number produced:")

@@ -116,10 +116,38 @@ echo "building for: sm_$CC (TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST)"
 # nvcc on CUTLASS templates wants ~4 GB per process, and flash-attn's backward
 # units want 8-10 GB. MAX_JOBS=4 on a 15 GB box exhausted RAM and swap in 90
 # seconds. Size it off memory, not cores.
-RAM_GB="$(free -g | awk '/^Mem:/ {print $2}')"
-export MAX_JOBS="${MAX_JOBS:-$(( RAM_GB / 8 > 0 ? RAM_GB / 8 : 1 ))}"
+#
+# But ask the cgroup, not `free`. Inside a container `free` reports the
+# *host's* memory: this rented box reports 503 GB and is actually limited to
+# 112 GiB, a 4.5x overestimate. That put MAX_JOBS at the core count, and the
+# OOM killer stopped the flash-attn 2.8.3 build at unit 18 of 73. The 2.6.3
+# build had survived the same wrong number, so the bug only surfaced when the
+# work per process went up.
+mem_limit_gb() {
+  local bytes
+  for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    if [ -r "$f" ]; then
+      bytes="$(cat "$f")"
+      # "max" means unlimited, and cgroup v1 spells that as a huge sentinel.
+      if [ "$bytes" != "max" ] && [ "$bytes" -lt 1000000000000 ] 2>/dev/null; then
+        echo $(( bytes / 1024 / 1024 / 1024 )); return
+      fi
+    fi
+  done
+  free -g | awk '/^Mem:/ {print $2}'
+}
+RAM_GB="$(mem_limit_gb)"
+
+# 12 GB per job, not 8. flash-attn from 2.7 hardcodes its gencode flags and
+# ignores TORCH_CUDA_ARCH_LIST, so every translation unit is compiled for
+# sm_80 *and* sm_90 whatever we ask for -- roughly twice the peak memory of a
+# single-arch build. NVCC_THREADS trims what is left; their setup.py reads it
+# and defaults to 4.
+export NVCC_THREADS="${NVCC_THREADS:-2}"
+export MAX_JOBS="${MAX_JOBS:-$(( RAM_GB / 12 > 0 ? RAM_GB / 12 : 1 ))}"
 [ "$MAX_JOBS" -gt "$(nproc)" ] && export MAX_JOBS="$(nproc)"
-echo "MAX_JOBS  : $MAX_JOBS (from ${RAM_GB} GB RAM, not core count)"
+echo "MAX_JOBS  : $MAX_JOBS (from ${RAM_GB} GB usable, not core count)"
+echo "NVCC_THREADS: $NVCC_THREADS"
 
 # ---------------------------------------------------------------------------
 # 1. Python environment

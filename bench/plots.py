@@ -107,13 +107,54 @@ def titles(ax, title: str, subtitle: str = "",
     "better" means. A reader who arrives at a figure cold should not have to
     find the prose to know which direction is good.
     """
+    # The subtitle is anchored to the top of the axes and grows *upward*, so
+    # the title has to be pushed up by its full height or a second line of
+    # subtitle prints through it. Pad is in points; 12.5 is the line advance at
+    # 9.5pt.
+    lines = subtitle.count("\n") + 1 if subtitle else 0
     ax.set_title(title, color=INK, fontsize=13, fontweight="bold",
-                 loc="left", pad=18 if subtitle else 10)
+                 loc="left", pad=10 + 12.5 * lines)
     if subtitle:
-        ax.text(0.0, 1.02, subtitle, transform=ax.transAxes,
-                color=INK_SOFT, fontsize=9.5, va="bottom", ha="left")
+        ax.text(0.0, 1.015, subtitle, transform=ax.transAxes,
+                color=INK_SOFT, fontsize=9.5, va="bottom", ha="left",
+                linespacing=1.35)
     ax.set_xlabel(xlabel, color=INK_SOFT, fontsize=10)
     ax.set_ylabel(ylabel, color=INK_SOFT, fontsize=10)
+
+
+def slope_degrees(ax, slope: float = 1.0) -> float:
+    """Returns the on-screen angle of a line of the given slope, in degrees.
+
+    Text that labels a line has to be rotated to match it, and the naive way --
+    hardcoding 45 degrees for a slope-1 line -- is wrong on every plot that is
+    not square. The on-screen angle depends on the figure's aspect ratio and,
+    on a log axis, on how many decades each axis spans. A roofline that spans
+    five decades of x and four of y draws its slope-1 roof at nothing like 45
+    degrees, and the label then visibly diverges from the line it names.
+
+    So ask the axes instead: transform two points that differ by `slope` in
+    data space into display pixels and take the angle between them. This
+    survives a resize or a limit change, because it is read off the same
+    transform that draws the line.
+
+    Must be called after the scales and limits are set; before that the
+    transform is still the default and the answer is meaningless.
+
+    Args:
+        ax: The axes, fully configured.
+        slope: Rise over run in *scaled* units -- 1.0 is a decade of y per
+            decade of x on a log-log plot.
+
+    Returns:
+        Degrees counter-clockwise from horizontal.
+    """
+    import math
+
+    (x0, y0), (x1, y1) = ax.transData.transform([
+        ax.transLimits.inverted().transform((0.3, 0.3)),
+        ax.transLimits.inverted().transform((0.3 + 0.1, 0.3 + 0.1 * slope)),
+    ])
+    return math.degrees(math.atan2(y1 - y0, x1 - x0))
 
 
 def legend(ax, **kwargs):
