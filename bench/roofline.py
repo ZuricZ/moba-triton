@@ -438,8 +438,6 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
             linewidth=1.6, zorder=3)
     ax.axvline(c.ridge, color=plots.INK_FAINT, linewidth=0.9,
                linestyle=(0, (3, 3)), zorder=2)
-    ax.text(c.ridge * 1.1, c.peak_flops / 1e12 * 0.045,
-            f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT, fontsize=9)
 
 
     seen, biggest = set(), max(p.seq_len for p in points)
@@ -471,11 +469,19 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     # After set_xscale/set_ylim, not before -- the sloped label's angle is read
     # off the axes transform, which is not final until the scales and limits
     # are.
-    ax.text(lo * 2.4, c.bandwidth * lo * 2.4 / 1e12 * 0.5, "memory bound",
-            color=plots.INK_SOFT, fontsize=9.5, rotation=plots.slope_degrees(ax),
-            rotation_mode="anchor", ha="left", va="top")
+    ax.text(lo * 6.0, c.bandwidth * lo * 6.0 / 1e12 * 0.45, "memory bound",
+            color=plots.INK_SOFT, fontsize=9.5,
+            rotation=plots.slope_degrees(ax), rotation_mode="anchor",
+            ha="left", va="top")
     ax.text(c.ridge * 1.6, c.peak_flops / 1e12 * 0.62, "compute bound",
             color=plots.INK_SOFT, fontsize=9.5, va="top")
+    # The ridge label sits at the bottom of its own line rather than partway up
+    # it. At mid-height it landed on whichever implementation happened to have
+    # an intensity near the ridge -- on the A100 that was flash_moba, and the
+    # two strings printed through each other.
+    ax.text(c.ridge * 1.12, ax.get_ylim()[0] * 1.4,
+            f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT,
+            fontsize=9, va="bottom")
 
     plots.titles(
         ax,

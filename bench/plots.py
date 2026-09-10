@@ -149,11 +149,21 @@ def slope_degrees(ax, slope: float = 1.0) -> float:
     Returns:
         Degrees counter-clockwise from horizontal.
     """
-    (x0, y0), (x1, y1) = ax.transData.transform([
-        ax.transLimits.inverted().transform((0.3, 0.3)),
-        ax.transLimits.inverted().transform((0.3 + 0.1, 0.3 + 0.1 * slope)),
-    ])
-    return float(np.degrees(np.arctan2(y1 - y0, x1 - x0)))
+    # Two real data points on a line of this slope, transformed by the same
+    # transform that draws the data. An earlier version composed transLimits
+    # with transData, which double-applies the axis scaling and returned ~85
+    # degrees for a line drawn at ~35 -- the label came out vertical.
+    x0, x1 = ax.get_xlim()
+    y0, _ = ax.get_ylim()
+    if ax.get_xscale() == "log":
+        # One decade along x; `slope` decades along y.
+        pair = [(x0 * 2.0, y0 * 2.0), (x0 * 20.0, y0 * 2.0 * 10.0 ** slope)]
+    else:
+        span = (x1 - x0) * 0.1
+        pair = [(x0 + span, y0), (x0 + 2 * span, y0 + slope * span)]
+
+    (px0, py0), (px1, py1) = ax.transData.transform(pair)
+    return float(np.degrees(np.arctan2(py1 - py0, px1 - px0)))
 
 
 def legend(ax, **kwargs):
