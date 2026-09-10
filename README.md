@@ -15,49 +15,51 @@ owning a query tile and loading the union of whatever its queries wanted.
 Forward and backward, grouped-query attention, and variable-length packing are
 all implemented and tested against a PyTorch oracle. **461 tests pass.**
 
-> **Scope.** This is a learning project, and the numbers below come from an
-> RTX 3050 Ti laptop (20 SMs, 4 GB). Read the *ratios*; the absolute times mean
-> nothing. A datacenter head-to-head is still pending.
+> **Scope.** This is a learning project. The numbers below are from an
+> **A100-PCIE-40GB**; the laptop figures they replace are in
+> [`docs/reference-comparison.md`](docs/reference-comparison.md).
 
 ---
 
 ## Results so far
 
 `block_size=128, top_k=8` (FlashMoBA's published configuration), bf16,
-shape `[1, S, 4, 64]`, forward pass:
+shape `[1, S, 4, 64]`, forward pass, on an A100-40GB:
 
-| S | blocks | ours | FlashMoBA (CUDA) | torch SDPA | MoonshotAI (naive) |
+| S | blocks | **ours** | FlashMoBA (CUDA) | MoonshotAI (fused) | torch SDPA |
 |---:|---:|---:|---:|---:|---:|
-| 1024 | 8 | 0.280 ms | 1.392 ms | 0.084 ms | 3.784 ms |
-| 2048 | 16 | 0.439 ms | 1.726 ms | 0.230 ms | 10.067 ms |
-| 4096 | 32 | 0.693 ms | 2.503 ms | 0.763 ms | 31.972 ms |
-| 8192 | 64 | **1.377 ms** | 4.377 ms | 2.814 ms | 321.059 ms |
+| 4096 | 32 | 0.252 ms | 0.671 ms | 2.018 ms | 0.144 ms |
+| 8192 | 64 | 0.421 ms | 1.082 ms | 2.569 ms | 0.361 ms |
+| 16384 | 128 | **0.699 ms** | 2.126 ms | 5.280 ms | 1.210 ms |
+| 32768 | 256 | **1.261 ms** | 5.111 ms | 17.246 ms | 4.171 ms |
+| 65536 | 512 | **2.736 ms** | 12.198 ms | 57.254 ms | 15.456 ms |
 
-At S=8192 — the length with the most sparsity here — that is **2.04× torch
-SDPA on the forward and 2.45× on the backward**, and 3.18× / 1.70× against
-FlashMoBA's CUDA.
+At S=65536 that is **5.65× torch SDPA, 4.46× FlashMoBA's CUDA kernel, and
+20.9× MoonshotAI's own fused implementation** — and the margin grows with
+context, which is the regime MoBA exists for.
 
-Three things this table says, and one it does not:
+Four things this table says:
 
-- **Sparsity is not free below the crossover.** At S=1024 there are 8 blocks
-  and `top_k=8` selects *all of them* — there is no sparsity to exploit, only
-  the routing overhead of pretending there is. Dense attention should win, and
-  it does. The kernel overtakes dense at S=4096 and the gap widens from there,
-  which is the regime MoBA exists for.
-- **Against MoonshotAI's *naive* path it is 15–240× faster** — but read that
-  with care. MoonshotAI ship two implementations: `moba_naive.py`, written to
-  be read, which materialises the score matrix; and `moba_efficient.py`, which
-  fuses onto FlashAttention and is what their library actually runs. Only the
-  naive one is measured above, because the fused one needs flash-attn 2.6.3.
-  **A 240× number against code written for clarity is not a claim about their
-  fast path**, and the honest comparison is still pending.
-- **The numbers scale the way the algorithm says they should.** MoBA attends
-  `top_k × block_size` = 1024 keys per query whatever S is, so cost is linear
-  rather than quadratic — and 0.693 → 1.377 ms across a doubling of S is a
-  factor of 1.99.
-- It does **not** mean we are faster than FlashMoBA. Their kernel picks a
-  512-query tile at S=8192, sized for the 164 KiB of shared memory an A100
-  has; this card has 99 KiB and 20 SMs. That comparison needs the rented card.
+- **The advantage compounds with sequence length**, exactly as the
+  loop-inversion argument predicts: 0.86× → 1.73× → 3.31× → 5.65× against
+  dense. Below the crossover there is no sparsity to exploit — at S=1024,
+  `top_k=8` selects all 8 blocks — so dense should win, and does.
+- **The win is in the attention kernel, not the gate.** Timing the pipelines'
+  halves separately gives 1.9–2.1× on routing but **3.2–3.4× on attention**,
+  which is the stage where the two designs differ. FlashMoBA's query-major tile
+  discards 77% of its tensor-core work to masking at this configuration; a
+  KV-block-major program discards none.
+- **The dense baselines stop being possible.** `naive_torch` OOMs at S=32768
+  trying to allocate 16 GiB, because attention memory is quadratic in S. Ours
+  runs S=65536 in 2.7 ms.
+- **It is verified, not assumed.** All three MoBA implementations show
+  *identical* error against the PyTorch oracle (0.0478 at S=4096), and the gap
+  widens rather than closes at realistic shapes — 3.12× at `H=32, D=128,
+  batch 4`.
+
+Full A100 results, the fairness checks behind the FlashMoBA claim, and why
+Triton-MoBA could not run alongside MoonshotAI:
+[`docs/a100-results.md`](docs/a100-results.md).
 
 Full numbers, the four measurement artifacts caught along the way, and the
 thermal protocol these required:
@@ -280,6 +282,7 @@ Written to be read in order.
 | [environment](docs/environment.md) | Every version pin and where it is decided, including the reference commits each published number was measured against. |
 | [occupancy-measurements](docs/occupancy-measurements.md) | Why the attend kernel keeps only 8 of 48 warps resident, and why raising that makes it slower. |
 | [flashmoba-digest](docs/flashmoba-digest.md) | What FlashMoBA's CUDA actually does, cited line by line. |
+| [a100-results](docs/a100-results.md) | The head-to-head on an A100: four MoBA implementations, S up to 65536, and the three checks behind the FlashMoBA claim. |
 | [reference-comparison](docs/reference-comparison.md) | The head-to-head, and three measurement artifacts that flattered us. |
 | [divergence-measurements](docs/divergence-measurements.md) | Routing divergence measured from real selection masks. |
 | [gather-cost-measurements](docs/gather-cost-measurements.md) | What gathering scattered query rows actually costs. |
