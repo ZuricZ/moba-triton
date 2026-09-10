@@ -176,8 +176,16 @@ def differentiable(cfg: MoBAConfig) -> list:
                 ]
                 if call(*probe, cfg).requires_grad:
                     _DIFFERENTIABLE.append(b)
-            except (RuntimeError, NotImplementedError, torch.OutOfMemoryError):
-                pass
+            except Exception as exc:            # noqa: BLE001 - see below
+                # Deliberately broad. This probe exists to classify third-party
+                # code, and third-party code raises whatever it likes: the
+                # clause used to name RuntimeError, NotImplementedError and
+                # OutOfMemoryError, and Triton-MoBA raised ValueError, which
+                # escaped and killed an entire A100 sweep before a single
+                # measurement was taken. A backend that cannot run is a row of
+                # the results table, not the end of the run.
+                SKIPPED.setdefault(f"{b.name}_bwd",
+                                   f"{type(exc).__name__}: {str(exc)[:70]}")
         torch.cuda.empty_cache()
     return _DIFFERENTIABLE
 
@@ -347,10 +355,13 @@ def benchmark(seq_len, provider):
         result = min(samples, key=lambda r: r[0])
         MEDIANS[(provider, seq_len)] = result[0]
         return result
-    except (RuntimeError, NotImplementedError, torch.OutOfMemoryError) as exc:
+    except Exception as exc:                    # noqa: BLE001
         # A gap, not a crash. Recorded rather than swallowed: a silent NaN hid
         # the fact that our own backward was unreachable through this adapter.
-        SKIPPED.setdefault(provider, str(exc)[:90])
+        # Broad for the same reason as the probe above -- a vendored backend
+        # that fails should cost its own row, not the whole sweep.
+        SKIPPED.setdefault(provider,
+                           f"{type(exc).__name__}: {str(exc)[:80]}")
         torch.cuda.empty_cache()
         return float("nan"), float("nan"), float("nan")
 
