@@ -11,9 +11,16 @@
 # On a rented box that rediscovery is billed by the hour.
 #
 # USAGE
-#     ./scripts/bootstrap_remote.sh            # everything except flash-attn
-#     ./scripts/bootstrap_remote.sh --all      # also build flash-attn (slow)
-#     ./scripts/bootstrap_remote.sh --bench    # just re-run the comparison
+#     ./scripts/bootstrap_remote.sh              # everything except flash-attn
+#     ./scripts/bootstrap_remote.sh --all        # also build flash-attn (slow)
+#     ./scripts/bootstrap_remote.sh --bench      # just re-run the comparison
+#
+# flash-attn's two incompatible generations both have a MoBA reference that
+# needs them, so the version is a parameter and only one is live at a time:
+#
+#     ./scripts/bootstrap_remote.sh --all --fa=2.8.3   # build the other one
+#     ./scripts/bootstrap_remote.sh --use-fa=2.8.3     # switch to it (instant)
+#     ./scripts/bootstrap_remote.sh --use-fa=2.6.3     # and back
 #
 # Every step is idempotent; re-running skips what is already done.
 
@@ -23,11 +30,17 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ROOT="${BUILD_ROOT:-$HOME/build}"
 WITH_FLASH_ATTN=0
 BENCH_ONLY=0
+SWITCH_ONLY=0
+# Two flash-attn versions are needed and they are mutually exclusive; see the
+# table in step 4. This names which one the next command acts on.
+FA_VERSION="${FA_VERSION:-2.6.3}"
 
 for arg in "$@"; do
   case "$arg" in
     --all)   WITH_FLASH_ATTN=1 ;;
     --bench) BENCH_ONLY=1 ;;
+    --fa=*)  FA_VERSION="${arg#--fa=}" ;;
+    --use-fa=*) FA_VERSION="${arg#--use-fa=}"; SWITCH_ONLY=1 ;;
     *) echo "unknown argument: $arg"; exit 2 ;;
   esac
 done
@@ -42,6 +55,33 @@ site_packages() {
   [ -d "$dir" ] || { echo "no site-packages under $REPO/.venv" >&2; exit 1; }
   printf '%s' "$dir"
 }
+
+# Point the venv at one of the built flash-attn trees.
+#
+# flash-attn is never installed into the venv -- it is built in place and
+# reached through a .pth file, which is nothing more than "add this directory
+# to sys.path". So swapping versions is a 40-byte write, not a reinstall, and
+# torch and triton stay bit-identical across the two runs. That matters:
+# triton is the compiler under test, so a second venv resolving it differently
+# would make the `ours` column non-comparable between them.
+#
+# Both trees build a module called flash_attn_2_cuda, so exactly one farm may
+# be on sys.path at a time. One .pth, rewritten, enforces that by construction.
+use_flash_attn() {
+  local version="$1" link="$BUILD_ROOT/site-fa-$1"
+  [ -d "$link" ] || { echo "flash-attn $version not built: no $link" >&2
+                      echo "  build it with: $0 --all --fa=$version" >&2; exit 1; }
+  echo "$link" > "$(site_packages)/flash-attn-local.pth"
+  echo "flash_attn -> $link"
+}
+
+# --use-fa= does one thing and exits, so it costs a second rather than a
+# machine probe. It is the command you run between the two sweeps.
+if [ "$SWITCH_ONLY" -eq 1 ]; then
+  say "flash-attn $FA_VERSION"
+  use_flash_attn "$FA_VERSION"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 0. What are we on?
@@ -170,26 +210,45 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "$WITH_FLASH_ATTN" -eq 1 ] && [ -n "${CUDA_HOME:-}" ]; then
-  say "flash-attn 2.6.3 (for triton_moba)"
-  # 2.6.3 specifically, not latest: Triton-MoBA calls the private
-  # _flash_attn_varlen_forward and unpacks 8 return values, a signature that
-  # changed in later releases.
-  [ -d "$BUILD_ROOT/flash-attn" ] || git clone --depth 1 --branch v2.6.3 \
-      https://github.com/Dao-AILab/flash-attention.git "$BUILD_ROOT/flash-attn"
-  cd "$BUILD_ROOT/flash-attn"
+  say "flash-attn $FA_VERSION"
+  # The version is a parameter because the two MoBA references disagree about
+  # flash-attn's API and no single build satisfies both:
+  #
+  #   2.6.x   window_size=(l, r) tuple   fwd returns 8   bwd returns 4
+  #   >= 2.7  window_size_left/right     fwd returns 4   bwd returns 1
+  #
+  #   moonshot_efficient  unpacks 8  ->  needs 2.6.3
+  #   triton_moba         unpacks 4  ->  needs >= 2.7
+  #
+  # FA3 and FA4 are not options on this hardware. FA3 is sm_90a Hopper only;
+  # FA4 is CuTeDSL under flash_attn/cute/ with kernels for sm_90/100/120 and a
+  # runtime capability check that has no branch for 8. Both leave sm_80 out.
+  SRC="$BUILD_ROOT/flash-attn-$FA_VERSION"
+  # Adopt the unversioned tree an older revision of this script built. It was
+  # always 2.6.3, and re-cloning to rebuild it would cost half an hour.
+  if [ "$FA_VERSION" = "2.6.3" ] && [ ! -d "$SRC" ] && [ -d "$BUILD_ROOT/flash-attn" ]; then
+    mv "$BUILD_ROOT/flash-attn" "$SRC"
+  fi
+  [ -d "$SRC" ] || git clone --depth 1 --branch "v$FA_VERSION" \
+      https://github.com/Dao-AILab/flash-attention.git "$SRC"
+  cd "$SRC"
   export FLASH_ATTENTION_FORCE_BUILD=TRUE
   # 94 .cu files. Untested against torch 2.13 -- if their C++ API drifted this
   # fails early rather than after hours, which is the good outcome.
-  time "$REPO/.venv/bin/python" setup.py build_ext --inplace
+  if ! ls flash_attn_2_cuda*.so > /dev/null 2>&1; then
+    time "$REPO/.venv/bin/python" setup.py build_ext --inplace
+  else
+    echo "already built"
+  fi
 
-  LINK="$BUILD_ROOT/site-fa"
+  # One farm per version, so a rebuilt tree never half-shadows the other.
+  LINK="$BUILD_ROOT/site-fa-$FA_VERSION"
   mkdir -p "$LINK"
-  ln -sfn "$BUILD_ROOT/flash-attn/flash_attn" "$LINK/flash_attn"
-  for so in "$BUILD_ROOT"/flash-attn/flash_attn_2_cuda*.so; do
+  ln -sfn "$SRC/flash_attn" "$LINK/flash_attn"
+  for so in "$SRC"/flash_attn_2_cuda*.so; do
     [ -e "$so" ] && ln -sfn "$so" "$LINK/$(basename "$so")"
   done
-  echo "$LINK" > "$(site_packages)/flash-attn-local.pth"
-  echo "linked flash_attn"
+  use_flash_attn "$FA_VERSION"
 fi
 
 # ---------------------------------------------------------------------------
