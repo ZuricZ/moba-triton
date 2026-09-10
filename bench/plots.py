@@ -24,6 +24,7 @@ is never the only channel carrying identity.
 import matplotlib
 matplotlib.use("Agg")                       # no display on a headless box
 import matplotlib.pyplot as plt             # noqa: E402
+import numpy as np                          # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Palette
@@ -148,13 +149,11 @@ def slope_degrees(ax, slope: float = 1.0) -> float:
     Returns:
         Degrees counter-clockwise from horizontal.
     """
-    import math
-
     (x0, y0), (x1, y1) = ax.transData.transform([
         ax.transLimits.inverted().transform((0.3, 0.3)),
         ax.transLimits.inverted().transform((0.3 + 0.1, 0.3 + 0.1 * slope)),
     ])
-    return math.degrees(math.atan2(y1 - y0, x1 - x0))
+    return float(np.degrees(np.arctan2(y1 - y0, x1 - x0)))
 
 
 def legend(ax, **kwargs):
@@ -183,22 +182,37 @@ def label_points(ax, xs, ys, labels, colors=None, dx=6, dy=6,
         log: Compare positions in log space, for log-scaled axes.
         tol: Points closer than this (in decades when `log`) are one cluster.
     """
-    import math
+    # Comparison coordinates, distinct from the data coordinates the annotation
+    # is drawn at: on a log axis two points are "close" when their logarithms
+    # are, not their values.
+    key_x = np.asarray(xs, dtype=float)
+    key_y = np.asarray(ys, dtype=float)
+    if log:
+        key_x = np.log10(np.maximum(key_x, 1e-12))
+        key_y = np.log10(np.maximum(key_y, 1e-12))
 
-    def key(x, y):
-        return (math.log10(max(x, 1e-12)), math.log10(max(y, 1e-12))) if log             else (x, y)
+    # Which pairs collide, as one n x n mask rather than a rescan of every
+    # already-placed label for every new one. Broadcasting states the rule
+    # once -- two labels collide when they are within `tol` on both axes --
+    # where the nested scan spread it over a loop, an accumulator and a
+    # running max.
+    collides = ((np.abs(key_x[:, None] - key_x[None, :]) < tol)
+                & (np.abs(key_y[:, None] - key_y[None, :]) < tol))
 
-    order = sorted(range(len(labels)), key=lambda i: -ys[i])
-    placed: list[tuple[float, float, int]] = []
-    for i in order:
-        kx, ky = key(xs[i], ys[i])
-        step = 0
-        for px, py, pstep in placed:
-            if abs(px - kx) < tol and abs(py - ky) < tol:
-                step = max(step, pstep + 1)
-        placed.append((kx, ky, step))
+    # Tallest first, so a cluster stacks downward from its topmost member and
+    # the result does not depend on the caller's input order.
+    order = np.argsort(-np.asarray(ys, dtype=float))
+    # A label's offset is how many colliding labels were placed before it.
+    # Reindexing the mask into placement order turns "placed before" into
+    # "strictly below the diagonal", so the whole stagger is one tril + sum.
+    earlier = np.tril(collides[np.ix_(order, order)], k=-1)
+    steps = np.empty(len(order), dtype=int)
+    steps[order] = earlier.sum(axis=1)
+
+    for i, step in enumerate(steps):
         ax.annotate(labels[i], (xs[i], ys[i]), textcoords="offset points",
-                    xytext=(dx, dy - 13 * step), fontsize=9, color=INK_SOFT)
+                    xytext=(dx, dy - 13 * int(step)), fontsize=9,
+                    color=INK_SOFT)
 
 
 def save(fig, path: str) -> str:

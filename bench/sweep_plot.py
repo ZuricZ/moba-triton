@@ -25,6 +25,8 @@ as a line that simply ended.
 import csv
 import os
 
+import numpy as np
+
 from bench import plots
 
 # ---------------------------------------------------------------------------
@@ -127,21 +129,31 @@ def crossover(seq_lens, ours, baseline) -> float | None:
         at the first point, that point is returned -- the true crossing is
         below the sweep and cannot be located from this data.
     """
-    import math
+    x = np.asarray(seq_lens, dtype=float)
+    mine = np.array([np.nan if v is None else v for v in ours], dtype=float)
+    theirs = np.array([np.nan if v is None else v for v in baseline],
+                      dtype=float)
 
-    pairs = [(s, m, t) for s, m, t in zip(seq_lens, ours, baseline)
-             if m is not None and t is not None]
-    if not pairs:
+    keep = np.isfinite(mine) & np.isfinite(theirs)
+    if not keep.any():
         return None
-    if pairs[0][1] < pairs[0][2]:
-        return pairs[0][0]
-    for (s0, m0, t0), (s1, m1, t1) in zip(pairs, pairs[1:]):
-        r0, r1 = math.log(m0 / t0), math.log(m1 / t1)
-        if r0 >= 0 > r1:
-            # Fraction of the way from s0 to s1 at which log(ratio) hits zero.
-            frac = r0 / (r0 - r1)
-            return math.exp(math.log(s0) + frac * (math.log(s1) - math.log(s0)))
-    return None
+    x, ratio = x[keep], np.log(mine[keep] / theirs[keep])
+
+    if ratio[0] < 0:
+        return float(x[0])
+
+    # The first bracket where the log-ratio changes sign. Located explicitly
+    # rather than with `np.interp`, which needs a monotone axis and would
+    # return a plausible wrong answer without complaining if the ratio ever
+    # doubled back -- and this project has already found one curve that does
+    # (the backward's harness-driven dip).
+    crossings = np.flatnonzero((ratio[:-1] >= 0.0) & (ratio[1:] < 0.0))
+    if crossings.size == 0:
+        return None
+
+    i = int(crossings[0])
+    frac = ratio[i] / (ratio[i] - ratio[i + 1])
+    return float(np.exp(np.log(x[i]) + frac * np.log(x[i + 1] / x[i])))
 
 
 # ---------------------------------------------------------------------------
