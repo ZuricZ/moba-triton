@@ -19,6 +19,24 @@ WHAT HAS ALREADY BEEN RULED OUT, BY READING RATHER THAN MEASURING.
 * **Not atomic contention.** The backward stores dK and dV exactly once per
   (block, head) -- no atomics anywhere in `moba_bwd_kernel`.
 
+IS IT EVEN REAL? Ask this before explaining it. Thermal and contention error is
+one-sided -- nothing finishes faster than its true time -- so noise inflates a
+measurement and cannot deflate one. To manufacture a *falling* curve, noise
+would have to inflate S=1024 most, S=2048 less and S=4096 least.
+
+That is not a strange requirement. It is precisely the shape of a startup
+artifact. S=1024 is the first cell of the sweep: it is where `@triton.autotune`
+races its configs, where the caching allocator is cold, where the CUDA context
+is still warming. All of those decay with *position in the sweep*, and in an
+ascending sweep position and S are perfectly correlated, so the original data
+cannot separate them.
+
+So every shape is measured twice, ascending and descending. If the dip follows
+S it is real; if it follows position it is an artifact of sweeping upward, and
+the stage split below would have been an explanation of a measurement bug.
+Running ascending only -- which is what this probe did first -- would have
+reproduced the artifact rather than detected it.
+
 WHAT THIS MEASURES. The step split into stages, plus the shape of the routing
 that feeds them. A stage whose cost falls while its input grows is the answer;
 if instead every stage is flat and only their sum moves, the effect is fixed
@@ -68,47 +86,82 @@ def winning_config(kernel) -> str:
     return " | ".join(sorted(configs))
 
 
+def measure(seq_len: int) -> dict:
+    """Times one shape's stages and reports the routing that fed them."""
+    g = torch.Generator(device="cuda").manual_seed(0)
+    q, k, v = (torch.randn(BATCH, seq_len, HEADS, HEAD_DIM, generator=g,
+                           device="cuda", dtype=CFG.dtype)
+               for _ in range(3))
+    dout = torch.randn_like(q)
+
+    index = build_csc_fused(q, k, CFG)
+    part_acc, part_m, part_l = attend_partials(q, k, v, CFG, index)
+    out, lse = combine_partials(part_acc, part_m, part_l, q.dtype,
+                                return_lse=True)
+
+    row = {
+        "seq_len": seq_len,
+        "blocks": index.num_blocks,
+        "nnz": int(index.col_nnz.sum()),
+        "maxcol": int(index.col_nnz.max()),
+        "route": time_ms(lambda: build_csc_fused(q, k, CFG)),
+        "fwd": time_ms(lambda: attend_partials(q, k, v, CFG, index)),
+        "delta": time_ms(lambda: compute_delta(out, dout)),
+        "bwd": time_ms(lambda: moba_backward(dout, q, k, v, out, lse, part_m,
+                                             CFG, index)),
+    }
+    del q, k, v, dout, part_acc, part_m, part_l, out, lse, index
+    torch.cuda.empty_cache()
+    return row
+
+
+def report(rows: list[dict], label: str) -> None:
+    """Prints one pass of the sweep, ordered by shape rather than by run."""
+    print(f"\n{label}")
+    header = (f"{'S':>7} {'blocks':>7} {'nnz':>9} {'maxcol':>7} "
+              f"{'route':>8} {'fwd':>8} {'delta':>8} {'bwd':>8} {'sum':>8} "
+              f"{'ns/nnz':>8}")
+    print(header)
+    print("-" * len(header))
+    for r in sorted(rows, key=lambda r: r["seq_len"]):
+        total = r["route"] + r["fwd"] + r["delta"] + r["bwd"]
+        print(f"{r['seq_len']:>7} {r['blocks']:>7} {r['nnz']:>9} "
+              f"{r['maxcol']:>7} {r['route']:>8.3f} {r['fwd']:>8.3f} "
+              f"{r['delta']:>8.3f} {r['bwd']:>8.3f} {total:>8.3f} "
+              f"{r['bwd'] * 1e6 / r['nnz']:>8.1f}")
+
+
 def main() -> None:
     from moba.kernels import moba_bwd as bwd_module
 
     print(f"block_size={CFG.block_size} top_k={CFG.top_k} "
-          f"[{BATCH}, S, {HEADS}, {HEAD_DIM}] bf16\n")
-    header = (f"{'S':>7} {'blocks':>7} {'nnz':>9} {'maxcol':>7} "
-              f"{'fwd':>8} {'delta':>8} {'bwd':>8} {'total':>8} "
-              f"{'ns/nnz':>8}")
-    print(header)
-    print("-" * len(header))
+          f"[{BATCH}, S, {HEADS}, {HEAD_DIM}] bf16")
 
-    for seq_len in SEQ_LENS:
-        g = torch.Generator(device="cuda").manual_seed(0)
-        q, k, v = (torch.randn(BATCH, seq_len, HEADS, HEAD_DIM, generator=g,
-                               device="cuda", dtype=CFG.dtype)
-                   for _ in range(3))
-        dout = torch.randn_like(q)
+    # Fire every kernel once at the largest shape before anything is timed, so
+    # autotuning, JIT compilation and the caching allocator's first growth are
+    # all behind us. Otherwise they land on whichever shape happens to be
+    # measured first and masquerade as a property of that shape.
+    print("priming (autotune, JIT, allocator) at the largest shape...")
+    measure(max(SEQ_LENS))
 
-        index = build_csc_fused(q, k, CFG)
-        nnz = int(index.col_nnz.sum())
-        maxcol = int(index.col_nnz.max())
+    ascending = [measure(s) for s in sorted(SEQ_LENS)]
+    descending = [measure(s) for s in sorted(SEQ_LENS, reverse=True)]
 
-        part_acc, part_m, part_l = attend_partials(q, k, v, CFG, index)
-        out, lse = combine_partials(part_acc, part_m, part_l, q.dtype,
-                                    return_lse=True)
+    report(ascending, "ascending -- S rises with sweep position")
+    report(descending, "descending -- S falls as sweep position rises")
 
-        fwd = time_ms(lambda: attend_partials(q, k, v, CFG, index))
-        delta = time_ms(lambda: compute_delta(out, dout))
-        step = time_ms(lambda: moba_backward(dout, q, k, v, out, lse, part_m,
-                                             CFG, index))
-        total = fwd + delta + step
-        print(f"{seq_len:>7} {index.num_blocks:>7} {nnz:>9} {maxcol:>7} "
-              f"{fwd:>8.3f} {delta:>8.3f} {step:>8.3f} {total:>8.3f} "
-              f"{step * 1e6 / nnz:>8.1f}")
-
-        del q, k, v, dout, part_acc, part_m, part_l, out, lse, index
-        torch.cuda.empty_cache()
+    print("\nbwd, both orders, to separate S from position:")
+    print(f"  {'S':>7} {'up':>9} {'down':>9} {'spread':>8}")
+    by_len = {r["seq_len"]: r for r in descending}
+    for r in ascending:
+        up, down = r["bwd"], by_len[r["seq_len"]]["bwd"]
+        print(f"  {r['seq_len']:>7} {up:>9.3f} {down:>9.3f} "
+              f"{abs(up - down) / min(up, down):>7.1%}")
+    print("  A dip present in both orders follows S and is real. A dip that")
+    print("  flips to the other end is an artefact of sweep position.")
 
     print(f"\nbwd config(s) chosen: {winning_config(bwd_module.moba_bwd_kernel)}")
-    print("one entry means one config served the whole sweep, as the key "
-          "predicts")
+    print("one entry means one config served every shape, as the key predicts")
 
 
 if __name__ == "__main__":
