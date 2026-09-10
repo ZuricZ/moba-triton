@@ -17,7 +17,7 @@ duplicated here — each row points at the file that actually decides.
 | pandas | (locked) | [`uv.lock`](../uv.lock), dev group |
 | CUDA runtime (wheel) | `12.6.77` | [`uv.lock`](../uv.lock) |
 | wheel index | `download.pytorch.org/whl/cu126` | [`pyproject.toml`](../pyproject.toml) |
-| flash-attn | `v2.6.3` | [`scripts/bootstrap_remote.sh`](../scripts/bootstrap_remote.sh) |
+| flash-attn | `2.6.3` **and** `2.8.3`, one live at a time | [`scripts/bootstrap_remote.sh`](../scripts/bootstrap_remote.sh) |
 | the five reference repos | exact commits | [`scripts/fetch_references.sh`](../scripts/fetch_references.sh) |
 
 `matplotlib` and `einops` are in the **dev group**, not the runtime
@@ -54,11 +54,58 @@ kernel in `src/moba` is compiled by it, so changing it changes the thing being
 measured. This is the reason we build flash-attn from source rather than
 downgrading torch to reach a version flash-attn ships wheels for.
 
-**flash-attn pinned to 2.6.3, not latest.** Triton-MoBA calls the *private*
-`_flash_attn_varlen_forward` and unpacks eight return values. That signature
-changed in later releases, so "newer" is not "compatible". It gates two
-backends — `triton_moba` and `moonshot_efficient` — so one build brings up
-both.
+**flash-attn needs two versions, and they cannot coexist.** This is the one pin
+that is not a single value, because the two MoBA references disagree about
+flash-attn's private API and the disagreement is not resolvable by picking a
+newer release.
+
+Both call `_flash_attn_varlen_forward` — private, underscore-prefixed, no
+compatibility promise — and the signature changed at 2.7:
+
+| | 2.6.x | >= 2.7 |
+|---|---|---|
+| `window_size` | one `(left, right)` tuple | two ints, `window_size_left` / `window_size_right` |
+| forward returns | 8 values | 4 |
+| backward returns | 4 values | 1 (gradients written in place) |
+
+`moonshot_efficient` unpacks **eight**, so it needs 2.6.x. `triton_moba`
+unpacks **four**, so it needs >= 2.7. There is no version where both import,
+which is why the first A100 sweep ran with four implementations instead of five
+(`docs/a100-results.md`).
+
+A shim was considered and rejected. Faking it means emulating three unrelated
+changes at once, including allocating the gradient buffers that >= 2.7 expects
+its caller to provide. A subtly wrong shim would not fail loudly — it would
+make *their* implementation post a bad number, which is the worst available
+outcome for a comparison table.
+
+So the version is a parameter of `bootstrap_remote.sh` (`--fa=`, `--use-fa=`)
+and the sweep runs twice. What it is *not* is a second venv: flash-attn is
+never installed into the venv, it is built in place and reached through a
+one-line `.pth` file, so switching is a 40-byte write. That keeps torch and
+triton bit-identical across the two runs — load-bearing, because triton is the
+compiler under test and `ours` has to be the same kernel in both tables.
+
+**FA3 and FA4 cannot be used here at all**, on any card this project has
+access to:
+
+| | implementation | targets | on our sm_80 A100 |
+|---|---|---|---|
+| FA2 | CUDA / CUTLASS | sm_80 and up | yes — the only option |
+| FA3 | CUDA, installs as `flash_attn_3`, lives in `hopper/` | sm_90a only | no |
+| FA4 | **CuTeDSL**, `flash_attn/cute/` | sm_90 / sm_100 / sm_120 | no |
+
+FA4's kernel files are named `flash_fwd_sm90.py`, `flash_fwd_sm100.py`,
+`flash_bwd_sm120.py`, and its `_validate_head_dims` branches on
+`compute_capability == 9` and `in [10, 11]` — there is no branch for 8. The
+`arch=compute_80` gencode flags in that tag's `setup.py` are a red herring:
+they build the legacy FA2 C++ extension, which still ships in the same
+repository. FA4 also installs under `PACKAGE_NAME = "flash_attn"`, so it would
+shadow FA2's import name rather than sit beside it.
+
+Trying either would need Hopper. That is a separate rental, and it would change
+more than the flash-attn column — our own kernel would recompile for sm_90 too,
+so it is a new measurement rather than an extension of this one.
 
 **The reference repos are pinned to commits.** Until 2026-09-07 they were
 cloned `--depth 1` from HEAD, so a run today and a run next month could compare
@@ -103,6 +150,20 @@ uv sync                                    # torch, triton, numpy from uv.lock
 ./scripts/fetch_references.sh --recursive  # references at their pinned commits
 ./scripts/bootstrap_remote.sh              # both, plus builds and the sweep
 ```
+
+For the full five-implementation comparison, build both flash-attns once and
+then run the sweep twice, switching between them:
+
+```bash
+./scripts/bootstrap_remote.sh --all --fa=2.6.3   # moonshot_efficient
+./scripts/bootstrap_remote.sh --all --fa=2.8.3   # triton_moba
+./scripts/bootstrap_remote.sh --use-fa=2.8.3 && uv run python -m bench.compare
+./scripts/bootstrap_remote.sh --use-fa=2.6.3 && uv run python -m bench.compare
+```
+
+Each build is 30-60 minutes; each switch is instant. The backend that is not
+supported by the live version reports itself unavailable and the sweep carries
+on without it, so neither run needs editing to know which pass it is in.
 
 The venv lives in the repo on a normal Linux box. On the WSL dev machine it is
 deliberately outside it — `/mnt/c` is a 9p bridge to a Windows drive where uv

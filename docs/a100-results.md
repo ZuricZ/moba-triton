@@ -158,10 +158,20 @@ So the versions are mutually exclusive:
 | 2.6.3 (what we built) | works | fails |
 | >= 2.7 | would fail | would work |
 
-Getting both needs two environments. If only one, 2.6.3 is the right choice:
-MoonshotAI's fused path is the reference implementation the field actually
-uses, and it is the comparison that was pending since `moonshot` was renamed to
-`moonshot_naive`.
+Getting both means running the sweep twice against two flash-attn builds. That
+is now what happens -- `bootstrap_remote.sh --fa=` builds either version and
+`--use-fa=` switches between them in a second, because flash-attn is reached
+through a `.pth` file rather than installed, so torch and triton stay
+bit-identical across the two passes. `docs/environment.md` has the API table
+and why a compatibility shim was rejected.
+
+The first pass, the one in the tables above, used 2.6.3: MoonshotAI's fused path
+is the reference implementation the field actually uses, and it was the
+comparison pending since `moonshot` was renamed to `moonshot_naive`. The
+`triton_moba` column is measured in a second pass and is **not** in the tables
+above -- when it lands it goes in its own table, with the flash-attn version
+named, because a number measured under a different dependency does not belong in
+the same row as one that was not.
 
 ---
 
