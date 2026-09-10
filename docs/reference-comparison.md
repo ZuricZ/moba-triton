@@ -1,5 +1,13 @@
 # Against the reference implementations — measurements
 
+> **Superseded for the headline numbers.** Everything below was measured on
+> an RTX 3050 Ti laptop -- 20 SMs, 4 GB, 99 KiB of shared memory. The A100
+> head-to-head is in [`a100-results.md`](a100-results.md), and it is the one to
+> quote. This file is kept because the *methodology* it works out -- the
+> thermal protocol, the four measurement artifacts, the FLOP conventions -- is
+> what makes those numbers trustworthy, and because the laptop is still where
+> correctness work happens.
+
 First head-to-head between our kernel and the vendored references.
 RTX 3050 Ti Laptop (sm_86, 20 SMs, 4 GB), bf16, `block_size=128, top_k=8`
 (FlashMoBA's published configuration), shape `[1, S, 4, 64]`,
