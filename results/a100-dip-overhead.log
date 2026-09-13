@@ -1,0 +1,43 @@
+block_size=128 top_k=8 [1, S, 4, 64] bf16
+priming (autotune, JIT, allocator) at the largest shape...
+
+ascending -- S rises with sweep position
+      S  blocks       nnz  maxcol    route      fwd    delta      bwd      sum   ns/nnz
+---------------------------------------------------------------------------------------
+   1024       8     18432    1024    0.079    0.057    0.009    0.082    0.227      4.4
+   2048      16     51200    1709    0.121    0.090    0.009    0.134    0.354      2.6
+   4096      32    116736    2357    0.121    0.133    0.011    0.229    0.495      2.0
+   8192      64    247808    3073    0.213    0.191    0.015    0.391    0.811      1.6
+  16384     128    509952    3927    0.369    0.275    0.024    0.639    1.307      1.3
+
+descending -- S falls as sweep position rises
+      S  blocks       nnz  maxcol    route      fwd    delta      bwd      sum   ns/nnz
+---------------------------------------------------------------------------------------
+   1024       8     18432    1024    0.079    0.057    0.008    0.083    0.227      4.5
+   2048      16     51200    1709    0.120    0.090    0.009    0.135    0.354      2.6
+   4096      32    116736    2357    0.120    0.132    0.011    0.229    0.493      2.0
+   8192      64    247808    3073    0.183    0.191    0.015    0.391    0.781      1.6
+  16384     128    509952    3927    0.369    0.274    0.024    0.647    1.314      1.3
+
+bwd, both orders, to separate S from position:
+        S        up      down   spread
+     1024     0.082     0.083    1.3%
+     2048     0.134     0.135    0.8%
+     4096     0.229     0.229    0.0%
+     8192     0.391     0.391    0.0%
+    16384     0.639     0.647    1.3%
+  A dip present in both orders follows S and is real. A dip that
+  flips to the other end is an artefact of sweep position.
+
+bwd config(s) chosen: GROUP: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None
+one entry means one config served every shape, as the key predicts
+
+the autograd step, against the sum of the kernels it launches:
+        S      step   kernels       gap   gap %
+     1024     0.430     0.227     0.203  47.1%
+     2048     0.449     0.354     0.094  21.0%
+     4096     0.553     0.495     0.058  10.6%
+     8192     0.791     0.811    -0.020  -2.5%
+    16384     1.329     1.307     0.023   1.7%
+  A gap that shrinks as S grows is the card being starved at small
+  S: fixed per-launch cost the GPU work is too short to hide.

@@ -10,9 +10,6 @@ claude-ds.sh
 # --- Vendored reference repos (read-only, fetched via scripts) ---
 references/
 
-# --- Benchmark output ---
-results/
-
 # --- Python ---
 __pycache__/
 *.py[cod]
@@ -54,3 +51,35 @@ results.html
 
 # --- Local scratch notes, not part of the repo ---
 REMOTE.md
+
+# --- Benchmark output ---
+#
+# Ignored by default: a results/ directory is per-machine, and a laptop run and
+# an A100 run write the same filenames. But the docs cite specific files as the
+# evidence behind published numbers, and evidence that is not in the repo is
+# not evidence -- a fresh clone was getting six broken references. So the
+# measurements and figures that docs/ points at are un-ignored individually.
+#
+# The line is drawn at *what a number came from*, not at *what a run produced*:
+# the sweep CSVs, the per-pass CSVs, the figures and the measurement logs stay;
+# the 350 KB compiler transcripts from building flash-attn and bootstrapping the
+# box do not. Those prove a build happened, which no document claims.
+#
+# Two ordering rules make this work, and each one silently broke it once:
+#
+# 1. `results/*`, not `results/`. Git never descends into an excluded
+#    *directory*, so a negation under one can never match -- it is dead text.
+#    Excluding the contents lets git look inside and test each entry.
+# 2. This block sits at the end of the file. The last matching pattern wins,
+#    and `*.csv` / `*.png` under "Benchmark scratch" above would otherwise
+#    re-ignore every figure and measurement un-ignored here.
+results/*
+!results/*.csv
+!results/*.png
+!results/a100-device.txt
+!results/a100-sweep.log
+!results/a100-twopass.log
+!results/a100-pass2.log
+!results/a100-roofline.log
+!results/a100-dip-stages.log
+!results/a100-dip-overhead.log

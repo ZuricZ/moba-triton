@@ -1,0 +1,83 @@
+/home/moba-triton/references/MoBA/moba/moba_efficient.py:133: UserWarning: index_reduce() is in beta and the API may change at any time. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/cuda/Indexing.cu:1478.)
+  max_lse_1d = max_lse_1d.index_reduce(
+
+NVIDIA A100-PCIE-40GB -- measured ceilings, not datasheet
+  HBM bandwidth     1239.3 GiB/s
+  bf16 peak         204.29 TFLOP/s (4096^3 GEMM)
+  ridge point        153.5 FLOP/byte  <- below this, memory bound however good the kernel
+
+Forward, block_size=128 top_k=8, B=1 H=4 D=64
+  backend            S       ms  GB moved  FLOP/byte  TFLOP/s     roof  of roof  bound
+  ----------------------------------------------------------------------------------------
+  fa2_minimal     2048    0.067     0.004      512.0 ~  32.26   204.29     16%  compute
+  flash_moba      2048    0.505     0.011      186.2 ~   4.25   204.29      2%  compute
+  moonshot_efficient   2048    1.738     0.011      186.2 ~   1.24   204.29      1%  compute
+  moonshot_naive   2048    1.988     0.254        7.9 ~   1.08    10.48     10%  memory
+  naive_torch     2048    0.966     0.254        7.9 ~   2.22    10.48     21%  memory
+  ours            2048    0.203     0.026       75.8    10.59   100.88     10%  memory
+  sdpa_dense      2048    0.044     0.004      512.0 ~  48.77   204.29     24%  compute
+  fa2_minimal     4096    0.156     0.008     1024.0 ~  55.19   204.29     27%  compute
+  flash_moba      4096    0.640     0.021      186.2 ~   6.71   204.29      3%  compute
+  moonshot_efficient   4096    1.844     0.021      186.2 ~   2.33   204.29      1%  compute
+  moonshot_naive   4096    5.863     1.008        7.9 ~   1.47    10.56     14%  memory
+  naive_torch     4096    2.591     1.008        7.9 ~   3.32    10.56     31%  memory
+  ours            4096    0.251     0.053       75.8    17.12   100.88     17%  memory
+  sdpa_dense      4096    0.144     0.008     1024.0 ~  59.49   204.29     29%  compute
+  fa2_minimal     8192    0.454     0.016     2048.0 ~  75.74   204.29     37%  compute
+  flash_moba      8192    1.075     0.043      186.2 ~   7.99   204.29      4%  compute
+  moonshot_efficient   8192    2.436     0.043      186.2 ~   3.53   204.29      2%  compute
+  moonshot_naive   8192   19.369     4.016        8.0 ~   1.77    10.60     17%  memory
+  naive_torch     8192    9.427     4.016        8.0 ~   3.64    10.60     34%  memory
+  ours            8192    0.403     0.106       75.8    21.29   100.88     21%  memory
+  sdpa_dense      8192    0.350     0.016     2048.0 ~  98.11   204.29     48%  compute
+  ~ = traffic model is a lower bound; see the module docstring.
+
+Where the bytes go at S=8192
+
+  fa2_minimal  (16.0 MiB, ignores K/V re-reads across query tiles)
+    Q                             4.0 MiB   25% ##########
+    K                             4.0 MiB   25% ##########
+    V                             4.0 MiB   25% ##########
+    O                             4.0 MiB   25% ##########
+
+  flash_moba  (44.0 MiB, internal buffers not modelled; a floor)
+    Q (gathered, x top_k)        32.0 MiB   73% #############################
+    K                             4.0 MiB    9% ####
+    V                             4.0 MiB    9% ####
+    O                             4.0 MiB    9% ####
+
+  moonshot_efficient  (44.0 MiB, internal buffers not modelled; a floor)
+    Q (gathered, x top_k)        32.0 MiB   73% #############################
+    K                             4.0 MiB    9% ####
+    V                             4.0 MiB    9% ####
+    O                             4.0 MiB    9% ####
+
+  moonshot_naive  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  naive_torch  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  ours  (108.1 MiB)
+    partials write               32.0 MiB   30% ############
+    partials read                32.0 MiB   30% ############
+    Q (gathered, x top_k)        32.0 MiB   30% ############
+    K                             4.0 MiB    4% #
+    V                             4.0 MiB    4% #
+    O                             4.0 MiB    4% #
+
+  sdpa_dense  (16.0 MiB, ignores K/V re-reads across query tiles)
+    Q                             4.0 MiB   25% ##########
+    K                             4.0 MiB   25% ##########
+    V                             4.0 MiB   25% ##########
+    O                             4.0 MiB   25% ##########
+
+wrote results/roofline.png

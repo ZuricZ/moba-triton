@@ -1,0 +1,33 @@
+block_size=128 top_k=8 [1, S, 4, 64] bf16
+priming (autotune, JIT, allocator) at the largest shape...
+
+ascending -- S rises with sweep position
+      S  blocks       nnz  maxcol    route      fwd    delta      bwd      sum   ns/nnz
+---------------------------------------------------------------------------------------
+   1024       8     18432    1024    0.079    0.057    0.009    0.083    0.228      4.5
+   2048      16     51200    1709    0.119    0.093    0.009    0.134    0.355      2.6
+   4096      32    116736    2357    0.121    0.134    0.011    0.229    0.496      2.0
+   8192      64    247808    3073    0.187    0.184    0.015    0.391    0.778      1.6
+  16384     128    509952    3927    0.360    0.267    0.025    0.643    1.295      1.3
+
+descending -- S falls as sweep position rises
+      S  blocks       nnz  maxcol    route      fwd    delta      bwd      sum   ns/nnz
+---------------------------------------------------------------------------------------
+   1024       8     18432    1024    0.079    0.057    0.009    0.082    0.227      4.4
+   2048      16     51200    1709    0.119    0.093    0.009    0.134    0.355      2.6
+   4096      32    116736    2357    0.120    0.134    0.011    0.229    0.495      2.0
+   8192      64    247808    3073    0.217    0.184    0.015    0.391    0.808      1.6
+  16384     128    509952    3927    0.361    0.267    0.024    0.644    1.296      1.3
+
+bwd, both orders, to separate S from position:
+        S        up      down   spread
+     1024     0.083     0.082    1.3%
+     2048     0.134     0.134    0.4%
+     4096     0.229     0.229    0.0%
+     8192     0.391     0.391    0.0%
+    16384     0.643     0.644    0.2%
+  A dip present in both orders follows S and is real. A dip that
+  flips to the other end is an artefact of sweep position.
+
+bwd config(s) chosen: GROUP: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None
+one entry means one config served every shape, as the key predicts
