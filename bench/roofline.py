@@ -34,6 +34,7 @@ collecting.
 """
 
 import argparse
+import dataclasses
 import time
 from dataclasses import dataclass, field
 
@@ -67,6 +68,54 @@ FP32 = 4
 # same wrong factor.
 BANDWIDTH_ELEMS = 1 << 26           # 64 Mi bf16 = 128 MiB per buffer
 MATMUL_N = 4096
+
+# Datasheet figures, by architecture. These are the *audit*, never the roof:
+# a measured GEMM at 60-70% of spec is ordinary, and a measurement outside that
+# band means the harness is wrong rather than the card being unusual. Drawing
+# the roof here instead would fold a 35% gap nobody can close into every
+# implementation's score.
+#
+# Dense rates, not the "with sparsity" headline: NVIDIA quotes A100 bf16 as
+# "312 TFLOPS | 624 TFLOPS*" where the asterisk is 2:4 structured sparsity,
+# which nothing here uses. Bandwidth is the 40 GB PCIe part's 1555 GB/s.
+#
+# Only architectures whose datasheet has actually been read appear. A missing
+# entry prints no audit rather than a guessed one.
+SPEC = {
+    "sm_80": {"tflops_bf16": 312.0, "bandwidth_gbs": 1555.0},
+}
+
+# The same figures reachable by device name, for `--from-log`: a log replotted
+# on another machine must take its datasheet from the card that produced it,
+# not from whatever is plugged into the machine doing the drawing.
+SPEC_BY_NAME = {
+    "A100": SPEC["sm_80"],
+}
+
+
+def device_spec(device=None, name: str | None = None) -> dict:
+    """Returns datasheet figures for a card, or an empty dict.
+
+    Args:
+        device: Passed to `torch.cuda.get_device_capability`, when no `name`
+            is given.
+        name: A device name, as `--from-log` recovers from a stored run. Takes
+            precedence, because the log's card is the one the numbers describe.
+
+    Returns:
+        A dict with "tflops_bf16" and "bandwidth_gbs", or {} when that
+        architecture's datasheet is not recorded. Missing beats guessed: an
+        absent entry prints no audit rather than a wrong one.
+    """
+    if name:
+        for key, spec in SPEC_BY_NAME.items():
+            if key in name:
+                return spec
+        return {}
+    if not torch.cuda.is_available():
+        return {}
+    major, minor = torch.cuda.get_device_capability(device)
+    return SPEC.get(f"sm_{major}{minor}", {})
 
 
 # ---------------------------------------------------------------------------
@@ -115,10 +164,52 @@ def measure_peak_tflops(dtype: torch.dtype = torch.bfloat16) -> float:
 
 @dataclass(frozen=True)
 class Ceilings:
-    """This card's measured limits."""
+    """This card's limits: what it is rated for, and what it actually reaches.
+
+    THREE COMPUTE CEILINGS, NOT ONE, because "% of roof" is only useful when
+    every gap inside it is one somebody could close. Stacked:
+
+        spec_flops        what the silicon is rated for. Nobody reaches it.
+        peak_flops        what a 4096^3 GEMM reaches -- the best any code does.
+        attainable_flops  what this tile shape plus an online softmax reaches.
+
+    On the A100 those are 312, 204 and 164 TFLOP/s, and the two gaps have
+    different owners. 312 -> 204 is silicon against best-possible code: memory
+    latency, scheduling, clocks -- nobody's fault and nobody's to fix. 204 ->
+    164 is a GEMM against attention: the softmax runs on CUDA cores while the
+    matmuls own the tensor cores, so it is the algorithm's price rather than
+    this implementation's.
+
+    Only the third is the roof a kernel is measured against, because only the
+    distance below *it* is headroom anyone can chase. Drawn against 312, a 35%
+    gap nobody can close is folded into our number, and the reading barely
+    moves whether we optimise well or not at all.
+
+    The other two still earn their place on the plot: they say *why* the roof
+    sits where it does, and `spec_flops` audits the measurement. A measured GEMM
+    at 65% of spec is ordinary; at 95% or 20% the harness is wrong, not the
+    card. The datasheet is the check, never the line.
+
+    Attributes:
+        bandwidth: Measured HBM bandwidth, bytes/s.
+        peak_flops: Measured large-GEMM throughput, FLOP/s.
+        attainable_flops: Measured throughput at this kernel's tile shape with
+            its softmax (`bench/tile_ceiling.py`). None until measured, in
+            which case `peak_flops` is the roof and the plot says so.
+        spec_bandwidth: Datasheet bandwidth, bytes/s, or None.
+        spec_flops: Datasheet compute, FLOP/s, or None.
+    """
 
     bandwidth: float                 # bytes/s
     peak_flops: float                # FLOP/s
+    attainable_flops: float | None = None
+    spec_bandwidth: float | None = None
+    spec_flops: float | None = None
+
+    @property
+    def roof_flops(self) -> float:
+        """The flat roof a kernel is actually measured against."""
+        return self.attainable_flops or self.peak_flops
 
     @property
     def ridge(self) -> float:
@@ -127,11 +218,11 @@ class Ceilings:
         Below it a kernel is memory bound however well it is written; above it
         no amount of extra bandwidth helps.
         """
-        return self.peak_flops / self.bandwidth
+        return self.roof_flops / self.bandwidth
 
     def roof(self, intensity: float) -> float:
         """Attainable FLOP/s at a given arithmetic intensity."""
-        return min(self.peak_flops, self.bandwidth * intensity)
+        return min(self.roof_flops, self.bandwidth * intensity)
 
 
 # ---------------------------------------------------------------------------
@@ -371,13 +462,37 @@ def measure(name: str, seq_len: int, cfg: MoBAConfig) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def print_ceilings(c: Ceilings) -> None:
-    props = torch.cuda.get_device_properties(0)
-    print(f"\n{props.name} -- measured ceilings, not datasheet")
-    print(f"  HBM bandwidth   {c.bandwidth / BYTES_PER_GIB:8.1f} GiB/s")
-    print(f"  bf16 peak       {c.peak_flops / 1e12:8.2f} TFLOP/s "
-          f"({MATMUL_N}^3 GEMM)")
-    print(f"  ridge point     {c.ridge:8.1f} FLOP/byte  "
+def print_ceilings(c: Ceilings, name: str = "") -> None:
+    """Prints the ceiling stack, each measured value audited against spec.
+
+    Args:
+        c: The ceilings.
+        name: The card these describe. Supplied by `--from-log`, which may be
+            replotting a run from a different machine entirely.
+    """
+    name = name or (torch.cuda.get_device_properties(0).name
+                    if torch.cuda.is_available() else "device")
+    print(f"\n{name} -- ceilings")
+
+    def audit(measured, spec):
+        """Renders a measured/spec ratio, or nothing when spec is unknown."""
+        return f"  ({measured / spec:.0%} of spec)" if spec else ""
+
+    print(f"  HBM bandwidth       {c.bandwidth / BYTES_PER_GIB:8.1f} GiB/s"
+          f"{audit(c.bandwidth, c.spec_bandwidth)}")
+    print(f"  bf16, {MATMUL_N}^3 GEMM  {c.peak_flops / 1e12:8.2f} TFLOP/s"
+          f"{audit(c.peak_flops, c.spec_flops)}")
+    if c.attainable_flops:
+        print(f"  bf16, our tile      {c.attainable_flops / 1e12:8.2f} TFLOP/s"
+              f"{audit(c.attainable_flops, c.spec_flops)}   <- the roof")
+        print(f"    tile shape and softmax cost "
+              f"{c.peak_flops / c.attainable_flops:.2f}x against a big GEMM")
+    else:
+        print("  bf16, our tile         not measured -- run "
+              "`python -m bench.tile_ceiling` and pass --attainable-tflops;")
+        print("                         the GEMM stands in, and overstates "
+              "the roof")
+    print(f"  ridge point         {c.ridge:8.1f} FLOP/byte  "
           f"<- below this, memory bound however good the kernel")
 
 
@@ -434,6 +549,25 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
 
     lo, hi = 0.05, max(4096.0, max(p.intensity for p in points) * 3)
     xs = [lo * (hi / lo) ** (i / 400) for i in range(401)]
+
+    # The ceilings a kernel is *not* measured against, drawn faintly above the
+    # roof. They are what makes the roof's position legible: without them a
+    # reader cannot tell whether 164 TFLOP/s is the card being slow or
+    # attention being expensive. Weight encodes authority -- dotted for a
+    # datasheet nobody reaches, dashed for a GEMM no attention kernel
+    # resembles, solid for the line that actually bounds this work.
+    for value, label, dashes in (
+        (c.spec_flops, "datasheet peak", (0, (1, 3))),
+        (c.peak_flops if c.attainable_flops else None,
+         f"{MATMUL_N}^3 GEMM", (0, (6, 3))),
+    ):
+        if not value:
+            continue
+        ax.axhline(value / 1e12, color=plots.INK_FAINT, linewidth=1.0,
+                   linestyle=dashes, zorder=2)
+        ax.text(lo * 1.3, value / 1e12 * 1.06, label, color=plots.INK_FAINT,
+                fontsize=8.5, va="bottom")
+
     ax.plot(xs, [c.roof(x) / 1e12 for x in xs], color=plots.INK,
             linewidth=1.6, zorder=3)
     ax.axvline(c.ridge, color=plots.INK_FAINT, linewidth=0.9,
@@ -458,7 +592,10 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlim(lo, hi)
-    ax.set_ylim(c.peak_flops / 1e12 * 1e-4, c.peak_flops / 1e12 * 2.2)
+    # Headroom above the *tallest* ceiling drawn, not the roof, or the
+    # datasheet line lands outside the axes.
+    top = max(c.roof_flops, c.peak_flops, c.spec_flops or 0.0)
+    ax.set_ylim(top / 1e12 * 1e-4, top / 1e12 * 2.2)
 
     # Region labels last, and both *under* the roof. The roof is a ceiling, so
     # the area above it is unattainable: a label printed up there names a
@@ -484,7 +621,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     # legend at the foot -- because the ridge is a vertical line through the
     # busiest part of the figure. Setting the text along it avoids competing
     # for horizontal space at all.
-    ax.text(c.ridge * 0.93, c.peak_flops / 1e12 * 0.045,
+    ax.text(c.ridge * 0.88, c.roof_flops / 1e12 * 0.30,
             f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT,
             fontsize=9, rotation=90, va="bottom", ha="center")
 
@@ -496,7 +633,9 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
         (f"S = {biggest}. " if min(p.seq_len for p in points) == biggest else
          f"Marker size is sequence length, {min(p.seq_len for p in points)} to "
          f"{biggest}; labels mark S={biggest}. ") +
-        "Higher is faster; the roof is what this card can do.",
+        "Higher is faster. The solid roof is what an attention kernel reaches "
+        "here.\nThe faint lines above are a big GEMM and the datasheet: "
+        "neither is reachable by this work.",
         "arithmetic intensity (FLOP per byte of compulsory HBM traffic)",
         "achieved throughput (TFLOP/s)")
     plots.legend(ax, loc="lower right", ncol=2)
@@ -508,11 +647,42 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _with_extra_ceilings(ceilings: Ceilings,
+                         attainable_tflops: float | None,
+                         device_name: str = "") -> Ceilings:
+    """Attaches the attainable roof and this card's datasheet figures.
+
+    Kept separate from measurement so that `--from-log` gets the same treatment
+    as a live run: the datasheet is a constant and the attainable roof is an
+    argument, so neither needs a GPU.
+
+    Args:
+        ceilings: The measured bandwidth and GEMM figures.
+        attainable_tflops: `bench/tile_ceiling.py`'s dots+softmax result, or
+            None to leave the GEMM standing in as the roof.
+
+    Returns:
+        A new `Ceilings` carrying whatever is known.
+    """
+    spec = device_spec(name=device_name)
+    return dataclasses.replace(
+        ceilings,
+        attainable_flops=(attainable_tflops * 1e12 if attainable_tflops
+                          else None),
+        spec_flops=spec.get("tflops_bf16", 0.0) * 1e12 or None,
+        spec_bandwidth=spec.get("bandwidth_gbs", 0.0) * 1e9 or None,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seq-lens", default="2048,4096,8192",
                         help="comma separated")
     parser.add_argument("--out", default="results/roofline.png")
+    parser.add_argument("--attainable-tflops", type=float, default=None,
+                        help="the roof, from `python -m bench.tile_ceiling` "
+                             "(its dots+softmax figure). Without it the GEMM "
+                             "stands in and overstates the ceiling.")
     parser.add_argument("--from-log", default=None,
                         help="redraw a finished run's log instead of "
                              "measuring; needs no GPU")
@@ -520,8 +690,10 @@ def main() -> None:
     seq_lens = [int(x) for x in args.seq_lens.split(",")]
 
     if args.from_log:
-        points, ceilings = parse_log(args.from_log)
-        print_ceilings(ceilings)
+        points, ceilings, device_name = parse_log(args.from_log)
+        ceilings = _with_extra_ceilings(ceilings, args.attainable_tflops,
+                                        device_name)
+        print_ceilings(ceilings, device_name)
         print_table(points, ceilings)
         print()
         print(f"wrote {plot(points, ceilings, args.out)}")
@@ -530,7 +702,9 @@ def main() -> None:
     if lock_clocks():
         print("clocks locked to max")
     try:
-        ceilings = Ceilings(measure_peak_bandwidth(), measure_peak_tflops())
+        ceilings = _with_extra_ceilings(
+            Ceilings(measure_peak_bandwidth(), measure_peak_tflops()),
+            args.attainable_tflops)
         print_ceilings(ceilings)
 
         names = [b.name for b in all_backends() if b.name in MODELS]
@@ -594,12 +768,18 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
             figure drawn against a roof that was silently defaulted.
     """
     bandwidth = peak = None
+    device_name = ""
     points: list[Point] = []
 
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             fields = line.split()
-            if "HBM bandwidth" in line:
+            if " -- ceilings" in line or " -- measured ceilings" in line:
+                # The card that produced the log, so its datasheet and its name
+                # travel with the numbers instead of being taken from whatever
+                # machine is drawing.
+                device_name = line.split(" -- ")[0].strip()
+            elif "HBM bandwidth" in line:
                 bandwidth = float(fields[2]) * BYTES_PER_GIB
             elif "bf16 peak" in line:
                 peak = float(fields[2]) * 1e12
@@ -620,7 +800,7 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
     if bandwidth is None or peak is None:
         raise ValueError(f"{path} has no ceiling lines; refusing to draw a "
                          "roofline against an assumed roof")
-    return points, Ceilings(bandwidth, peak)
+    return points, Ceilings(bandwidth, peak), device_name
 
 
 if __name__ == "__main__":
