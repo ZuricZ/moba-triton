@@ -176,15 +176,33 @@ def flash_attn_generation() -> tuple[int, str]:
     except Exception as exc:                    # noqa: BLE001 - never raises
         return 0, f"flash-attn not importable ({type(exc).__name__}: {exc})"
 
-    try:
-        params = inspect.signature(_flash_attn_varlen_forward).parameters
-    except (TypeError, ValueError) as exc:
-        return 0, f"flash-attn signature unreadable ({exc})"
+    version = getattr(__import__("flash_attn"), "__version__", "unknown")
 
-    version = getattr(
-        __import__("flash_attn"), "__version__", "unknown")
+    try:
+        params = set(inspect.signature(_flash_attn_varlen_forward).parameters)
+    except (TypeError, ValueError):
+        params = set()
+
     if "window_size" in params:
         return 26, f"flash-attn {version} has the 2.6.x signature"
     if "window_size_left" in params:
         return 27, f"flash-attn {version} has the >= 2.7 signature"
-    return 0, f"flash-attn {version} has an unrecognised signature"
+
+    # The signature is not always visible. From 2.7 flash-attn registers this
+    # function as a torch.library custom op, and the resulting `CustomOpDef`
+    # reports `(*args, **kwargs)` -- the real parameter names are behind the
+    # wrapper. So the probe cannot see what it was built to see in exactly the
+    # versions it most needs to identify, and falls back to the version string.
+    #
+    # Signature first and version second, rather than the other way round,
+    # because the signature is the thing that actually breaks and survives a
+    # fork renumbering itself. The fallback only runs when the signature is
+    # opaque, and says so.
+    major_minor = version.split(".")[:2]
+    try:
+        numeric = tuple(int(part) for part in major_minor)
+    except ValueError:
+        return 0, f"flash-attn {version}: signature hidden and version "                  f"unparseable"
+    if numeric < (2, 7):
+        return 26, f"flash-attn {version} (by version; signature is wrapped)"
+    return 27, f"flash-attn {version} (by version; signature is wrapped)"
