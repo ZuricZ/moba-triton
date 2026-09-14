@@ -99,16 +99,29 @@ DEFAULT = {"GROUP": 64, "num_warps": 4, "num_stages": 3}
 # Sparse by design: only shapes actually measured appear. Everything else takes
 # DEFAULT and says so under `--check`.
 TUNED: dict[tuple, dict] = {
-    # sm_80, backward, block_size 128, key_tile 64, D 64, top_k 8, H 4/4.
-    # Confirmed on the A100 by `bench/_small_s_dip.py`, which printed the
-    # autotuner's choice at every bracket in that sweep and found one winner
-    # across all of them: "GROUP: 64, num_warps: 4, num_stages: 2".
+    # sm_80, block_size 128, D 64, top_k 8, H 4/4.
+    # Measured by bench/tune_table.py on an A100-PCIE-40GB. GROUP=64 wins at
+    # every bracket from 1024 to 65536 -- a 64x span over which the card goes
+    # from barely occupied to saturated -- so on this shape the axis
+    # triton.autotune could not see turns out not to move the answer. That is
+    # a result rather than a reason to drop the axis: it was not knowable
+    # without keying on it, and it need not hold at another block_size.
     ("sm_80", "bwd", 128, 64, 64, 8, 4, 4, 1024):
         {"GROUP": 64, "num_warps": 4, "num_stages": 2},
     ("sm_80", "bwd", 128, 64, 64, 8, 4, 4, 4096):
         {"GROUP": 64, "num_warps": 4, "num_stages": 2},
     ("sm_80", "bwd", 128, 64, 64, 8, 4, 4, 16384):
         {"GROUP": 64, "num_warps": 4, "num_stages": 2},
+    ("sm_80", "bwd", 128, 64, 64, 8, 4, 4, 65536):
+        {"GROUP": 64, "num_warps": 4, "num_stages": 2},
+    ("sm_80", "fwd", 128, 0, 64, 8, 4, 4, 1024):
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
+    ("sm_80", "fwd", 128, 0, 64, 8, 4, 4, 4096):
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
+    ("sm_80", "fwd", 128, 0, 64, 8, 4, 4, 16384):
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
+    ("sm_80", "fwd", 128, 0, 64, 8, 4, 4, 65536):
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
 
     # sm_86, block_size 128, D 64, top_k 8, H 4/4.
     # Measured by bench/tune_table.py on an RTX 3050 Ti Laptop GPU.
