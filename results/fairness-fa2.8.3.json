@@ -1,0 +1,128 @@
+{
+  "correctness": {
+    "1024": {
+      "flash_moba": {
+        "error": 0.0019075434258643616,
+        "reason": ""
+      },
+      "moonshot_efficient": {
+        "error": null,
+        "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+      },
+      "ours": {
+        "error": 0.003736715113863032,
+        "reason": ""
+      },
+      "triton_moba": {
+        "error": 0.0019075434258643616,
+        "reason": ""
+      }
+    },
+    "4096": {
+      "flash_moba": {
+        "error": 0.04781969477621357,
+        "reason": ""
+      },
+      "moonshot_efficient": {
+        "error": null,
+        "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+      },
+      "ours": {
+        "error": 0.04781969477621357,
+        "reason": ""
+      },
+      "triton_moba": {
+        "error": 0.04021763801574707,
+        "reason": ""
+      }
+    }
+  },
+  "device": "NVIDIA A100-PCIE-40GB",
+  "flash_attn": "2.8.3",
+  "shapes": {
+    "B1 S16384 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 18.06540870666504,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": null,
+          "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+        },
+        "ours": {
+          "ms": 6.294528007507324,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": 34.28147315979004,
+          "reason": ""
+        }
+      },
+      "label": "long, wide"
+    },
+    "B1 S8192 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 8.145919799804688,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": null,
+          "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+        },
+        "ours": {
+          "ms": 3.042304039001465,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": 11.78931188583374,
+          "reason": ""
+        }
+      },
+      "label": "GPT-3 13B-ish"
+    },
+    "B1 S8192 H4 D64": {
+      "backends": {
+        "flash_moba": {
+          "ms": 1.0685440301895142,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": null,
+          "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+        },
+        "ours": {
+          "ms": 0.3993600010871887,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": 2.5579519271850586,
+          "reason": ""
+        }
+      },
+      "label": "sweep shape"
+    },
+    "B4 S8192 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 29.901824951171875,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": null,
+          "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
+        },
+        "ours": {
+          "ms": 11.279359817504883,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": 56.84940719604492,
+          "reason": ""
+        }
+      },
+      "label": "same, batch 4"
+    }
+  }
+}

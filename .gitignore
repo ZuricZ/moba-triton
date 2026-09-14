@@ -75,6 +75,7 @@ REMOTE.md
 #    re-ignore every figure and measurement un-ignored here.
 results/*
 !results/*.csv
+!results/*.json
 !results/*.png
 !results/a100-device.txt
 !results/a100-sweep.log

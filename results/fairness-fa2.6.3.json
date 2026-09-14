@@ -1,0 +1,128 @@
+{
+  "correctness": {
+    "1024": {
+      "flash_moba": {
+        "error": 0.0019075434258643616,
+        "reason": ""
+      },
+      "moonshot_efficient": {
+        "error": 0.0019075434258643616,
+        "reason": ""
+      },
+      "ours": {
+        "error": 0.003736715113863032,
+        "reason": ""
+      },
+      "triton_moba": {
+        "error": null,
+        "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+      }
+    },
+    "4096": {
+      "flash_moba": {
+        "error": 0.04781969477621357,
+        "reason": ""
+      },
+      "moonshot_efficient": {
+        "error": 0.04781969477621357,
+        "reason": ""
+      },
+      "ours": {
+        "error": 0.04781969477621357,
+        "reason": ""
+      },
+      "triton_moba": {
+        "error": null,
+        "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+      }
+    }
+  },
+  "device": "NVIDIA A100-PCIE-40GB",
+  "flash_attn": "2.6.3",
+  "shapes": {
+    "B1 S16384 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 18.153472900390625,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": 45.00531196594238,
+          "reason": ""
+        },
+        "ours": {
+          "ms": 6.235135793685913,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": null,
+          "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+        }
+      },
+      "label": "long, wide"
+    },
+    "B1 S8192 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 8.149503707885742,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": 14.590464115142822,
+          "reason": ""
+        },
+        "ours": {
+          "ms": 3.0156800746917725,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": null,
+          "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+        }
+      },
+      "label": "GPT-3 13B-ish"
+    },
+    "B1 S8192 H4 D64": {
+      "backends": {
+        "flash_moba": {
+          "ms": 1.0690560340881348,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": 2.5451520681381226,
+          "reason": ""
+        },
+        "ours": {
+          "ms": 0.3983359932899475,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": null,
+          "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+        }
+      },
+      "label": "sweep shape"
+    },
+    "B4 S8192 H32 D128": {
+      "backends": {
+        "flash_moba": {
+          "ms": 29.920255661010742,
+          "reason": ""
+        },
+        "moonshot_efficient": {
+          "ms": 140.7508544921875,
+          "reason": ""
+        },
+        "ours": {
+          "ms": 11.185664176940918,
+          "reason": ""
+        },
+        "triton_moba": {
+          "ms": null,
+          "reason": "needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has the 2.6.x signature"
+        }
+      },
+      "label": "same, batch 4"
+    }
+  }
+}
