@@ -16,6 +16,7 @@ import triton
 
 from moba.config import MoBAConfig
 from moba.device import TENSOR_CORE_TILE, WARP_SIZE, shared_memory_budget
+from moba.kernels import tuned_configs
 
 
 # log2(e). The softmax runs in base 2 because the SFU has a native 2^x
@@ -290,3 +291,146 @@ def choose_combine_tile(head_dim: int, block_m: int | None = None) -> tuple[int,
     warps = (block_m * head_dim + per_thread - 1) // per_thread
     return block_m, max(MIN_COMBINE_WARPS, min(MAX_COMBINE_WARPS, warps))
 
+
+
+# ---------------------------------------------------------------------------
+# Launch policy: table by default, autotuner on request
+# ---------------------------------------------------------------------------
+
+
+def clamp_group_to_shared_memory(group, block_size, head_dim, itemsize,
+                                 device=None) -> int:
+    """Halves `group` until the shared-memory estimate admits it.
+
+    A tuned table entry is measured on one card and read on whatever card is
+    present. Architectures differ in shared memory per block -- 99 KiB on the
+    sm_86 laptop against 164 KiB on the A100 -- so an entry that fits where it
+    was measured can be too large where it is used. Clamping keeps that a
+    slowdown rather than a launch failure.
+
+    Halving rather than stepping by `TENSOR_CORE_TILE` because `GROUP` feeds
+    `tl.arange(0, GROUP)`, which requires a power of two.
+
+    Args:
+        group: The chunk height the table proposed.
+        block_size: MoBA block size.
+        head_dim: Head dimension.
+        itemsize: Bytes per element of the input dtype.
+        device: CUDA device, for the shared-memory budget.
+
+    Returns:
+        The largest power of two at or below `group` that the estimate admits,
+        never below `TENSOR_CORE_TILE`. The estimate is a lower bound, so the
+        compiler may still refuse -- and that remains its call.
+    """
+    budget = shared_memory_budget(device)
+    while group > TENSOR_CORE_TILE:
+        if estimate_shared_memory(block_size, group, head_dim,
+                                  itemsize) <= budget:
+            return group
+        group //= 2
+    return TENSOR_CORE_TILE
+
+
+def launch_policy(pass_name: str, autotuner, key_tile: int = 0):
+    """Returns the decorator that decides a kernel's launch configuration.
+
+    Two policies, chosen at import time by `MOBA_AUTOTUNE`:
+
+    * **Default -- `triton.heuristics` reading the baked table.** No
+      benchmarking, ever. The heuristic runs per launch and costs a cached dict
+      lookup on a tuple of ints.
+    * **`MOBA_AUTOTUNE=1` -- the autotuner.** How the table is produced and how
+      a new card is measured. Never the default, because tuning on the first
+      launch at a new shape puts a benchmark on whatever request arrives first.
+
+    Keeping both behind one call means the kernels declare *that* they have a
+    launch policy without either restating it. The autotuner is passed in
+    already constructed, because its configs and key are specific to the kernel
+    and belong beside it.
+
+    Args:
+        pass_name: "fwd" or "bwd", the table's pass key.
+        autotuner: A configured `triton.autotune(...)` decorator, used only
+            when tuning is requested.
+        key_tile: The backward's `KEY_TILE`; 0 for the forward, which has no
+            such axis.
+
+    Returns:
+        A decorator to apply to the `@triton.jit` kernel.
+    """
+    if tuned_configs.autotune_requested():
+        return autotuner
+
+    return triton.heuristics({
+        "GROUP": lambda args: resolve_launch_config(
+            pass_name, args, key_tile)["GROUP"],
+        "num_warps": lambda args: resolve_launch_config(
+            pass_name, args, key_tile)["num_warps"],
+        "num_stages": lambda args: resolve_launch_config(
+            pass_name, args, key_tile)["num_stages"],
+    })
+
+
+def resolve_launch_config(pass_name: str, args: dict,
+                          key_tile: int = 0) -> dict:
+    """Returns the clamped table entry for one launch.
+
+    Module-level rather than a closure inside `launch_policy` so that tests can
+    ask what the table policy would choose without launching anything, and so
+    there is exactly one place that turns kernel arguments into a config.
+
+    Args:
+        pass_name: "fwd" or "bwd".
+        args: The kernel's arguments, as `triton.heuristics` supplies them.
+        key_tile: The backward's `KEY_TILE`; 0 for the forward.
+
+    Returns:
+        A dict of GROUP, num_warps and num_stages, with GROUP already reduced
+        to what this card's shared memory admits.
+    """
+    chosen = tuned_configs.lookup(
+        pass_name,
+        block_size=args["BLOCK_SIZE"],
+        head_dim=args["D"],
+        top_k=args["K_SLOTS"],
+        h_q=args["H_Q"],
+        h_kv=args["H_KV"],
+        seq_len=args["S"],
+        key_tile=key_tile,
+    )
+    chosen["GROUP"] = clamp_group_to_shared_memory(
+        chosen["GROUP"], args["BLOCK_SIZE"], args["D"],
+        # The kernel does not carry its own itemsize, and every dtype it
+        # accepts is 2 bytes (`device.supports_dtype`). Stating it rather than
+        # plumbing an argument that can only hold one value.
+        itemsize=2,
+    )
+    return chosen
+
+
+def group_in_force(kernel, pass_name: str, args: dict,
+                   key_tile: int = 0) -> int:
+    """Returns the chunk height the *current* policy chose, whichever it is.
+
+    Exists so a test can assert a property of the height that ran without
+    knowing which policy picked it. The selection policy has now changed three
+    times -- hand-rolled search, then `triton.autotune`, then this table -- and
+    each change broke tests that asserted a policy-independent property through
+    a policy-specific attribute. `best_config` is an autotuner field and is
+    simply absent under `triton.heuristics`.
+
+    Args:
+        kernel: The decorated Triton kernel, already launched at least once if
+            the autotuner is in force.
+        pass_name: "fwd" or "bwd".
+        args: The kernel arguments for the launch in question.
+        key_tile: The backward's `KEY_TILE`; 0 for the forward.
+
+    Returns:
+        The `GROUP` that ran.
+    """
+    best = getattr(kernel, "best_config", None)
+    if best is not None:
+        return best.kwargs["GROUP"]
+    return resolve_launch_config(pass_name, args, key_tile)["GROUP"]

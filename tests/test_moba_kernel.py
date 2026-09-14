@@ -25,6 +25,7 @@ from triton.runtime.errors import OutOfResources
 from moba.kernels import moba_fwd
 from moba.kernels.moba_fwd import (
     AUTOTUNE_GROUPS,
+    AUTOTUNE_WARPS,
     _prune_by_shared_memory,
     moba_fwd_kernel,
     moba_combine_kernel,
@@ -33,7 +34,11 @@ from moba.kernels.moba_fwd import (
     empty_partials,
     moba_forward,
 )
-from moba.kernels.tuning import choose_combine_tile, group_candidates
+from moba.kernels.tuning import (
+    choose_combine_tile,
+    group_candidates,
+    group_in_force,
+)
 from moba.naive import moba_selection
 from tolerance import (
     assert_selection_matches,
@@ -345,7 +350,15 @@ def test_the_chunk_height_that_ran_fits_shared_memory(device, gate, head_dim):
     budget = shared_memory_budget(q.device)
 
     attend_partials(q, k, v, cfg, index)
-    used = moba_fwd_kernel.best_config.kwargs["GROUP"]
+    # Asked of the launch policy rather than of the autotuner. `best_config` is
+    # an autotuner field and does not exist under the table policy, which is
+    # how this test broke on the third change of selection policy despite its
+    # docstring claiming independence from any of them.
+    used = group_in_force(
+        moba_fwd_kernel, "fwd",
+        {"BLOCK_SIZE": cfg.block_size, "D": head_dim, "K_SLOTS": cfg.top_k,
+         "H_Q": 1, "H_KV": 1, "S": q.shape[1]},
+    )
 
     kernel = _compile_attn(q, k, v, cfg, index, used)
     assert kernel.metadata.shared <= budget, (
@@ -368,9 +381,14 @@ def test_the_pruner_never_returns_an_empty_config_list(device, gate, head_dim):
     """
     block_size, top_k = gate
     cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    # Built from the module constants rather than read off the kernel: the
+    # kernel only carries a `configs` list while the autotuner is in force, and
+    # the pruner's contract is the same either way. It still runs for real
+    # under MOBA_AUTOTUNE=1, which is how the table is regenerated.
+    configs = [triton.Config({"GROUP": group}, num_warps=warps)
+               for group in AUTOTUNE_GROUPS for warps in AUTOTUNE_WARPS]
     kept = _prune_by_shared_memory(
-        list(moba_fwd_kernel.configs), {},
-        BLOCK_SIZE=cfg.block_size, D=head_dim,
+        configs, {}, BLOCK_SIZE=cfg.block_size, D=head_dim,
     )
     assert kept, "pruner returned nothing; Triton would raise AutotunerError"
     assert all(c.kwargs["GROUP"] in AUTOTUNE_GROUPS for c in kept)

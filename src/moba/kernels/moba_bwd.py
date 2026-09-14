@@ -50,6 +50,7 @@ from moba.kernels.tuning import (
     LOG2_E,
     choose_combine_tile,
     estimate_shared_memory,
+    launch_policy,
 )
 
 # Queries per program for the preprocess and dQ-reduce passes. Both are pure
@@ -194,7 +195,11 @@ def _bwd_prune_by_shared_memory(configs, named_args, **kwargs):
     return [c for c in kept if c.kwargs["GROUP"] in heights]
 
 
-@triton.autotune(
+# Table by default, autotuner on MOBA_AUTOTUNE=1; see `moba_fwd` and
+# `moba/kernels/tuned_configs.py`. `key_tile` is passed because the backward
+# has an axis the forward does not, and two kernels keyed the same way would
+# share one entry.
+@launch_policy("bwd", triton.autotune(
     configs=[triton.Config({"GROUP": group}, num_warps=warps,
                            num_stages=BWD_STAGES)
              for group in BWD_AUTOTUNE_GROUPS
@@ -206,7 +211,7 @@ def _bwd_prune_by_shared_memory(configs, named_args, **kwargs):
     prune_configs_by={"early_config_prune": _bwd_prune_by_shared_memory},
     do_bench=_best_of_three,
     cache_results=os.environ.get("MOBA_TUNE_CACHE", "0") == "1",
-)
+), key_tile=BWD_KEY_TILE)
 @triton.jit
 def moba_bwd_kernel(
     Q, K, V, DO, Lse, Delta,

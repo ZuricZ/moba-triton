@@ -50,7 +50,7 @@ from moba.kernels.tuning import (
     LOG2_E,
     choose_combine_tile,
     estimate_shared_memory,
-    group_candidates,
+    launch_policy,
 )
 from moba.varlen import validate_cu_seqlens
 
@@ -159,7 +159,13 @@ def _best_of_three(fn, quantiles=None, **kwargs):
     return min(runs, key=lambda r: r[0])
 
 
-@triton.autotune(
+# Table by default, autotuner on MOBA_AUTOTUNE=1. The autotuner below is still
+# the thing that decides these numbers -- it just does so in
+# `bench/tune_table.py` on a machine someone is watching, rather than on the
+# first launch of whatever shape a caller happens to bring. See
+# `moba/kernels/tuned_configs.py` for why a serving path must never tune, and
+# why pruning the autotuner to a single config would not have achieved it.
+@launch_policy("fwd", triton.autotune(
     configs=[triton.Config({"GROUP": group}, num_warps=warps)
              for group in AUTOTUNE_GROUPS for warps in AUTOTUNE_WARPS],
     # Every constexpr that changes the *shape of the work* is here. The
@@ -219,7 +225,7 @@ def _best_of_three(fn, quantiles=None, **kwargs):
     # ~/.triton/cache or setting TRITON_CACHE_DIR.
     cache_results=os.environ.get("MOBA_TUNE_CACHE", "0") == "1",
     do_bench=_best_of_three,
-)
+))
 @triton.jit
 def moba_fwd_kernel(
     Q, K, V, RowIdx, HeadIdx, SlotIdx, ColOffsets, ColNnz, Order, CuSeqlens,

@@ -11,6 +11,12 @@ import math
 import pytest
 import torch
 
+from bench.block_sweep import (
+    budget_panel,
+    fixed_top_k_panel,
+    partials_mb,
+    running_output_mb,
+)
 from bench.report import to_csv, to_markdown
 from bench.suite import (
     BenchRow,
@@ -167,3 +173,74 @@ def test_csv_roundtrip_preserves_every_field(tmp_path):
 
 def test_empty_report_does_not_crash():
     assert to_markdown([])
+
+
+# ---------------------------------------------------------------------------
+# Block-size sweep panels
+# ---------------------------------------------------------------------------
+
+
+def test_budget_panel_holds_attended_keys_constant():
+    """Every row attends top_k * block_size = 1024 keys, so only granularity
+    changes. That is what makes the panel a comparison rather than a sweep of
+    four unrelated workloads."""
+    assert budget_panel() == [(128, 8), (64, 16), (32, 32), (16, 64)]
+    assert all(bk * tk == 1024 for bk, tk in budget_panel())
+
+
+def test_budget_panel_rejects_an_indivisible_budget():
+    """A budget that does not divide the block would quietly change how many
+    keys each row attends, which is the one thing the panel holds fixed."""
+    with pytest.raises(ValueError):
+        budget_panel(budget=1000, block_sizes=(128,))
+
+
+def test_fixed_top_k_panel_keeps_top_k_and_varies_sparsity():
+    panel = fixed_top_k_panel()
+    assert panel == [(128, 8), (64, 8), (32, 8), (16, 8)]
+    cfgs = [MoBAConfig(block_size=bk, top_k=tk) for bk, tk in panel]
+    ratios = [sparsity_ratio(4096, cfg) for cfg in cfgs]
+    assert ratios == sorted(ratios, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Scratch memory, both designs
+# ---------------------------------------------------------------------------
+
+
+def test_partials_scale_linearly_with_top_k():
+    """Our scratch is one slot per (query, selected block), so doubling the
+    blocks a query selects doubles it exactly."""
+    shape = (1, 4, 8192, 64)
+    assert partials_mb(*shape, top_k=16) == pytest.approx(
+        2 * partials_mb(*shape, top_k=8))
+
+
+def test_running_output_takes_no_top_k_at_all():
+    """A query-group design keeps one output row per query however many blocks
+    it selects, which is the trade docs/traffic-derivation.md section 3 prices.
+
+    Asserted against the signature rather than by comparing two values. The
+    obvious version -- call it twice and check the results match -- passes
+    whatever the function does, because there is no `top_k` to vary between the
+    two calls. A test that cannot fail is worse than no test: this file's own
+    suite has shipped two of those.
+    """
+    import inspect
+
+    assert "top_k" not in inspect.signature(running_output_mb).parameters
+    with pytest.raises(TypeError):
+        running_output_mb(1, 4, 8192, 64, top_k=8)
+
+
+def test_our_scratch_dominates_at_flashmobas_published_shape():
+    """At their benchmark's longest row -- batch 2, 16 heads, 512K tokens,
+    head_dim 128 -- our design needs several times their scratch. This is the
+    reason their kernel is built the way it is, and it belongs in a test so it
+    cannot quietly stop being true."""
+    shape = (2, 16, 524288, 128)
+    ours = partials_mb(*shape, top_k=8)
+    theirs = running_output_mb(*shape)
+    assert ours > 4 * theirs
+    assert ours / 1024 == pytest.approx(33.0, abs=0.5)     # GiB
+    assert theirs / 1024 == pytest.approx(8.0, abs=0.5)    # GiB
