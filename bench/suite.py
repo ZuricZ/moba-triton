@@ -448,10 +448,27 @@ def run_suite(
     warm_up_device()
     rows: list[BenchRow] = []
 
+    total = len(shapes) * len(gates)
+    done = 0
+    started = time.time()
+
     for shape in shapes:
         batch, seq_len, heads, head_dim = shape
         for gate in gates:
             block_size, top_k = gate
+            # Progress, because a sweep that is merely slow and one that has
+            # hung look identical from outside. Every measurement here is
+            # preceded by `cool_down_device`, which spins until the card drops
+            # to its threshold -- so an idle GPU at high host CPU is the
+            # *expected* state between timings, not a symptom. A 48-cell sweep
+            # at ~40 s a cell runs for the better part of an hour, and a
+            # half-finished one was once killed for looking stuck.
+            done += 1
+            elapsed = time.time() - started
+            rate = elapsed / max(1, done - 1) if done > 1 else 0.0
+            eta = f", ~{rate * (total - done + 1) / 60:.0f} min left" if rate                 else ""
+            print(f"[{done}/{total}] S={seq_len} block={block_size} "
+                  f"top_k={top_k}{eta}", flush=True)
             cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=dtype)
             sparsity = sparsity_ratio(seq_len, cfg)
             ceiling = 1.0 / sparsity
