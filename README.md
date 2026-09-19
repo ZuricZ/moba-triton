@@ -51,15 +51,18 @@ Four things this table says:
   `top_k=8` selects all 8 blocks — so dense should win, and does.
 - **The win is in the attention kernel, not the gate.** Timing the pipelines'
   halves separately gives 1.9–2.1× on routing but **3.2–3.4× on attention**,
-  which is the stage where the two designs differ. FlashMoBA's query-major tile
-  discards 77% of its tensor-core work to masking at this configuration; a
-  KV-block-major program discards none.
+  which is the stage where the two designs differ. FlashMoBA also gathers per
+  KV block, but only within a 512–1024-query window, so at long context its
+  tiles are mostly padding, and its shared-memory footprint leaves one program
+  per A100 SM; ours gathers across the whole sequence
+  (`docs/traffic-derivation.md`).
 - **The dense baselines stop being possible.** `naive_torch` OOMs at S=32768
   trying to allocate 16 GiB, because attention memory is quadratic in S. Ours
   runs S=65536 in 2.7 ms.
-- **It is verified, not assumed.** All three MoBA implementations show
-  *identical* error against the PyTorch oracle (0.0478 at S=4096), and the gap
-  widens rather than closes at realistic shapes — 3.12× at `H=32, D=128,
+- **It is verified, not assumed.** Compared selection for selection, `ours`
+  reproduces the PyTorch oracle's (query, block) choices exactly at S=4096 and
+  8192; FlashMoBA selects the same count and differs on ~0.5% near-ties. The
+  gap widens rather than closes at realistic shapes — 3.12× at `H=32, D=128,
   batch 4`.
 
 Full A100 results, the fairness checks behind the FlashMoBA claim, and why
@@ -153,6 +156,11 @@ Measured, at `block_size=128, top_k=8`:
 
 It gets *worse* as context grows — precisely the direction MoBA is meant to
 scale in.
+
+That table describes a query-major kernel that masks, which is what
+FlashAttention's varlen path gives Triton-MoBA and MoonshotAI. FlashMoBA avoids
+it by gathering per block too, and pays a different price for doing so inside a
+bounded query window (`docs/traffic-derivation.md`).
 
 **So the kernel inverts the loop: a program owns one KV block and gathers
 exactly the queries that selected it.** Every key it loads is used by every

@@ -69,12 +69,19 @@ So the loop nest is, from outside in:
 
 | Level | Iterates over | What lives where |
 |---|---|---|
-| grid | (batch, head, **KV block column**) | — |
-| outer | logical query group for this column | query indices via binary search |
-| inner | FA-2 tiles within the group | K/V tile in shared memory, Q and accumulators in registers |
+| grid | (**query window** of `lg_block_m`, batch, head) | `dim3 grid(num_lg_m_block, b, h)`, `flash_fwd_launch_template.h:51-52` |
+| outer | every KV block column, in order | column's sorted query list, binary-searched for this window's queries (`index_gather_scatter.h:50-87`) |
+| inner | 64-row chunks of those gathered queries | K/V tile and gathered Q in shared memory; running max/sum in a shared-memory table indexed by query; running output in an fp32 HBM scratch, loaded and stored per chunk |
 
-**The KV block is the outer loop. The queries are the inner loop.** That is
-the inversion of the obvious order, and it is the whole idea.
+**Corrected 2026-09-15.** This table originally put the KV block column in the
+grid. It is not: one program owns a *window* of `lg_block_m` queries, and the
+KV-block-major loop with the gather runs *inside* that program. The data
+structure above is KV-block-major; the launch is not. The consequences of the
+window are in `docs/traffic-derivation.md` and `docs/a100-results.md`.
+
+**Within a program, the KV block is the outer loop and the gathered queries
+are the inner loop.** That is the inversion of the obvious order, and it is the
+whole idea. The window is what bounds it.
 
 ## 3. Why small blocks break the naive loop order
 
@@ -173,15 +180,21 @@ elif sparsity <= 0.9: lg_block_m = 768
 else:                 lg_block_m = 1024
 ```
 
-Counterintuitive until you see the loop order. `lg_block_m` is the **logical
-query group** attached to a column. Sparser configs mean fewer queries select
-any given block, so a small group leaves the loaded block underused. Enlarging
-the group raises the expected number of consumers per loaded block, restoring
-the arithmetic intensity that sparsity took away.
+Counterintuitive until you see the loop order. `lg_block_m` is the **query
+window one program owns** (section 2, corrected). Sparser configs mean fewer
+queries in a window select any given block, so a small window leaves the loaded
+block underused. Enlarging the window raises the expected number of consumers
+per loaded block, restoring some of the arithmetic intensity that sparsity took
+away. It cannot restore all of it: at S=65536 the policy returns 1024 (0.969
+sparsity, top row), and 1024 x 8 / 512 blocks is 16 queries per (window, block)
+pair, padded to a 64-row tile.
 
-The cost is capacity: a larger logical group needs more shared memory and more
-registers for its indices and accumulators. Which brings us to the constraint
-that concerns this machine directly.
+The cost is capacity, and it is paid at *compile* time. The shared-memory
+tables for the window's row indices and running max/sum are sized by
+`kMxLgBlockM = 1024` (`kernel_traits.h:110-111, 128-129`) whatever
+`decide_lg_block_m` returns at runtime, so a program needs 84 KiB at D=64 and
+100 KiB at D=128. An A100 SM has 164 KiB: one program fits, two do not. Which
+brings us to the constraint that concerns this machine directly.
 
 ### 4.3 They special-case sm_86 for shared memory
 
@@ -248,7 +261,14 @@ Phrased so each can become a requirement in the kernel spec.
 6. **Follow FSA's structure over FlashMoBA's.** Triton has no CUTLASS gather
    iterator; FSA proves the inversion works in Triton.
 
-## 7. Why we could not run it
+## 7. Why we could not run it (superseded)
+
+**Superseded 2026-09-05.** It was built with `FLASH_MOBA_CUDA_ARCHS=86` and
+launches at every sequence length from 1024 to 8192 on this card, because
+`decide_lg_block_m` chooses the window at runtime rather than compile time
+(`implementations/flash_moba.py` docstring). It has since been measured on an
+A100 (`docs/a100-results.md`). The paragraph below is kept as the prediction
+that turned out wrong.
 
 `csrc` builds via `setup.py`, whose `cuda_archs()` defaults to
 `"80;90;100;120"` (`setup.py:55`) — **sm_86 is absent**. Even with 86 added,
@@ -269,8 +289,10 @@ reports itself unavailable with that reason
 - **How does the backward pass handle the inverted loop order?**
   `flash_bwd_kernel.h` is the largest file at 893 lines and was not read; our
   project is forward-only for now (decision D3).
-- **What exactly is a "logical column"** (`lg_col_idx`)? It is clearly coarser
-  than a single KV block, but I did not pin down the mapping from
-  `moba_chunk_size` to logical column width.
+- ~~**What exactly is a "logical column"** (`lg_col_idx`)?~~ Answered
+  2026-09-15: it is one KV block of `n_lg_block_dim` keys, and
+  `n_lg_block_dim` is `moba_chunk_size` (`index_gather_scatter.h:52`,
+  `flash_moba_interface.py:714-731`), so 128 at the benchmark config. Not
+  coarser than a block.
 - **Triton-MoBA's gate semantics** remain unverified — its module needs
   flash-attn to import. See `docs/semantics-crosscheck.md`.

@@ -83,7 +83,6 @@ Applies to prose in conversation and to `docs/learning/*.md` alike.
 - GPU (measured, not assumed): NVIDIA GeForce RTX 3050 **Ti** Laptop, Ampere
   sm_86, 4095 MiB VRAM, 20 SMs, 99 KiB shared memory per block (101376 B),
   driver 566.07 / CUDA 12.7, WDDM
-- Toolchain: Python 3.13.15, torch 2.13.0+cu126, triton 3.7.1
 - Triton needs a host C compiler to build its per-kernel launcher shim.
   gcc 11.4.0 is installed (`build-essential`). `import triton` succeeding does
   NOT prove kernels can run — only a compiled launch does.
@@ -163,9 +162,6 @@ wsl -e bash -lc 'export PATH="$HOME/.local/bin:$PATH"; \
   Omitting `UV_PROJECT_ENVIRONMENT` silently recreates the slow venv.
 - Environment is **uv**, never conda. Miniconda is installed on *Windows*
   (`C:\Users\zanzu\miniconda3`); its win-64 binaries cannot run under WSL.
-- Python **3.13** (pinned in `.python-version`).
-- torch **must** come from the cu126 index — pinned in `pyproject.toml`.
-  Default wheels are `+cu130` and fail CUDA init against this 12.7 driver.
 - Never run Python/Triton on the Windows side — no CUDA there.
 - **`uv pip install` ignores `UV_PROJECT_ENVIRONMENT`** — that variable only
   governs `uv sync` and `uv run`. Since the venv is outside the repo, `uv pip`
@@ -210,4 +206,4 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: **All five MoBA implementations measured on an A100** (`docs/a100-results.md`). At S=65536 `ours` is 2.727 ms forward / 5.237 ms backward -- **5.57x torch SDPA, 4.55x FlashMoBA's CUDA, 17.6x Triton-MoBA, 20.7x MoonshotAI's fused path** -- and every ratio grows with context. Triton-MoBA is the cleanest of these: same language, same compiler, so the 17.6x is loop order rather than tooling, and it *grows* (5.7x at S=8192) where a constant-factor advantage would stay flat. It and `moonshot_efficient` are **tied**, because both delegate attention to FlashAttention's varlen kernel -- three tiers sorted by loop order, not by language. flash-attn needs two mutually exclusive versions, so the sweep runs twice (`--fa=` builds, `--use-fa=` switches); the four flash-attn-independent backends give a free reproducibility control, **~1% for dense but up to 14% for anything that routes**, which is the error bar on any cross-pass claim. **Below S=8192 the measurement is 11-47% harness, not kernel** (`bench/_small_s_dip.py`) -- that is what the backward's apparent dip was, and headline numbers are quoted from S >= 16384. Roofline is on measured A100 ceilings (1239 GiB/s, 204 TFLOP/s, ridge 153.5) and replottable without a GPU via `--from-log`. **Launch configs are now a baked table, not runtime autotuning** (`src/moba/kernels/tuned_configs.py`): a serving path must never race configs on a user's first call, which is what FlashMoBA's `decide_lg_block_m` lookup avoids too. `triton.heuristics` reads the table with zero benchmarking; `MOBA_AUTOTUNE=1` restores the autotuner, which is how `bench/tune_table.py` regenerates entries. Pruning the autotuner to one config would *not* have worked -- its fast path tests the decorated list, not the pruned one. The table is also keyed on `seq_len`, the axis autotune structurally could not see. **Open:** the table is sparse (`--check` says what a card is missing; misses take a measured DEFAULT); the comment pass (50% of `src/` vs 4-5% in the references); and the roofline's flat roof is still a 4096^3 GEMM that nothing in this kernel resembles.
+> Status: all five MoBA implementations measured on an A100; at S=65536 `ours` is 5.57x SDPA and 4.55x FlashMoBA (`docs/a100-results.md`). Launch configs are a baked table (`src/moba/kernels/tuned_configs.py`). Open: no direct `ours` vs `flash_moba` test, sparse table, comment pass, roofline flat roof.

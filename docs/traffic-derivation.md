@@ -193,9 +193,13 @@ P row (1 x 128) times  V tile  (128 x 64)  =  128 x 64 = 8,192 multiply-adds
 ```
 
 Measured pair count **P = 247,808** (7.56 blocks per query; early queries have
-fewer past blocks to choose from). Both kernels compute the same selection: the
-fairness check found identical error against the oracle, 0.0478 for both
-(`docs/a100-results.md:109-112`).
+fewer past blocks to choose from). Both kernels select the same *count* of
+pairs: compared directly on 2026-09-15, oracle, ours and FlashMoBA each select
+247,808 at this shape, ours matching the oracle's choices exactly and FlashMoBA
+differing on 1,658 near-tie entries (`docs/a100-results.md`, "It is computing
+the same thing"). An earlier version of this sentence inferred agreement from
+both reporting 0.0478 error against the oracle, which a single scalar cannot
+show.
 
 Useful work = 247,808 x 32,768 = **8.12 GFLOP**.
 
@@ -401,9 +405,11 @@ for B, s, h, d, tk in ((1, 8192, 4, 64, 8), (2, 524288, 16, 128, 8),
 
 | file | claim | status |
 |---|---|---|
-| `docs/a100-results.md:144-150` | FlashMoBA loads the union and discards 77% | **wrong** (section 7). It gathers; its waste is 21.5% padding. The cost is K/V reloads and the fp32 running-output round trip. |
-| `docs/flashmoba-digest.md` §2 | grid is (batch, head, KV block) | **wrong**: `dim3 grid(num_lg_m_block, b, h)`, `flash_fwd_launch_template.h:52` |
-| `bench/roofline.py` `traffic_flash_moba` | 44 MiB, 186.2 FLOP/byte, "compute bound" | **wrong** (section 9); also reused for `moonshot_efficient` |
+| `docs/a100-results.md:144-150` | FlashMoBA loads the union and discards 77% | **wrong** (section 7). It gathers; its waste is 21.5% padding. The cost is K/V reloads and the fp32 running-output round trip. **Corrected 2026-09-15**, with the occupancy cost (one program per A100 SM) added. |
+| `docs/flashmoba-digest.md` §2 | grid is (batch, head, KV block) | **wrong**: `dim3 grid(num_lg_m_block, b, h)`, `flash_fwd_launch_template.h:52`. **Corrected 2026-09-15.** |
+| `bench/roofline.py` `traffic_flash_moba` | 44 MiB, 186.2 FLOP/byte, "compute bound" | **wrong** (section 9); also reused for `moonshot_efficient`. **Replaced 2026-09-15** by a closed-form window model (340 MiB at this shape against the 326.5 MiB counted in 8.2); `moonshot_efficient` now has no model rather than a wrong one. |
+| `docs/a100-results.md`, "It is computing the same thing" | identical 0.0478 error proves identical selection | **wrong**: one scalar cannot. **Replaced 2026-09-15** by a direct selection comparison (same count; ours matches the oracle exactly, FlashMoBA differs on 0.5% near-ties). |
+| `implementations/ours.py` `selection()` | checks the gate the benchmark runs | **was not**: it called the PyTorch `build_csc`, the benchmark runs `build_csc_fused`. **Fixed 2026-09-15.** |
 | every measured latency, the fairness checks, all kernel code | — | **unchanged** |
 
 ## Sources

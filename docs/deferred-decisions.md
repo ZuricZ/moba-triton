@@ -146,3 +146,42 @@ ceiling, and "no trigger fired" is not evidence a decision was right.
 **See also:** `docs/layout-measurements.md`;
 `docs/learning/04-packed-sequences-and-where-the-work-goes.md` for the layout
 table and the packing picture.
+
+---
+
+## DD-2 — Partial-output buffer is `top_k` x the output, unwindowed
+
+**Decided:** 2026-09-15, while auditing the FlashMoBA comparison
+(`docs/a100-results.md`, "The mechanism, corrected").
+
+**What we do now.** The attention stage writes one partial output per
+(query, selected block) into `part_acc`, shaped `[B, H, S, top_k, D]`
+(`src/moba/kernels/moba_fwd.py`, `empty_partials`), and a separate combine
+kernel merges the slots. The buffer is allocated for the whole sequence at
+once. That is what lets every KV-block program gather across all of S, so a
+block sees about `top_k * block_size` queries at any context length and the
+tensor-core tiles stay full.
+
+**What it costs.** `top_k` copies of the output, in the compute dtype:
+
+| shape | `part_acc` |
+|---|---:|
+| `[1, 65536, 4, 64]`, top_k 8 | 268 MB |
+| `[2, 1048576, 16, 128]`, top_k 8 (FlashMoBA's benchmark shape at 1M) | 64 GiB |
+
+The second does not fit an 80 GB card. FlashMoBA's window design keeps its
+scratch at 1x the output in fp32 (16 GiB there) and pays for it in padding and
+occupancy at every S; we made the opposite trade.
+
+**Why not fix it now.** Nothing we can rent runs 1M at that shape, and the fix
+does not touch the kernel: chunk the *queries* at the host level (build the CSC
+for a 64K-query chunk, attend, combine, reuse the buffer). A 64K window bounded
+by HBM keeps 64 queries per (chunk, block) at 1M, so no padding penalty
+appears; K/V are re-read once per chunk, about 16x at 1M, which is small next
+to the partials traffic. The window FlashMoBA uses is 1024 because theirs is
+bounded by shared memory; ours would be bounded by HBM, three orders of
+magnitude larger.
+
+**Revisit when:** a target shape's `B * S * H * top_k * D * itemsize` exceeds
+about half the card's memory, or a benchmark sweep goes past S=262144 at
+H=16, D=128.

@@ -106,10 +106,32 @@ MoBA fast deserves scrutiny before it is written down. Three checks.
 
 ### It is computing the same thing
 
-Relative to the PyTorch oracle at S=4096, error is *identical to four decimals*
-across all three: `ours` 0.0478, `flash_moba` 0.0478, `moonshot_efficient`
-0.0478. Same block choices, differing only in bf16 rounding. Nothing is being
-skipped.
+An earlier version of this section inferred "same block choices" from all
+three implementations reporting the same error against the oracle, 0.0478 at
+S=4096. That inference was wrong. The metric (`bench/_a100_fairness.py`) is one
+scalar, max abs error over max abs reference, and one number agreeing proves
+nothing about which blocks were chosen; the same log has them *disagreeing* at
+S=1024 (`ours` 0.0037, `flash_moba` 0.0019).
+
+What does prove it is comparing the selections directly. Done 2026-09-15 on the
+laptop at the sweep's config, `[1, S, 4, 64]`, bf16, seed 0:
+
+| S | (query, block) pairs the oracle selects | ours | flash_moba | ours vs oracle | flash_moba vs oracle |
+|---:|---:|---:|---:|---:|---:|
+| 4096 | 116,736 | 116,736 | 116,736 | 0 differ | 522 differ |
+| 8192 | 247,808 | 247,808 | 247,808 | 0 differ | 1,658 differ |
+
+Both attend exactly the same *number* of pairs under the same convention (the
+query's own block counts against `top_k`:
+`references/flash-moba/flash_moba/moba_test_utils.py:87-90` and
+`src/moba/config.py`). `ours` reproduces the oracle's choices exactly. FlashMoBA
+flips about 0.5% of entries on near-tie scores, which is its rounding, not ours.
+Nothing is being skipped, and the direction of any divergence is theirs.
+
+No test in `tests/` compares these two backends directly:
+`tests/test_disagreement.py` runs at `block_size=32, float32`, which
+`flash_moba` refuses (needs a multiple of 64) and `ours` refuses (no fp32
+tensor-core path). That gap is still open.
 
 ### The gap grows on realistic shapes
 
@@ -141,13 +163,48 @@ halves can be timed separately:
 FlashMoBA exists to optimise, and the only stage where the two designs differ
 structurally.
 
-The mechanism is the project's thesis, measured. Their `decide_lg_block_m`
-picks `lg_block_m=512` -- a *query-major* tile, where one program owns 512
-queries and loads the union of every block any of them selected, then masks
-away the rest. `docs/divergence-measurements.md` puts that waste at **77% of
-tensor-core work** at S=8192 with 64 blocks and `top_k=8`. A KV-block-major
-program owns one block and gathers exactly the queries that chose it, so it
-discards none. 3.2x against 77% waste is the right order of magnitude.
+**The mechanism, corrected 2026-09-15.** An earlier version of this paragraph
+said FlashMoBA's `lg_block_m=512` tile "loads the union of every block any of
+its queries selected, then masks away the rest", wasting 77% of tensor-core
+work. Their kernel does not do that, and the 77% was never a measurement of
+FlashMoBA: it comes from `bench/divergence.py`, which models a hypothetical
+query-major kernel with 64-query tiles. `docs/traffic-derivation.md` derives
+the correction from their source. The summary:
+
+* **Their grid is one program per (query window, batch, head)**
+  (`flash_fwd_launch_template.h:51-52`). The window `lg_block_m` is 512 at
+  S=8192 and **1024** at S=65536 on sm_80. Inside the program the loop is
+  KV-block-major: for each block it binary-searches the block's sorted query
+  list for the queries in its window (`index_gather_scatter.h:50-87`) and
+  gathers only those. No union, no masking of unselected blocks.
+* **The window is what costs them at long context.** Each (window, block) pair
+  holds on average `lg_block_m * top_k / num_blocks` queries, padded to a
+  64-row MMA tile: 64 at S=8192 (about 22% waste from part-full tiles) but 16
+  at S=65536 (about 55% padding). Ours gathers across the whole sequence, so
+  every block sees about `top_k * block_size` = 1024 queries at any S. This is
+  why the ratio grows with context.
+* **One program per SM.** Their shared memory per program is 84 KiB at D=64
+  and 100 KiB at D=128 (`kernel_traits.h:128-135`, sized by the compile-time
+  `kMxLgBlockM=1024` row-statistics table). The A100 has 164 KiB per SM, so
+  one 4-warp program fits and two do not: about 6% occupancy, one warp per
+  scheduler, nothing to switch to when a load stalls. The H100 the paper used
+  has 228 KiB and fits two.
+* **The running output lives in HBM.** The gathered query set changes per
+  block, so the accumulator cannot stay in registers. It is an fp32 scratch
+  buffer (`flash_moba_api.cpp:505`, zeroed every call, 67 MB at this shape),
+  loaded and stored once per block per 64-row chunk with blocking copies on
+  sm_80 (`kernel_traits.h:178-181`). Modelled traffic puts them about 4x above
+  their own DRAM floor, which is what a latency-bound kernel looks like.
+* **Host overhead.** `triton_mean_pool.py:140` calls `.item()` on every call,
+  a hard device-to-host sync, so iterations cannot overlap; six or more kernel
+  launches per call, not two.
+
+The window is a trade, not a mistake. It lets them merge online-softmax
+partials on the fly inside one kernel with a scratch buffer 1x the output.
+Ours merges in a second kernel with a buffer `top_k`x the output
+(`moba_fwd.py`, `part_acc`). That is why ours is faster here and why theirs
+still fits at S=1M where ours, as written, would not (64 GiB at their
+`[2, S, 16, 128]`). See `docs/deferred-decisions.md`, DD-2.
 
 That the gate ratio (1.9-2.1x) is *smaller* than the attention ratio (3.2-3.4x)
 is itself corroboration. Both pipelines compute the same routing by similar
@@ -235,7 +292,7 @@ So the five sort into three tiers by loop order:
 | tier | implementations | at S=65536 |
 |---|---|---|
 | query-major on FA-varlen | `triton_moba`, `moonshot_efficient` | 17.6x, 20.7x |
-| query-major, hand-written CUDA with a tuned tile | `flash_moba` | 4.6x |
+| KV-block-major gather, but only inside a 512-1024-query window; hand-written CUDA | `flash_moba` | 4.6x |
 | **KV-block-major** | **ours** | **1x** |
 
 Language explains the gap *within* the first two tiers. It does not explain the
@@ -243,13 +300,26 @@ gap between them and us.
 
 ### The roofline says the same thing independently
 
-`flash_moba` and `moonshot_efficient` sit at **186.2 FLOP/byte** -- above the
-A100's measured ridge of 153.5, so nominally compute bound -- while achieving
-**4% and 2% of roof**. High arithmetic intensity with low attainment is the
-roofline's way of reporting that the bytes being moved are the wrong bytes: a
-query-major tile loads the union and masks most of it away. `ours` sits at 75.8
-FLOP/byte and 21% of roof, memory bound and collecting a far larger share of
-what its position allows. See `results/roofline.png`.
+`results/roofline.png` was drawn with `flash_moba` and `moonshot_efficient` at
+**186.2 FLOP/byte**, above the A100's measured ridge of 153.5, at **4% and 2%
+of roof**. That intensity was an artefact of the traffic model: the version of
+`bench/roofline.py::traffic_flash_moba` in use counted only gathered Q, K, V
+once each, and O, which is a floor on *any* gathering kernel, not FlashMoBA's
+traffic. It omitted their per-(window, block) K/V reloads and the fp32
+running-output round trip, which `docs/traffic-derivation.md` §8.2 counts at
+2.9x our bytes at S=8192. The model now includes both (2026-09-15): 340 MiB
+modelled against 326.5 MiB counted by hand at S=8192, which puts FlashMoBA at
+**24 FLOP/byte**, well left of the ridge and memory bound like `ours` at 75.7,
+but moving 3-4x the bytes for the same arithmetic. Against that lower roof it
+reaches 25% of what its position allows, next to our 21%: both kernels move
+bytes at a similar rate, and the one moving more of them takes longer. That is
+the roofline agreeing with the stage split and with
+`docs/traffic-derivation.md` §9 rather than contradicting them.
+`moonshot_efficient` had been borrowing the same model; it now has none until
+one is derived from its source, so it is absent from the figure rather than
+misplaced. `results/roofline.png` was regenerated from `results/a100-roofline.log`
+with `--from-log`, which now re-models traffic from the current code rather than
+trusting the intensity the log stored; the latencies on it are unchanged.
 
 ## Environment: two passes, because flash-attn cannot serve both
 
