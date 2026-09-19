@@ -20,7 +20,7 @@ from moba.config import MoBAConfig
 from moba.device import MIN_CAPABILITY, TENSOR_CORE_TILE, supports_dtype
 from moba.kernels.attention import moba_attention
 from moba.kernels.moba_fwd import moba_forward
-from moba.kernels.routing import build_csc, csc_to_mask
+from moba.kernels.routing import build_csc_fused, csc_to_mask
 
 # Dtypes with a tensor-core `tl.dot` path on Ampere. `supports_dtype` is the
 # broader question of what the *architecture* can represent -- it admits fp32
@@ -136,8 +136,13 @@ class OursBackend:
         Round-tripping the CSC index back to a dense mask -- rather than
         calling `moba_selection` directly -- is what makes this check worth
         anything. The kernel reads the index, not the mask, so the index is
-        what has to be right. When a Triton gate replaces the PyTorch one
-        (D11), this becomes a genuine routing check with no edit here.
+        what has to be right.
+
+        This builds the index with `build_csc_fused`, the Triton gate that
+        `moba_forward` runs, and not `build_csc`, the PyTorch one. Until
+        2026-09-15 it called `build_csc`, which meant the routing check
+        exercised a gate the benchmark never ran; the two agreed, but nothing
+        here would have said so if they had not.
 
         Args:
             q: Queries shaped [B, S, H, D].
@@ -147,7 +152,8 @@ class OursBackend:
         Returns:
             Boolean selection mask shaped [B, H, S, num_blocks].
         """
-        return csc_to_mask(build_csc(q, k, cfg), q.shape[1])
+        q, k = q.contiguous(), k.contiguous()
+        return csc_to_mask(build_csc_fused(q, k, cfg), q.shape[1])
 
 
 register(OursBackend())
