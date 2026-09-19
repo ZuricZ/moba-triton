@@ -103,6 +103,66 @@ def test_slot_of_pair_agrees_with_the_query_it_belongs_to(device, gate):
                     )
 
 
+@pytest.mark.parametrize("shape", SHAPE_SWEEP)
+@pytest.mark.parametrize("gate", GATE_SWEEP)
+def test_fused_order_matches_the_reference_exactly(device, shape, gate):
+    """Dispatch order must agree with `build_csc`, tie-break included.
+
+    `test_dispatch_order_is_longest_first_and_repeatable` checks that counts
+    descend and that two runs agree, which both hold for any tie-break rule --
+    so neither would notice the ranking changing which of two equal columns
+    goes first. Ties are common: `col_nnz` is a small integer and most columns
+    share a value with some other column, so a rule change would silently
+    reshuffle much of the dispatch order.
+
+    That matters because the kernel packs the column id into the low bits of
+    the key it sorts, and the packing is what encodes "lowest id wins a tie".
+    Get the reversal backwards and every test above still passes. This one
+    compares against `torch.argsort(..., stable=True)`, which breaks ties the
+    same way and reaches it by a different route.
+    """
+    block_size, top_k = gate
+    cfg = MoBAConfig(block_size=block_size, top_k=top_k, dtype=torch.bfloat16)
+    q, k, _ = make_qkv(shape, dtype=torch.bfloat16, device=device)
+
+    expected = build_csc(q, k, cfg)
+    actual = build_csc_fused(q, k, cfg)
+
+    assert torch.equal(expected.col_nnz, actual.col_nnz), (
+        "counts differ, so the orders are not comparable")
+    assert torch.equal(expected.order, actual.order), (
+        "dispatch order differs from the reference; the tie-break is wrong")
+
+
+def test_dispatch_order_survives_more_blocks_than_the_sort_unrolls(device):
+    """Many blocks must still rank, which an unrolled sort could not do.
+
+    Until 2026-09-19 the ranking was a `tl.static_range(N_BLOCKS)` selection
+    sort, emitting one copy of its body per column. At 1024 columns that was
+    5.02 MB of PTX; at 2048 it never finished compiling, so the block-size
+    sweep died with a bare `exit 1` that looked like a runtime failure and was
+    not -- the GPU was idle the whole time.
+
+    A small sequence with a tiny block size reaches that column count for a
+    few MB of tensors, so the ceiling is testable without a long-context run.
+    """
+    seq_len = 4096
+    cfg = MoBAConfig(block_size=2, top_k=8, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, seq_len, 2, 32), dtype=torch.bfloat16, device=device)
+
+    index = build_csc_fused(q, k, cfg)
+
+    assert index.num_blocks == seq_len // 2, "shape did not reach the ceiling"
+    counts = torch.gather(index.col_nnz, -1, index.order.long())
+    assert torch.all(counts[..., :-1] >= counts[..., 1:]), (
+        "columns are not ordered by descending consumer count")
+    assert torch.equal(index.order.sort(dim=-1).values.to(torch.int32),
+                       torch.arange(index.num_blocks, dtype=torch.int32,
+                                    device=index.order.device
+                                    ).expand_as(index.order)), (
+        "order is not a permutation of the column ids")
+
+
 def test_dispatch_order_is_longest_first_and_repeatable(device):
     """D8 needs the heaviest columns first, and needs the same order twice.
 

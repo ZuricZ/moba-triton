@@ -188,7 +188,7 @@ def count_columns_kernel(
 @triton.jit
 def offsets_and_order_kernel(
     ColNnz, ColOffsets, Order,
-    N_BLOCKS: tl.constexpr, N_POW2: tl.constexpr,
+    N_BLOCKS: tl.constexpr, N_POW2: tl.constexpr, PACK64: tl.constexpr,
 ):
     """Turns counts into column offsets, and ranks columns by size.
 
@@ -208,20 +208,43 @@ def offsets_and_order_kernel(
     tl.store(ColOffsets + pid_bh * (N_BLOCKS + 1) + N_BLOCKS, tl.sum(cnt))
 
     # Longest-first dispatch (D8): the heaviest columns start first, so the
-    # long pole is not left until the end. Repeated maximum extraction rather
-    # than a sort -- num_blocks is small, and the explicit lowest-index
-    # tie-break makes the order reproducible run to run. An unstable order here
-    # would vary the kernel's dispatch between runs, which is exactly what a
-    # race condition looks like from the outside.
+    # long pole is not left until the end. The explicit lowest-index tie-break
+    # makes the order reproducible run to run. An unstable order here would
+    # vary the kernel's dispatch between runs, which is exactly what a race
+    # condition looks like from the outside.
     #
-    # Invalid columns sit at -1 so every real column, including empty ones,
-    # outranks them and the loop never runs out of candidates.
-    work = tl.where(valid, cnt, -1)
-    for r in tl.static_range(N_BLOCKS):
-        best = tl.max(work, axis=0)
-        pick = tl.min(tl.where(work == best, cols, N_POW2), axis=0)
-        tl.store(Order + pid_bh * N_BLOCKS + r, pick)
-        work = tl.where(cols == pick, -1, work)
+    # Triton has no argsort -- `tl.sort` returns values and drops the indices
+    # that produced them -- so the index rides in the low bits of the key it
+    # sorts. `N_POW2` is a power of two and bounds the index, so `cnt *
+    # N_POW2` leaves exactly enough room beneath the count and never carries
+    # into it; the multiply and modulo compile to a shift and a mask.
+    # Comparing two packed keys then compares counts first and consults the
+    # index only when they tie, which *is* the ordering rule. Reversing the
+    # index before packing turns the descending sort's preference for large
+    # low bits back into a preference for the lowest column id.
+    #
+    # Invalid columns sit at -1, which makes their whole key negative, so they
+    # sort past the last real column and the masked store never reaches them.
+    #
+    # This replaced a `tl.static_range(N_BLOCKS)` selection sort on
+    # 2026-09-19. That loop was written when `num_blocks` was 64 and it
+    # unrolled once per column, so emitted code grew as N^2: 5.02 MB of PTX at
+    # N_BLOCKS=1024, and at 2048 it never finished compiling -- 11 minutes and
+    # 1.3 GB inside the MLIR passes with the GPU idle, which is what the
+    # block-size sweep's `exit 1` above 1024 blocks actually was. The bitonic
+    # network `tl.sort` emits is O(log^2 N) stages rather than O(N)
+    # iterations: 0.31 MB at N_BLOCKS=2048, and 37x faster at 1024 besides.
+    # `tests/test_routing_fused.py` pins both the ordering and the ceiling.
+    if PACK64:
+        # Only on shapes where the packed key could exceed int32; costs 1.5x
+        # the emitted code, so it is not the default.
+        key = (tl.where(valid, cnt, -1).to(tl.int64) * N_POW2
+               + (N_POW2 - 1 - cols))
+    else:
+        key = tl.where(valid, cnt, -1) * N_POW2 + (N_POW2 - 1 - cols)
+    key = tl.sort(key, descending=True)
+    tl.store(Order + pid_bh * N_BLOCKS + cols,
+             (N_POW2 - 1 - (key % N_POW2)).to(tl.int32), mask=valid)
 
 
 @triton.jit
@@ -368,13 +391,19 @@ def build_csc_from_indices(
     )
     # Per kv head, and unchanged. `N_BLOCKS` here is one *sequence's* block
     # count even when packed, because block ids stay sequence-local -- which is
-    # what keeps this kernel's `static_range(N_BLOCKS)` reduction the size it is
-    # in the padded path. Global numbering would have multiplied it by the
-    # batch.
+    # what keeps this kernel's sort the width it is in the padded path. Global
+    # numbering would have multiplied it by the batch.
+    #
+    # The ranking packs a count and a column id into one sortable integer, so
+    # `cnt * n_pow2` has to stay inside int32. A count is bounded by every
+    # query of every head in the group choosing that one block; when even that
+    # bound cannot overflow, the cheaper 32-bit key compiles.
+    n_pow2 = max(TENSOR_CORE_TILE, triton.next_power_of_2(num_blocks))
     offsets_and_order_kernel[(bh_kv,)](
         col_nnz, col_offsets, order,
         N_BLOCKS=num_blocks,
-        N_POW2=max(TENSOR_CORE_TILE, triton.next_power_of_2(num_blocks)),
+        N_POW2=n_pow2,
+        PACK64=(group * rows_per_seq) * n_pow2 >= 2 ** 31,
     )
     scatter_pairs_kernel[grid](
         block_idx, col_offsets, cursor, row_indices, head_indices,
