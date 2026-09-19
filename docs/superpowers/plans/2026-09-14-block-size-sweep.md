@@ -60,6 +60,21 @@ Finding 1 measures that a query-major kernel's utilization is governed by
 `S` is exactly how `num_blocks` grows, so the penalty this kernel's loop order
 avoids gets worse precisely as blocks shrink. That is the claim this sweep tests.
 
+> **Outcome, 2026-09-20: the claim is false as stated, and the sweep is what
+> showed it.** `num_blocks` does not predict the result on its own -- the knob
+> that produced it does. Reached by lengthening the sequence, eight times the
+> blocks makes this kernel faster; reached by shrinking the block at a fixed
+> key budget, the same eight times makes it 29.5x slower. The sweep's two
+> panels isolate why: they differ only in whether `top_k` rises, and the
+> penalty is 29.52x when it does against 2.05x when it does not. This kernel's
+> scratch is O(S * top_k) because each selected block is handled by a separate
+> program that must write a partial softmax for a second pass to merge, so its
+> cost is counted per (query, block) pair rather than per key. Long context
+> adds pairs and arithmetic together; shrinking the block adds pairs alone.
+> Full result and tables in `docs/block-size-results.md`. Nothing below needed
+> changing to reach this -- the plan's experiment was right, its stated
+> expectation was not.
+
 **Why FlashMoBA will be absent from the two smallest rows.** It requires its block
 dimension to be a multiple of 64 (`flash_moba_api.cpp:465`,
 `TORCH_CHECK(n_lg_block_dim % 64 == 0)`), and `implementations/flash_moba.py:52-56`
