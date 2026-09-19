@@ -1,0 +1,35 @@
+A100-PCIE-40GB, S=65536, B=1, H=4, D=64, bf16, forward.
+Captured by the polling shell; the box became unreachable (authorized_keys
+reset after a restart) before /home/run65k.log could be pulled, so this
+transcript is the record.
+
+14:57 === block=64 top_k=16  (N_BLOCKS=1024) ===
+14:59 === block=32 top_k=32  (N_BLOCKS=2048) ===
+15:02 === block=32 top_k=32  (N_BLOCKS=2048) ===
+15:04 === block=32 top_k=32  (N_BLOCKS=2048) ===
+15:07 === block=32 top_k=32  (N_BLOCKS=2048) ===
+15:10 === block=32 top_k=32  (N_BLOCKS=2048) ===
+15:12 === block=16 top_k=64  (N_BLOCKS=4096) ===
+15:15 === block=16 top_k=64  (N_BLOCKS=4096) ===
+15:17 === block=16 top_k=64  (N_BLOCKS=4096) ===
+15:20 === block=16 top_k=64  (N_BLOCKS=4096) ===
+15:22 === block=16 top_k=64  (N_BLOCKS=4096) ===
+15:25 === block=16 top_k=64  (N_BLOCKS=4096) ===
+=== 65K DONE ===
+=== block=128 top_k=8  (N_BLOCKS=512) ===
+  ours            2.773 ms
+  flash_moba     12.424 ms
+  sdpa_dense     15.320 ms
+  exit=0
+=== block=64 top_k=16  (N_BLOCKS=1024) ===
+  ours            9.664 ms
+  flash_moba     19.869 ms
+  sdpa_dense     15.314 ms
+  exit=0
+=== block=32 top_k=32  (N_BLOCKS=2048) ===
+  exit=1
+=== block=16 top_k=64  (N_BLOCKS=4096) ===
+  exit=1
+RUN65K_DONE
+
+[exited with code 0]
