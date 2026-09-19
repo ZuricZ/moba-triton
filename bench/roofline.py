@@ -35,6 +35,7 @@ collecting.
 
 import argparse
 import dataclasses
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -296,27 +297,94 @@ def traffic_ours(batch, seq_len, heads, head_dim, cfg, kv_heads=None,
     })
 
 
+# FlashMoBA's MMA tile is 64 query rows (`kernel_traits.h:88-91`,
+# `Tile<64, _16, _16>`), so a gathered query list is processed in chunks of
+# 64 and each chunk reloads K and V (`flash_fwd_kernel.h:544-590`).
+FLASH_MOBA_CHUNK_ROWS = 64
+
+
+def flash_moba_window(seq_len: int, cfg) -> int:
+    """Reproduces FlashMoBA's `decide_lg_block_m` policy on sm_80.
+
+    Their density is attended keys over causally available keys, which is
+    `top_k * block_size / (S / 2)` up to the early-query clamp
+    (`flash_moba_interface.py:20-48`). The sm_86/sm_89 cap to 512 is not
+    applied: the roofline is for an A100, which is sm_80.
+
+    Args:
+        seq_len: Sequence length.
+        cfg: Gate configuration, supplying block_size and top_k.
+
+    Returns:
+        The query window (`lg_block_m`) one of their programs owns.
+    """
+    sparsity = 1.0 - min(1.0, 2 * cfg.top_k * cfg.block_size / seq_len)
+    if sparsity <= 0.5:
+        return 128
+    if sparsity <= 0.7:
+        return 256
+    if sparsity <= 0.8:
+        return 512
+    if sparsity <= 0.9:
+        return 768
+    return 1024
+
+
 def traffic_flash_moba(batch, seq_len, heads, head_dim, cfg,
                        kv_heads=None) -> Traffic:
-    """Lower bound for FlashMoBA.
+    """Modelled traffic for FlashMoBA, from its source.
 
-    Modelled only as far as we have read their kernel: the same gathered-Q,
-    once-each-K/V shape, because their attention takes the identical CSC
-    routing triple ours produces. Their internal buffers are *not* modelled --
-    we have not read that part -- so this is a floor on their traffic and
-    therefore a ceiling on their arithmetic intensity. Marked inexact so the
-    plot can say so rather than implying a precision we do not have.
+    Until 2026-09-15 this counted gathered Q, K and V once each, and O -- a
+    floor on any gathering kernel, not FlashMoBA's traffic. It put them at
+    186 FLOP/byte, right of the ridge, and the A100 doc read that as
+    "compute bound at 4% of roof". Two terms were missing, and both are read
+    from their kernel (`docs/traffic-derivation.md` section 8.2):
+
+    * **K/V are reloaded once per (query window, KV block, 64-row chunk).**
+      Their grid is one program per window of `lg_block_m` queries; inside it
+      the loop walks every KV block and gathers the window's queries that
+      chose it, so a block is loaded once per window that has a picker,
+      per chunk of 64 pickers. The count below is a closed form over the
+      mean pickers per pair; it reproduces the routing-measured 4,934 loads
+      at S=8192 to within 6%.
+    * **The running output round-trips HBM in fp32** once per pair
+      (`o_tmp_load`/`o_tmp_store`), plus a zero-fill and a final read.
+
+    Still inexact: the mean-count model ignores the variance that `ceil`
+    turns into extra chunks, and the pair count uses `top_k` per query with
+    no early-query clamp (about 6% high at S=8192). Both are small next to
+    the terms they sit in.
     """
     kv_heads = kv_heads or heads
+    del kv_heads                                     # their grid is per query head
     itemsize = torch.tensor([], dtype=cfg.dtype).element_size()
-    slots = min(cfg.top_k, cfg.num_blocks(seq_len))
-    q_row = batch * heads * seq_len * head_dim * itemsize
+    num_blocks = cfg.num_blocks(seq_len)
+    slots = min(cfg.top_k, num_blocks)
+    rows = batch * heads * seq_len
+    pairs = slots * rows
+
+    window = flash_moba_window(seq_len, cfg)
+    loads = 0
+    for i in range(math.ceil(seq_len / window)):
+        # Blocks causally available to the last query of window i.
+        cols = min(num_blocks, math.ceil(window * (i + 1) / cfg.block_size))
+        per_pair = window * min(cfg.top_k, cols) / cols
+        loads += cols * math.ceil(per_pair / FLASH_MOBA_CHUNK_ROWS)
+    loads *= batch * heads
+    kv_tile = cfg.block_size * head_dim * itemsize
+
+    o_fp32 = rows * head_dim * 4
     return Traffic({
-        "Q (gathered, x top_k)": slots * q_row,
-        "K": _tensor_bytes(batch, seq_len, kv_heads, head_dim, itemsize),
-        "V": _tensor_bytes(batch, seq_len, kv_heads, head_dim, itemsize),
-        "O": _tensor_bytes(batch, seq_len, heads, head_dim, itemsize),
-    }, exact=False, note="internal buffers not modelled; a floor")
+        "Q (gathered, x top_k)": pairs * head_dim * itemsize,
+        "K (per window-block chunk)": loads * kv_tile,
+        "V (per window-block chunk)": loads * kv_tile,
+        "row indices": pairs * 4,
+        "o_tmp fp32 round trip (x top_k)": 2 * pairs * head_dim * 4,
+        "o_tmp zero-fill + final read": 2 * o_fp32,
+        "O": rows * head_dim * itemsize,
+        "LSE": rows * 4,
+    }, exact=False,
+       note="closed-form window model; docs/traffic-derivation.md s8.2")
 
 
 def traffic_fused_dense(batch, seq_len, heads, head_dim, cfg) -> Traffic:
@@ -364,7 +432,12 @@ MODELS = {
     "fa2_minimal": traffic_fused_dense,
     "naive_torch": traffic_materializing,
     "moonshot_naive": traffic_materializing,
-    "moonshot_efficient": traffic_flash_moba,
+    # `moonshot_efficient` used to borrow `traffic_flash_moba`. That was a
+    # floor common to any gathering kernel; now that the FlashMoBA model
+    # counts FlashMoBA's window reloads and fp32 round trip, it no longer
+    # describes a kernel built on FlashAttention's varlen path. No model has
+    # been derived for it from its source, so it has none and is omitted
+    # from the roofline rather than placed by a model that is known wrong.
 }
 
 
@@ -792,9 +865,17 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
                 except (ValueError, IndexError):
                     continue
                 flops = achieved * 1e12 * ms * 1e-3
-                # Back-solve the traffic total so `intensity` comes out right.
-                traffic = Traffic(parts={"total": round(flops / intensity)},
-                                  exact=False, note="reconstructed from log")
+                # The log stores the latency, which is a measurement, and the
+                # intensity, which is only the traffic model as it stood when
+                # the run was made. Re-model from the current code where a
+                # model exists, so a corrected model corrects the figure
+                # without a GPU (the FlashMoBA model was wrong until
+                # 2026-09-15); back-solve the total only where there is none.
+                traffic = model_traffic(fields[0], BATCH, seq_len, HEADS,
+                                        HEAD_DIM, CFG)
+                if traffic is None:
+                    traffic = Traffic(parts={"total": round(flops / intensity)},
+                                      exact=False, note="reconstructed from log")
                 points.append(Point(fields[0], seq_len, ms, flops, traffic))
 
     if bandwidth is None or peak is None:
