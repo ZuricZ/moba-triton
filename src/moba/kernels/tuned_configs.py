@@ -124,27 +124,54 @@ TUNED: dict[tuple, dict] = {
         {"GROUP": 64, "num_warps": 4, "num_stages": 3},
 
     # sm_90, block_size 128, D 64, top_k 8, H 4/4.
-    # Measured by bench/tune_table.py on an NVIDIA H100 80GB HBM3, 2026-09-20.
-    # Hopper wants a different shape to Ampere, and both differences say the
-    # same thing -- a wider card wants more work per program. The forward
-    # doubles the query-tile height (GROUP 64 -> 128); the backward doubles the
-    # warps (4 -> 8) while keeping the height. Uniform across all four
-    # brackets, so this is not the single-bracket outlier the tuner warns
-    # about.
+    # Measured on an NVIDIA H100 80GB HBM3, 2026-09-20 -- but NOT by trusting
+    # bench/tune_table.py, which got the backward wrong here by 1.29x.
     #
-    # Worth recording that GROUP=128 is the configuration that measured 4 ms
-    # against GROUP=64's 0.71 ms on the sm_86 laptop (see moba_fwd's note on
-    # do_bench). The setting that is catastrophic on a 20-SM card is the winner
-    # on a 132-SM one, which is the whole argument for keying this table on
-    # architecture rather than picking a default and pruning the axis.
+    # WHAT HAPPENED. The container would not let us lock clocks, so the
+    # autotuner raced its configs on a card that never settled. It returned a
+    # table that looked trustworthy: the same answer at every bracket, no
+    # outliers. That uniformity was the bias, not the signal -- a card that is
+    # consistently hot biases every bracket the same way, so a systematic error
+    # produces exactly the clean table a correct measurement would. The tool's
+    # own caution is about a config that differs on one bracket only; this was
+    # the opposite shape and still wrong.
+    #
+    # It was caught by an accident worth keeping: the bootstrap script runs
+    # bench.compare before the table exists, and that throwaway CSV became an
+    # untuned control. Our backward was 2.68 ms untuned against 3.40 ms
+    # "tuned", five times this kernel's known run-to-run spread, while
+    # FlashMoBA's moved 1.5% over the same interval -- so it was not drift.
+    #
+    # The values below come from a direct A/B, one variable at a time, minimum
+    # of three settled measurements with a cool-down between cells:
+    #
+    #   backward, S=65536      warps 4 stages 3   2.559 ms   <- chosen
+    #                          warps 4 stages 2   2.726
+    #                          warps 8 stages 3   3.123
+    #                          warps 8 stages 2   3.303      <- tune_table
+    #
+    #   forward,  S=65536      GROUP 128  1.502   GROUP 64  1.511
+    #             S=16384      GROUP 128  0.437   GROUP 64  0.437
+    #                          GROUP 32 and 16 are 15-30% worse at both.
+    #
+    # So num_warps=8 costs the backward ~21% at either stage count, and
+    # num_stages=3 a further ~6%. The corrected backward entry is therefore
+    # identical to DEFAULT; it is written out anyway so `missing()` does not
+    # report a gap and so the measurement is recorded rather than implied.
+    #
+    # The forward is a TIE. GROUP 128 and 64 are indistinguishable on this
+    # shape, and an earlier version of this comment read the tuner's 128 as
+    # "a wider card wants a taller tile". That story is not supported: what is
+    # real is that both beat 32 and 16. 128 is kept only because it measured
+    # marginally fastest at both brackets; do not read it as a Hopper finding.
     ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 1024):
-        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
     ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 4096):
-        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
     ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 16384):
-        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
     ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 65536):
-        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+        {"GROUP": 64, "num_warps": 4, "num_stages": 3},
     ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 1024):
         {"GROUP": 128, "num_warps": 4, "num_stages": 3},
     ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 4096):
