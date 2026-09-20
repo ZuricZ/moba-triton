@@ -206,4 +206,4 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 
 ## Current status
 One line only, kept current — anything longer belongs in a planning doc.
-> Status: all five MoBA implementations measured on an A100; at S=65536 `ours` is 5.57x SDPA and 4.55x FlashMoBA (`docs/a100-results.md`). Launch configs are a baked table (`src/moba/kernels/tuned_configs.py`). Open: no direct `ours` vs `flash_moba` test, sparse table, comment pass, roofline flat roof.
+> Status: all five MoBA implementations measured on an A100; at S=65536 `ours` is 5.57x SDPA and 4.55x FlashMoBA (`docs/a100-results.md`). Block-size sweep written up and its premise retracted -- the penalty is `top_k`'s, not `block_size`'s (`docs/block-size-results.md`). Unrolled selection sorts replaced by `tl.sort` in routing and gating; no unrolled loop is bounded by `num_blocks` any more. Open: ~2x of the FlashMoBA gap unexplained, no direct `ours` vs `flash_moba` test, sparse tuning table, comment pass, roofline flat roof.
