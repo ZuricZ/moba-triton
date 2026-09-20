@@ -101,6 +101,13 @@ it applies only across the pass boundary. Consequences:
 
 ## Why beating FlashMoBA is not suspicious
 
+> **Superseded in part, 2026-09-20.** The mechanism below was narrowed by four
+> panels of measurement in `bench/residual.py`: their gate, under-subscription
+> and occupancy are all eliminated as explanations, and the window turns out to
+> be correctly tuned for sm_80 rather than mistuned from an H100. What survives
+> is traffic. The full argument, with the eliminations, is
+> `docs/why-we-beat-flashmoba.md`.
+
 A 4.55x win over a CUDA kernel from the lab that published the paper on making
 MoBA fast deserves scrutiny before it is written down. Three checks.
 
@@ -183,12 +190,21 @@ the correction from their source. The summary:
   at S=65536 (about 55% padding). Ours gathers across the whole sequence, so
   every block sees about `top_k * block_size` = 1024 queries at any S. This is
   why the ratio grows with context.
-* **One program per SM.** Their shared memory per program is 84 KiB at D=64
-  and 100 KiB at D=128 (`kernel_traits.h:128-135`, sized by the compile-time
-  `kMxLgBlockM=1024` row-statistics table). The A100 has 164 KiB per SM, so
-  one 4-warp program fits and two do not: about 6% occupancy, one warp per
-  scheduler, nothing to switch to when a load stalls. The H100 the paper used
-  has 228 KiB and fits two.
+* ~~**One program per SM.**~~ **Wrong, retracted 2026-09-20.** This said
+  their 84 KiB of shared memory per program left room for one 4-warp program
+  against our two, at about 6% occupancy. The arithmetic was wrong -- 164 / 84
+  is 1.95, so two of theirs fit -- and profiling both kernels on the card
+  settles it rather than arguing it:
+
+  ```
+  kernel                      regs     smem   blk/SM  warps  occ  limited by
+  ours   moba_fwd_kernel       230   49,920        2      8   12%  SMEM
+  theirs (77.1% of their run)  241   86,016        2      8   12%  SMEM
+  ```
+
+  Identical occupancy. It is not a difference between these kernels, and the
+  gap has to be explained without it. See `docs/why-we-beat-flashmoba.md`
+  section 3, and `results/a100-occ_fm.log`.
 * **The running output lives in HBM.** The gathered query set changes per
   block, so the accumulator cannot stay in registers. It is an fp32 scratch
   buffer (`flash_moba_api.cpp:505`, zeroed every call, 67 MB at this shape),
@@ -197,7 +213,10 @@ the correction from their source. The summary:
   their own DRAM floor, which is what a latency-bound kernel looks like.
 * **Host overhead.** `triton_mean_pool.py:140` calls `.item()` on every call,
   a hard device-to-host sync, so iterations cannot overlap; six or more kernel
-  launches per call, not two.
+  launches per call, not two. **Measured 2026-09-20 and it is not the main
+  term**: timing their gate and attention apart puts their *attention alone*
+  at 8.35x ours at S=65536, a larger ratio than the whole pipeline's 4.62x.
+  Real, but not what the gap is made of.
 
 The window is a trade, not a mistake. It lets them merge online-softmax
 partials on the fly inside one kernel with a scratch buffer 1x the output.
