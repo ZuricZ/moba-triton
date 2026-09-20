@@ -207,9 +207,20 @@ def main() -> None:
                         help="cap on sequence length; the suite's memory gate "
                              "uses the oracle's O(S^2) estimate and skips every "
                              "backend above it, so keep this short on a laptop")
+    parser.add_argument("--seq-lens", default=None,
+                        help="explicit comma-separated lengths, overriding "
+                             "--longest. `--seq-lens 65536` is the long-context "
+                             "run: its two smallest gates died with a bare "
+                             "`exit 1` before 838ca69, which was the gate's "
+                             "compile ceiling at 2048 and 4096 columns rather "
+                             "than a runtime failure")
+    parser.add_argument("--tag", default="",
+                        help="suffix for the output filenames, so a focused "
+                             "run does not overwrite the full sweep's CSVs")
     args = parser.parse_args()
 
-    seq_lens = default_seq_lens(longest=args.longest)
+    seq_lens = ([int(s) for s in args.seq_lens.split(",")] if args.seq_lens
+                else default_seq_lens(longest=args.longest))
     shapes = [(BATCH, s, HEADS, HEAD_DIM) for s in seq_lens]
     Path("results").mkdir(exist_ok=True)
     print(f"sequence lengths: {seq_lens}")
@@ -218,7 +229,7 @@ def main() -> None:
         gates = build()
         print(f"\n{'=' * 72}\npanel: {name}   gates: {gates}\n{'=' * 72}")
         rows = run_suite(shapes, gates)
-        to_csv(rows, f"results/block-sweep-{name}.csv")
+        to_csv(rows, f"results/block-sweep-{name}{args.tag}.csv")
         print(to_markdown(rows))
         print(scratch_table(shapes, gates))
 
