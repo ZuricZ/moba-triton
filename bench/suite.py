@@ -416,11 +416,20 @@ def _measure(backend, q, k, v, cfg) -> tuple[float, float]:
     return ms, torch.cuda.max_memory_allocated() / BYTES_PER_MIB
 
 
+def _selected(cfg, only):
+    """Returns the available backends, narrowed to `only` when given."""
+    backends = available_backends(cfg)
+    if only is None:
+        return backends
+    return [b for b in backends if b.name in only]
+
+
 def run_suite(
     shapes: list[tuple[int, int, int, int]],
     gates: list[tuple[int, int]],
     dtype: torch.dtype = torch.bfloat16,
     memory_budget_mb: float | None = None,
+    only: set[str] | None = None,
 ) -> list[BenchRow]:
     """Benchmarks every available backend over the config sweep.
 
@@ -436,6 +445,14 @@ def run_suite(
             a 4 GB laptop and an 80 GB A100 -- the old hardcoded 3000.0 was
             75% of this laptop and 3.7% of an A100, which would have skipped
             almost every interesting row while appearing to succeed.
+        only: Backend names to measure; every other registered backend is left
+            out entirely rather than reported as skipped. The estimate above is
+            per *config*, not per backend, so at S=65536 the dense reference's
+            O(S^2) need refuses the sparse rows too -- and raising the budget
+            instead lets the dense backends attempt a 68 GB allocation on a
+            40 GB card, whose failure corrupts the CUDA context and takes the
+            rest of the sweep with it. Naming the backends is the way to ask
+            for the long-context rows without that.
 
     Returns:
         One BenchRow per (config, backend), including skipped and errored ones.
@@ -485,7 +502,7 @@ def run_suite(
             estimate = estimate_memory_mb(
                 batch, heads, seq_len, head_dim, dtype, query_chunk=None)
             if estimate > memory_budget_mb:
-                for backend in available_backends(cfg):
+                for backend in _selected(cfg, only):
                     rows.append(
                         blank(
                             backend.name, "skipped",
@@ -503,7 +520,7 @@ def run_suite(
 
             # Dense baseline first: every other row's speedup is relative to it.
             dense_ms = None
-            backends = available_backends(cfg)
+            backends = _selected(cfg, only)
             for backend in backends:
                 if backend.name != DENSE_BASELINE:
                     continue

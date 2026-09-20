@@ -217,6 +217,12 @@ def main() -> None:
     parser.add_argument("--tag", default="",
                         help="suffix for the output filenames, so a focused "
                              "run does not overwrite the full sweep's CSVs")
+    parser.add_argument("--backends", default=None,
+                        help="comma-separated backend names to measure, "
+                             "leaving every other one out. The long-context "
+                             "run needs this: the dense reference cannot do "
+                             "S=65536 and its failure would take the sparse "
+                             "rows with it.")
     parser.add_argument("--memory-budget", type=float, default=None,
                         help="override the skip threshold in MB. The gate "
                              "estimates the *oracle's* O(S^2) need, which at "
@@ -237,7 +243,9 @@ def main() -> None:
         gates = build()
         print(f"\n{'=' * 72}\npanel: {name}   gates: {gates}\n{'=' * 72}")
         rows = run_suite(shapes, gates,
-                         memory_budget_mb=args.memory_budget)
+                         memory_budget_mb=args.memory_budget,
+                         only=(set(args.backends.split(","))
+                               if args.backends else None))
         to_csv(rows, f"results/block-sweep-{name}{args.tag}.csv")
         print(to_markdown(rows))
         print(scratch_table(shapes, gates))
