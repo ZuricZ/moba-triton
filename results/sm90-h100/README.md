@@ -47,9 +47,11 @@ int64 (`04236d3`); full details in `docs/deferred-decisions.md` DD-2a.
 
 * `data/moba-fwd.csv`, `data/moba-bwd.csv` — the H100 headline
 * `data/residual.json` — panels C and D only; panel C's roof is measured
-  per run (2298 GiB/s). Panels A and B never made it into the JSON: the
-  full run crashed at B (the int32 bug) before writing, so A and B live
-  only in `logs/residual-ab.log`.
+  per run (2298 GiB/s).
+* `data/residual-b.json` — panel B, complete: all nine shapes including
+  B=4 H=32 S=65536, the 16 GiB shape that crashed before the int64 fix
+  (`04236d3`). Re-run after the fix, it now measures 3.50x.
+* Panel A never made it into a JSON; it lives in `logs/residual-ab.log`.
 * `figures/roofline.png` — the first roofline with a real Hopper roof
 * `logs/int32-overflow.log` / `-after-fix.log` — DD-2a
 * `logs/ab-backward-config.log`, `logs/ab-forward-group.log` — the A/B that corrected the table

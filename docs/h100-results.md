@@ -55,6 +55,22 @@ On the A100 the same column read ours at 61% of roof against theirs at 31%.
 Hopper lets their kernel reach further toward the roof — 40% against 31% —
 which is the entire narrowing. Ours barely moved (61% -> 66%).
 
+## The gap at realistic shapes
+
+The headline is a single head. Panel B of `bench/residual.py`
+(`data/residual-b.json`) raises `batch * heads` until both designs
+oversubscribe the GPU, and the gap holds everywhere:
+
+| B | H | D | S | ours | theirs | ratio |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 4 | 64 | 65,536 | 1.483 | 5.788 | 3.90x |
+| 1 | 32 | 128 | 65,536 | 13.329 | 48.057 | 3.61x |
+| 4 | 32 | 128 | 65,536 | 52.550 | 184.141 | 3.50x |
+
+The last row is the 16 GiB shape that crashed before the int64 fix — it runs
+now and confirms the pattern rather than breaking it. The A100's equivalent
+range was 2.67x–2.91x at the shapes it could reach; Hopper measures 2.93x–3.90x.
+
 ## The bug: a 32-bit index the A100 could not reach
 
 The headline number was never the interesting part of this run. The interesting

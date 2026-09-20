@@ -1,0 +1,19 @@
+NVIDIA H100 80GB HBM3, 132 SMs
+sequence lengths: [8192, 16384, 65536]
+clocks: not pinned; the thermal protocol carries it
+
+==============================================================================
+PANEL B -- does the gap survive a busy GPU?
+==============================================================================
+  B    H    D       S | their progs    ours |   ours ms  theirs ms   ratio
+  1    4   64    8192 |          64     256 |     0.270      0.792   2.93x   the sweep shape
+  1    4   64   16384 |          88     512 |     0.435      1.502   3.45x   the sweep shape
+  1    4   64   65536 |         256   2,048 |     1.483      5.788   3.90x   the sweep shape
+  1   32  128    8192 |         512   2,048 |     1.229      3.663   2.98x   GPT-3 13B-ish
+  1   32  128   16384 |         704   4,096 |     2.589      8.186   3.16x   GPT-3 13B-ish
+  1   32  128   65536 |       2,048  16,384 |    13.329     48.057   3.61x   GPT-3 13B-ish
+  4   32  128    8192 |       2,048   8,192 |     4.274     12.916   3.02x   same, batch 4
+  4   32  128   16384 |       2,816  16,384 |     9.402     29.047   3.09x   same, batch 4
+  4   32  128   65536 |       8,192  65,536 |    52.550    184.141   3.50x   same, batch 4
+
+wrote results/sm90-h100/data/residual-b.json

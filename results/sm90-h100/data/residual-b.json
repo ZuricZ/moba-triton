@@ -1,0 +1,101 @@
+{
+  "clocks_locked": false,
+  "device": "NVIDIA H100 80GB HBM3",
+  "panel_b": [
+    {
+      "batch": 1,
+      "head_dim": 64,
+      "heads": 4,
+      "ours_ms": 0.2701999104155927,
+      "programs_ours": 256,
+      "programs_theirs": 64,
+      "seq_len": 8192,
+      "theirs_ms": 0.792350609406181
+    },
+    {
+      "batch": 1,
+      "head_dim": 64,
+      "heads": 4,
+      "ours_ms": 0.4351031703034831,
+      "programs_ours": 512,
+      "programs_theirs": 88,
+      "seq_len": 16384,
+      "theirs_ms": 1.501703231565414
+    },
+    {
+      "batch": 1,
+      "head_dim": 64,
+      "heads": 4,
+      "ours_ms": 1.4832190033048391,
+      "programs_ours": 2048,
+      "programs_theirs": 256,
+      "seq_len": 65536,
+      "theirs_ms": 5.788487518534941
+    },
+    {
+      "batch": 1,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 1.2286745309829712,
+      "programs_ours": 2048,
+      "programs_theirs": 512,
+      "seq_len": 8192,
+      "theirs_ms": 3.6626966366401086
+    },
+    {
+      "batch": 1,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 2.5889409748283594,
+      "programs_ours": 4096,
+      "programs_theirs": 704,
+      "seq_len": 16384,
+      "theirs_ms": 8.18565066655477
+    },
+    {
+      "batch": 1,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 13.328896113804408,
+      "programs_ours": 16384,
+      "programs_theirs": 2048,
+      "seq_len": 65536,
+      "theirs_ms": 48.05694389343262
+    },
+    {
+      "batch": 4,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 4.273847341537476,
+      "programs_ours": 8192,
+      "programs_theirs": 2048,
+      "seq_len": 8192,
+      "theirs_ms": 12.915899412972587
+    },
+    {
+      "batch": 4,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 9.401577758789063,
+      "programs_ours": 16384,
+      "programs_theirs": 2816,
+      "seq_len": 16384,
+      "theirs_ms": 29.047391255696613
+    },
+    {
+      "batch": 4,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 52.54966354370117,
+      "programs_ours": 65536,
+      "programs_theirs": 8192,
+      "seq_len": 65536,
+      "theirs_ms": 184.1406707763672
+    }
+  ],
+  "seq_lens": [
+    8192,
+    16384,
+    65536
+  ]
+}
