@@ -20,6 +20,8 @@ could run at all.
 | headline: 3.82x FlashMoBA / 4.96x SDPA fwd at 65K, 4.23x / 7.21x at 131K | `data/moba-fwd.csv` |
 | backward 2.57x / 3.08x | `data/moba-bwd.csv` |
 | gap narrowed vs A100 (4.62x): bytes stayed 4.30x, efficiency 1.95x -> 1.64x | `data/residual.json`, `logs/residual-cd.log` |
+| gate becomes the bottleneck (87% of our forward at 512K; attention-only 21.5x) | `data/residual-a-long.json`, `logs/residual-a-long.log` |
+| headline extended to 262144/524288 (separate run) | `data/moba-fwd-long.csv`, `data/moba-bwd-long.csv` |
 | their window policy 1.57x off at S=8192, still correct at 65536 | `logs/residual-cd.log` |
 | **int32 overflow in the partials index**, found, fixed, re-verified | `logs/int32-overflow*.log` |
 | `tune_table` returned a backward config 1.29x worse than DEFAULT | `logs/tune-table.log`, `logs/ab-backward-config.log` |

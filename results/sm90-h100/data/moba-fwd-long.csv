@@ -1,0 +1,4 @@
+seq_len,fa2_minimal (latency (ms)),flash_moba (latency (ms)),moonshot_naive (latency (ms)),naive_torch (latency (ms)),ours (latency (ms)),sdpa_dense (latency (ms))
+131072.000000,32.382561,16.673120,,,3.934352,28.174944
+262144.000000,136.355362,47.575281,,,11.609136,125.695618
+524288.000000,602.311401,146.872253,,,38.163824,494.863708

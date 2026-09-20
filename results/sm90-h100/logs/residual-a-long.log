@@ -1,0 +1,22 @@
+NVIDIA H100 80GB HBM3, 132 SMs
+sequence lengths: [131072, 262144, 524288]
+clocks: not pinned; the thermal protocol carries it
+
+==============================================================================
+PANEL A -- gate against attention  (B=1 H=4 D=64 block=128 top_k=8)
+==============================================================================
+      S          gate    attend     whole  gate share
+ 131072   ours     2.841     1.057     3.932      72.2%
+ 131072 theirs     4.402    12.360    16.596      26.5%
+                             whole pipeline: theirs / ours = 4.22x
+                             attention only: theirs / ours = 11.70x
+ 262144   ours     9.485     2.268    11.828      80.2%
+ 262144 theirs    12.518    34.938    47.195      26.5%
+                             whole pipeline: theirs / ours = 3.99x
+                             attention only: theirs / ours = 15.40x
+ 524288   ours    33.095     4.976    38.061      87.0%
+ 524288 theirs    38.947   106.856   146.120      26.7%
+                             whole pipeline: theirs / ours = 3.84x
+                             attention only: theirs / ours = 21.47x
+
+wrote results/sm90-h100/data/residual-a-long.json

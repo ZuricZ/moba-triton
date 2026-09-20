@@ -19,8 +19,16 @@ physically too small to reach.
 |---|---:|---:|---:|---:|---:|---:|
 | fwd | 65,536 | 1.492 ms | 5.694 | 7.405 | 3.82x | 4.96x |
 | fwd | 131,072 | 3.942 | 16.691 | 28.435 | 4.23x | 7.21x |
+| fwd | 262,144 | 11.609 | 47.575 | 125.696 | 4.10x | 10.83x |
+| fwd | 524,288 | 38.164 | 146.872 | 494.864 | 3.85x | 12.97x |
 | bwd | 65,536 | 2.658 | 6.822 | 26.544 | 2.57x | 9.99x |
 | bwd | 131,072 | 6.181 | 19.022 | 103.933 | 3.08x | 16.82x |
+| bwd | 262,144 | 16.076 | 51.554 | 420.268 | 3.21x | 26.14x |
+| bwd | 524,288 | 47.046 | 156.465 | 1695.690 | 3.33x | 36.04x |
+
+The long rows are a separate run (`data/moba-fwd-long.csv`). The forward ratio
+against FlashMoBA *peaks* at 131K and declines after; the ratio against dense
+attention keeps climbing to 13x / 36x. The two directions are explained below.
 
 `131072` is new ground — the 40 GB A100 could not reach it, and the ratio
 *grows* with length (3.82x -> 4.23x against FlashMoBA), which is what the
@@ -131,6 +139,39 @@ Their policy is up to 1.57x off at short lengths on Hopper, but it is still the
 best window at 65K — the length the headline lives at. The elimination survives
 where the claim matters and the general statement does not. The §3 text now
 carries this caveat.
+
+## The gate becomes the bottleneck, and the advantage splits
+
+The headline's two directions -- falling against FlashMoBA, climbing against
+dense -- have one cause, and panel A at long context (`data/residual-a-long.json`)
+measures it directly:
+
+| S | our gate | our attention | gate share | attention-only vs theirs |
+|---:|---:|---:|---:|---:|
+| 131,072 | 2.841 ms | 1.057 ms | 72.2% | 11.70x |
+| 262,144 | 9.485 ms | 2.268 ms | 80.2% | 15.40x |
+| 524,288 | 33.095 ms | 4.976 ms | **87.0%** | **21.47x** |
+
+Two facts, and they pull in opposite directions:
+
+* **Our attention beats theirs by 21.5x at 512K and is still climbing.** The
+  traffic argument in `why-we-beat-flashmoba.md` is right -- on the stage this
+  project owns, the advantage grows with length, exactly as predicted.
+* **The gate is 87% of our forward at 512K**, while it is only 27% of theirs
+  (their attention is so much slower that the gate hides under it). The gate is
+  block selection, O(S x num_blocks), quadratic in S -- the same scaling as the
+  dense attention this project exists to avoid.
+
+So the whole-pipeline ratio falls not because the attention advantage is
+shrinking, but because the *gate* has become the battlefield and it is a stage
+neither implementation optimised. At 512K ours is 33.1 ms of gate against their
+38.9 ms -- a 1.18x lead -- sitting on top of a 21.5x attention lead.
+
+**This reframes the remaining work.** Attention is effectively solved; the
+bottleneck is the gate, and its cost is quadratic, so it only worsens with
+length. The next lever is making block selection cheaper or sub-quadratic
+(hierarchical selection, a fused gate, or moving it off the critical path),
+which is the D11 / Task 6 line already flagged in `CLAUDE.md`.
 
 ## What this run could not settle
 
