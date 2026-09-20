@@ -41,6 +41,7 @@ RUN IT
 """
 
 import argparse
+import functools
 import json
 import os
 
@@ -51,7 +52,9 @@ try:                                    # `do_bench` moved between versions
 except ImportError:                                  # pragma: no cover
     from triton.testing import do_bench_cudagraph as do_bench
 
-from bench.roofline import traffic_flash_moba, traffic_ours
+from bench import paths
+from bench.roofline import (measure_peak_bandwidth, traffic_flash_moba,
+                            traffic_ours)
 from bench.suite import (cool_down_device, lock_clocks,
                         unlock_clocks, warm_up_device)
 from bench.tile_census import decide_lg_block_m
@@ -66,7 +69,6 @@ from moba.kernels.routing import build_csc_fused
 
 BLOCK_SIZE, TOP_K = 128, 8
 DTYPE = torch.bfloat16
-from bench import paths
 
 # The shape every other result in this repository uses, so panel A's numbers
 # sit beside them without a translation note.
@@ -80,8 +82,26 @@ PARALLELISM = (
     (4, 32, 128, "same, batch 4"),
 )
 
-# A100-PCIE-40GB, measured rather than datasheet (`docs/a100-results.md`).
-A100_BANDWIDTH_GIBS = 1239.0
+# The roof panel C reports against. This used to be the literal 1239.0
+# measured once on an A100-PCIE-40GB, which made every "% of roof" figure
+# silently wrong on any other card -- and the next card is an H100, whose
+# datasheet bandwidth is 2.2x higher. Measured per run instead: it costs
+# about a second, it is the same copy-based measurement the roofline uses,
+# and it is an *achieved* roof rather than a datasheet one, which is what
+# a percentage should be taken against. The value goes into the output
+# JSON so a figure redrawn later can be checked against the roof it was
+# computed with.
+@functools.lru_cache(maxsize=1)
+def bandwidth_roof_gibs() -> float:
+    """Returns this card's achieved HBM bandwidth in GiB/s.
+
+    Cached because panel C calls it once per row while the measurement is
+    a property of the card, not of the row.
+
+    Returns:
+        Achieved GiB/s from a large device-to-device copy.
+    """
+    return measure_peak_bandwidth() / (1 << 30)
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +354,9 @@ def panel_c(rows_a) -> list[dict]:
     """Achieved bandwidth against the measured roof, from panel A's timings.
 
     Decides between the two per-SM candidates without a profiler. If either
-    implementation sits near 1239 GiB/s then traffic -- the fp32 `o_tmp` round
-    trip being 37% of their modelled bytes -- is binding and occupancy is not.
+    implementation sits near the measured roof then traffic -- the fp32
+    `o_tmp` round trip being 37% of their modelled bytes -- is binding and
+    occupancy is not.
     If both sit far below it, traffic cannot be the constraint and latency is.
 
     The traffic is modelled, not measured (`docs/traffic-derivation.md`), so
@@ -351,8 +372,10 @@ def panel_c(rows_a) -> list[dict]:
     b, h, d = SWEEP_SHAPE
     cfg = MoBAConfig(block_size=BLOCK_SIZE, top_k=TOP_K, dtype=DTYPE)
     out = []
+    roof = bandwidth_roof_gibs()
     print(f"\n{'=' * 78}\nPANEL C -- modelled bytes over measured time"
           f"\n{'=' * 78}")
+    print(f"roof: {roof:.0f} GiB/s, measured by copy on this card")
     print(f"{'S':>7} {'':>6} {'modelled MiB':>13} {'attend ms':>10} "
           f"{'GiB/s':>9} {'% of roof':>10}")
 
@@ -368,9 +391,10 @@ def panel_c(rows_a) -> list[dict]:
             gibs = total / (ms * 1e-3) / (1 << 30)
             print(f"{seq_len:>7} {name:>6} {total / (1 << 20):>13.1f} "
                   f"{ms:>10.3f} {gibs:>9.1f} "
-                  f"{gibs / A100_BANDWIDTH_GIBS:>9.1%}")
+                  f"{gibs / roof:>9.1%}")
             out.append({"seq_len": seq_len, "impl": name, "bytes": total,
-                        "attend_ms": ms, "gibs": gibs})
+                        "attend_ms": ms, "gibs": gibs,
+                        "roof_gibs": roof})
     return out
 
 

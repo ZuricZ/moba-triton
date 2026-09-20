@@ -86,12 +86,28 @@ SPEC = {
     "sm_80": {"tflops_bf16": 312.0, "bandwidth_gbs": 1555.0},
 }
 
+# sm_90 is deliberately absent. Unlike Ampere, the architecture does not
+# determine the board: an H100 SXM is 989 TFLOP/s over 3352 GB/s and an
+# H100 PCIe is 756 over 2039, a 1.6x spread on the roof. Keying sm_90 to
+# either would silently mis-audit the other, so Hopper resolves by name
+# below and prints no audit when the name is unrecognised.
+
 # The same figures reachable by device name, for `--from-log`: a log replotted
 # on another machine must take its datasheet from the card that produced it,
 # not from whatever is plugged into the machine doing the drawing.
 SPEC_BY_NAME = {
+    # Longest keys first: matching is by substring and the first hit
+    # wins, so "H100 PCIe" must be tested before any bare "H100".
+    "H100 PCIe": {"tflops_bf16": 756.5, "bandwidth_gbs": 2039.0},
+    "H100 80GB HBM3": {"tflops_bf16": 989.4, "bandwidth_gbs": 3352.0},
+    "H100 SXM": {"tflops_bf16": 989.4, "bandwidth_gbs": 3352.0},
     "A100": SPEC["sm_80"],
 }
+
+# Dense bf16 tensor-core rates, halved from NVIDIA's asterisked figures
+# the way the A100 entry is -- their headline doubles for 2:4 structured
+# sparsity, which nothing here uses. H100 NVL is absent on purpose: it is
+# a dual-GPU board and its quoted rate is for the pair.
 
 
 def device_spec(device=None, name: str | None = None) -> dict:
@@ -108,11 +124,17 @@ def device_spec(device=None, name: str | None = None) -> dict:
         architecture's datasheet is not recorded. Missing beats guessed: an
         absent entry prints no audit rather than a wrong one.
     """
+    live = name is None and torch.cuda.is_available()
+    if live:
+        # The board, not just the architecture. Hopper needs this: one
+        # sm_90 tag covers cards whose roofs differ by 1.6x.
+        name = torch.cuda.get_device_name(device)
     if name:
         for key, spec in SPEC_BY_NAME.items():
             if key in name:
                 return spec
-        return {}
+        if not live:
+            return {}
     if not torch.cuda.is_available():
         return {}
     major, minor = torch.cuda.get_device_capability(device)
@@ -304,12 +326,14 @@ FLASH_MOBA_CHUNK_ROWS = 64
 
 
 def flash_moba_window(seq_len: int, cfg) -> int:
-    """Reproduces FlashMoBA's `decide_lg_block_m` policy on sm_80.
+    """Reproduces FlashMoBA's `decide_lg_block_m` policy, uncapped.
 
     Their density is attended keys over causally available keys, which is
     `top_k * block_size / (S / 2)` up to the early-query clamp
     (`flash_moba_interface.py:20-48`). The sm_86/sm_89 cap to 512 is not
-    applied: the roofline is for an A100, which is sm_80.
+    applied, which is correct for every card this roofline is drawn for:
+    the cap is theirs for sm_86/sm_89 only, and sm_80 and sm_90 take the
+    uncapped branch. Drawing a roofline on a laptop would need the cap.
 
     Args:
         seq_len: Sequence length.

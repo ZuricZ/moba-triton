@@ -185,3 +185,27 @@ magnitude larger.
 **Revisit when:** a target shape's `B * S * H * top_k * D * itemsize` exceeds
 about half the card's memory, or a benchmark sweep goes past S=262144 at
 H=16, D=128.
+
+**Amended 2026-09-20 — the wall is closer than this entry says.** "Nothing we
+can rent runs 1M at that shape" is true and was the wrong thing to measure.
+The trigger is the product, not the sequence length, and it is reached by
+raising heads and head_dim at a sequence length we already benchmark:
+
+| shape | `part_acc` | share of a 40 GB card |
+|---|---:|---:|
+| `[1, 65536, 4, 64]`, top_k 8 | 268 MB | 0.7% |
+| `[4, 65536, 32, 128]`, top_k 8 | **16.0 GiB** | **43%** |
+| `[2, 1048576, 16, 128]`, top_k 8 | 64 GiB | does not fit |
+
+The middle row is not hypothetical. It is the "same, batch 4" entry in
+`bench/residual.py`'s `SHAPES` and one of the rows in the fairness table, so
+it has already run on the rented A100 — where `ours` held 2.67x-2.91x. The
+scratch buffer was 43% of the card while it did. On an 80 GB H100 the same
+shape at S=131072 would want 32 GiB.
+
+So the "revisit when" condition is not a distant 1M-token scenario. It is
+within a factor of about 1.2 of a configuration in the benchmark suite today,
+and any of batch, heads, head_dim or `top_k` doubling crosses it. The fix is
+unchanged and still does not touch the kernel -- chunk the queries host-side
+and reuse the buffer -- but it should be costed before a sweep raises one of
+those four, not after an out-of-memory error names the shape for us.
