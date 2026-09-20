@@ -1,0 +1,118 @@
+
+##### 17:29:15  1  occupancy on sm_80 -- the doc is laptop-only and the residual cites it
+
+occupancy tier: ours at S=16384
+USDT:2026-09-20 17:29:18 3740:3740 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-20 17:29:18 3740:3740 SyncActivityProfilerHandler.cpp:59] profiler_stop
+
+  NVIDIA A100-PCIE-40GB: 64 warps per SM is 100% occupancy
+
+  kernel                                  %time  regs    smem  blk/SM  warps    occ  limited by
+  ------------------------------------------------------------------------------------------------
+  moba_fwd_kernel                         42.4%   230   49920       2      8    12%  SMEM   REGS=2 WARPS=16 BLOCKS=32
+  scatter_pairs_kernel                    16.2%    26       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  count_columns_kernel                    15.1%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  gate_kernel                             14.3%    64   12544       8     32    50%  REGS   REGS=8 SMEM=12 WARPS=16 BLOCKS=32
+  moba_combine_kernel                      7.2%    40       0      12     48    75%  REGS   REGS=12 SMEM=164 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      2.3%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  pool_blocks_kernel                       1.7%    32    1024      16     64   100%  WARPS|REGS REGS=16 SMEM=82 WARPS=16 BLOCKS=32
+  offsets_and_order_kernel                 0.5%    31     512      16     64   100%  WARPS|REGS REGS=16 SMEM=109 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      0.4%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  ------------------------------------------------------------------------------------------------
+  blk/SM is the smallest positive block limit over registers, shared memory, warps
+  and blocks; warps and occ follow from it. CUPTI reports blockLimitSharedMem=0 for
+  any kernel opting in past the 48 KiB static limit -- it does not model the opt-in
+  Triton performs -- so zeros are ignored rather than believed. Its own achieved
+  estimate goes to 0 for the same reason, which is why it is not the headline here.
+  Times are indicative only: tracing adds overhead, so read the ranking.
+
+##### 17:29:19  2  gather cost -- the named next hypothesis in the occupancy doc
+
+| head_dim | row bytes | working set | contiguous | identity | permuted | index cost | **scatter cost** |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 64 | 2 MB | 12.6 us | 10.9 us | 9.8 us | 0.87x | **0.78x** |
+| 64 | 128 | 4 MB | 10.9 us | 11.5 us | 11.6 us | 1.06x | **1.06x** |
+| 128 | 256 | 8 MB | 15.3 us | 16.1 us | 16.3 us | 1.05x | **1.06x** |
+
+##### 17:29:23  3  varlen sweep on A100 (docs are laptop-only)
+
+cfg: block_size=128 top_k=8 H_q=8 H_kv=2 head_dim=64 bf16  max_seqlen=2048
+times in ms, median of 100. 'waste' is 1 - mean(len)/max(len).
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+    kind   B  waste |  tok pad   tok pk  acc pad   acc pk |   grid live pad  live pk  pair pd  pair pk |  moba pad  moba pk    gain |  dense pk vs dense
+W0920 17:29:28.938000 3799 .venv/lib/python3.13/site-packages/torch/fx/_symbolic_trace.py:56] is_fx_tracing will return true for both fx.symbolic_trace and torch.export. Please use is_fx_tracing_symbolic_tracing() for specifically fx.symbolic_trace or torch.compiler.is_compiling() for specifically torch.export/compile.
+ uniform   4    0% |     8192     8192    64.0M    64.0M |    128      128      128    52.4M    52.4M |     0.760    0.719  1.057x |     2.502   3.480x
+   mixed   4   38% |     8192     5120    64.0M    40.0M |    128      128       80    52.4M    28.6M |     0.575    0.378  1.523x |     2.475   6.550x
+  skewed   4   66% |     8192     2816    64.0M    22.0M |    128      128       44    52.4M    14.3M |     0.462    0.347  1.330x |     2.478   7.139x
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+    kind   B  waste |  tok pad   tok pk  acc pad   acc pk |   grid live pad  live pk  pair pd  pair pk |  moba pad  moba pk    gain |  dense pk vs dense
+ uniform   8    0% |    16384    16384   128.0M   128.0M |    256      256      256   104.9M   104.9M |     0.567    0.575  0.986x |     2.463   4.280x
+   mixed   8   48% |    16384     8576   128.0M    67.0M |    256      256      134   104.9M    45.5M |     0.567    0.480  1.181x |     2.474   5.152x
+  skewed   8   77% |    16384     3840   128.0M    30.0M |    256      256       60   104.9M    15.9M |     0.566    0.428  1.323x |     2.474   5.780x
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+    kind   B  waste |  tok pad   tok pk  acc pad   acc pk |   grid live pad  live pk  pair pd  pair pk |  moba pad  moba pk    gain |  dense pk vs dense
+ uniform  16    0% |    32768    32768   256.0M   256.0M |    512      512      512   209.7M   209.7M |     0.983    1.002  0.981x |     2.480   2.474x
+   mixed  16   35% |    32768    21376   256.0M   167.0M |    512      512      334   209.7M   120.1M |     0.982    0.652  1.505x |     2.478   3.799x
+  skewed  16   82% |    32768     5888   256.0M    46.0M |    512      512       92   209.7M    19.0M |     0.979    0.457  2.143x |     2.477   5.424x
+
+
+##### 17:29:33  4  GQA sweep on A100 (docs are laptop-only)
+
+cfg: block_size=128 top_k=8 H_q=8 head_dim=64 bf16   (times in ms, median of 200)
+
+--- seq_len 2048 ------------------------------------------------------------------
+ H_kv  group |     attn  attn exp    gain |      fwd   fwd exp    gain |  K/V MB     F/B
+    8      1 |    0.191     0.112  0.583x |    0.122     0.124  1.017x |    4.00    98.5
+    4      2 |    0.167     0.112  0.669x |    0.178     0.123  0.690x |    2.00   104.9
+    2      4 |    0.311     0.111  0.355x |    0.323     0.123  0.381x |    1.00   108.5
+    1      8 |    0.599     0.112  0.186x |    0.609     0.124  0.203x |    0.50   110.3
+
+--- seq_len 4096 ------------------------------------------------------------------
+ H_kv  group |     attn  attn exp    gain |      fwd   fwd exp    gain |  K/V MB     F/B
+    8      1 |    0.156     0.157  1.007x |    0.188     0.190  1.011x |    8.00   106.5
+    4      2 |    0.242     0.157  0.648x |    0.274     0.189  0.688x |    4.00   113.1
+    2      4 |    0.437     0.156  0.356x |    0.470     0.188  0.401x |    2.00   116.7
+    1      8 |    0.821     0.154  0.187x |    0.855     0.185  0.217x |    1.00   118.6
+
+--- seq_len 8192 ------------------------------------------------------------------
+ H_kv  group |     attn  attn exp    gain |      fwd   fwd exp    gain |  K/V MB     F/B
+    8      1 |    0.259     0.260  1.004x |    0.332     0.331  0.997x |   16.00   110.2
+    4      2 |    0.371     0.258  0.696x |    0.438     0.331  0.755x |    8.00   116.9
+    2      4 |    0.598     0.254  0.425x |    0.666     0.325  0.488x |    4.00   120.5
+    1      8 |    1.121     0.263  0.235x |    1.191     0.336  0.282x |    2.00   122.4
+
+
+##### 17:30:00  5  load balance on A100
+
+Work unit = one tile of `choose_group` queries. 216 concurrent slots.
+Columns are makespan / ideal. 1.00x = perfect balance.
+
+| config | programs | jobs/proc | skew | ascending | **random** | **descending** | chunked |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| S=4096 blk=32 k=4 | 1024 | 4.7 | 3.3x | 1.41x | **1.41x** | **1.13x** | 1.13x |
+| S=4096 blk=32 k=8 | 1024 | 4.7 | 3.3x | 1.39x | **1.48x** | **1.04x** | 1.04x |
+| S=4096 blk=64 k=8 | 512 | 2.4 | 3.0x | 1.88x | **1.78x** | **1.28x** | 1.09x |
+| S=4096 blk=128 k=8 | 256 | 1.2 | 2.5x | 2.43x | **2.21x** | **2.10x** | 1.11x |
+| S=4096 blk=128 k=12 | 256 | 1.2 | 2.3x | 2.18x | **2.10x** | **1.94x** | 1.05x |
+| S=1024 blk=32 k=4 | 256 | 1.2 | 2.0x | 2.30x | **2.30x** | **1.72x** | 1.15x |
+
+##### 17:30:03  6  tile ceiling on A100
+
+NVIDIA A100-PCIE-40GB: 108 SMs, 432 programs (4 waves)
+tile 64x128x64, 512 iterations per program
+
+  variant                ms    TFLOP/s
+  ------------------------------------
+  dots                2.393     193.87
+  dots+softmax        2.748     168.77
+
+  the softmax costs 1.15x at this tile shape
+  Use `dots+softmax` as the roofline's flat roof: it is the rate an
+  attention kernel can actually reach, where the 4096^3 GEMM figure
+  is a rate nothing in this pipeline could approach.
+
+##### 17:30:11  LAST DONE
+

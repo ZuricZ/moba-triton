@@ -216,7 +216,10 @@ def main() -> None:
                              "than a runtime failure")
     parser.add_argument("--tag", default="",
                         help="suffix for the output filenames, so a focused "
-                             "run does not overwrite the full sweep's CSVs")
+                             "run does not overwrite the full sweep's CSVs. "
+                             "Pass it joined by '=' -- `--tag=-65k` -- since a "
+                             "value starting with '-' otherwise reads as "
+                             "another flag.")
     parser.add_argument("--backends", default=None,
                         help="comma-separated backend names to measure, "
                              "leaving every other one out. The long-context "

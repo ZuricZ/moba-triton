@@ -1,0 +1,37 @@
+occupancy tier: flash_moba at S=65536
+USDT:2026-09-20 17:31:45 4160:4160 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-20 17:31:45 4160:4160 SyncActivityProfilerHandler.cpp:59] profiler_stop
+
+  NVIDIA A100-PCIE-40GB: 64 warps per SM is 100% occupancy
+
+  kernel                                  %time  regs    smem  blk/SM  warps    occ  limited by
+  ------------------------------------------------------------------------------------------------
+  bfloat16_t> >, false, true, false, fal  77.1%   241   86016       2      8    12%  SMEM   REGS=2 WARPS=16 BLOCKS=32
+  bfloat16_t> >, true, false, true>       16.3%   132   57344       3     12    19%  SMEM   REGS=3 WARPS=16 BLOCKS=32
+  bfloat16_t> >, false, false>             2.3%    26    8192      16     64   100%  WARPS|REGS REGS=16 SMEM=18 WARPS=16 BLOCKS=32
+  NullType, long const*, long const*, in   2.2%   163   33856       1      8    12%  REGS   REGS=1 SMEM=4 WARPS=8 BLOCKS=32
+  bfloat16_t> > >                          0.7%    22       0      16     64   100%  WARPS  REGS=21 SMEM=164 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      0.5%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  mean_pool_kernel                         0.3%    34     512      12     48    75%  REGS   REGS=12 SMEM=109 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      0.2%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  NullType, long const*, long const*, in   0.1%    27    9472       8     64   100%  WARPS|REGS REGS=8 SMEM=16 WARPS=8 BLOCKS=32
+  SmallSegmentsSelectorT, int>             0.1%    74   11264       3     24    38%  REGS   REGS=3 SMEM=13 WARPS=8 BLOCKS=32
+  StoreWithCast<1> >                       0.0%    40       0      12     48    75%  REGS   REGS=12 SMEM=164 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      0.0%    22       0      16     64   100%  WARPS  REGS=21 SMEM=164 WARPS=16 BLOCKS=32
+  array<char*, 2ul> >                      0.0%    31       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  array<char*, 1ul> >                      0.0%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  NullType, int, long>                     0.0%    46    7184      10     40    62%  REGS   REGS=10 SMEM=20 WARPS=16 BLOCKS=32
+  direct_copy_kernel_cuda                  0.0%    32       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  div_floor_kernel_cuda                    0.0%    30       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  StoreWithoutCast>                        0.0%    26       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  direct_copy_kernel_cuda                  0.0%    32       0      16     64   100%  WARPS|REGS REGS=16 SMEM=164 WARPS=16 BLOCKS=32
+  void                                     0.0%    16       0      32     64   100%  WARPS|BLOCKS REGS=64 SMEM=164 WARPS=32 BLOCKS=32
+  ScanTileState<long, true> >              0.0%    16       0      16     64   100%  WARPS  REGS=32 SMEM=164 WARPS=16 BLOCKS=32
+  ScanTileState<unsigned long, true>, un   0.0%    16       0       8     64   100%  WARPS  REGS=16 SMEM=164 WARPS=8 BLOCKS=32
+  ------------------------------------------------------------------------------------------------
+  blk/SM is the smallest positive block limit over registers, shared memory, warps
+  and blocks; warps and occ follow from it. CUPTI reports blockLimitSharedMem=0 for
+  any kernel opting in past the 48 KiB static limit -- it does not model the opt-in
+  Triton performs -- so zeros are ignored rather than believed. Its own achieved
+  estimate goes to 0 for the same reason, which is why it is not the headline here.
+  Times are indicative only: tracing adds overhead, so read the ranking.
