@@ -40,7 +40,7 @@ Pass 0 is inflated for all three. `ours` shows a smaller spread only because
 it never ran first, so it never paid the ramp.
 
 **Effect: the denominator was ~1.57x too large at S=4096, turning a true 0.96x
-into a reported 1.53x.** `docs/baseline-results.md` and `results/kernel_v1.csv`
+into a reported 1.53x.** `docs/baseline-results.md` and `results/sm86-3050ti/data/kernel_v1.csv`
 carry this bias and should be read as optimistic until re-run.
 
 `do_bench(warmup=25)` does not prevent it. That warms the *callable* --

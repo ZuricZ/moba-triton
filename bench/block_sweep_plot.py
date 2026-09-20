@@ -33,7 +33,7 @@ import argparse
 import csv
 import os
 
-from bench import plots
+from bench import paths, plots
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -87,7 +87,8 @@ def read_panel(path: str, backend: str, seq_len: int | None
 # ---------------------------------------------------------------------------
 
 
-def draw(tag: str, seq_len: int | None, out: str) -> str:
+def draw(tag: str, seq_len: int | None, out: str,
+         card: str | None = None) -> str:
     """Renders both panels into one figure.
 
     Args:
@@ -106,7 +107,8 @@ def draw(tag: str, seq_len: int | None, out: str) -> str:
     drawn, used_seq = False, 0
 
     for panel, label, dash in PANELS:
-        path = f"results/block-sweep-{panel}{tag}.csv"
+        path = os.path.join(paths.card_dir(card, "data"),
+                            f"block-sweep-{panel}{tag}.csv")
         if not os.path.exists(path):
             print(f"  missing, skipping: {path}")
             continue
@@ -136,7 +138,11 @@ def draw(tag: str, seq_len: int | None, out: str) -> str:
                     label=f"{REFERENCE}, same rows")
 
     if not drawn:
-        raise SystemExit("no panel CSVs found; run bench.block_sweep first")
+        raise SystemExit(
+            "no panel CSVs found in "
+            f"{paths.card_dir(card, 'data')}. Cards with data on disk: "
+            f"{', '.join(paths.known_cards()) or 'none'}. Run "
+            "`bench.block_sweep`, or pass --card.")
 
     ax.set_yscale("log")
     # `titles` owns the axis labels -- it sets both unconditionally, so
@@ -166,10 +172,13 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=None,
                         help="which length to draw; default the longest")
     parser.add_argument("--out", default=None)
+    paths.add_card_argument(parser)
     args = parser.parse_args()
 
-    out = args.out or f"results/block-sweep{args.tag or ''}.png"
-    print(draw(args.tag, args.seq_len, out))
+    out = args.out or os.path.join(
+        paths.card_dir(args.card, "figures", create=True),
+        f"block-sweep{args.tag or ''}.png")
+    print(draw(args.tag, args.seq_len, out, args.card))
 
 
 if __name__ == "__main__":

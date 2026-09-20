@@ -40,7 +40,7 @@ import torch
 import triton
 import triton.testing
 
-from bench import plots, sweep_plot
+from bench import paths, plots, sweep_plot
 from bench.suite import (
     cool_down_device,
     default_seq_lens,
@@ -427,8 +427,11 @@ if __name__ == "__main__":
     print(f"sequence lengths: {SEQ_LENS}")
     print(f"providers: {', '.join(PROVIDERS)}\n")
     try:
-        Path("results").mkdir(exist_ok=True)
-        benchmark.run(print_data=True, save_path="results")
+        # `save_path` makes perf_report write a fixed set of names --
+        # moba-fwd.csv and friends -- so it must be per card, or a
+        # second card overwrites the first in place. See bench/paths.py.
+        save_path = paths.card_dir(kind="data", create=True)
+        benchmark.run(print_data=True, save_path=save_path)
         # save_path makes perf_report write a CSV *and* a plot. The CSV is
         # what we want; the plot it draws is matplotlib's defaults with a
         # legend over the data, so redraw it. See bench/sweep_plot.py.

@@ -6,8 +6,8 @@ driver 595.58.03, CUDA 12.6.77
 **Config:** `block_size=128, top_k=8` (FlashMoBA's published gate), bf16,
 `[1, S, 4, 64]`
 **Source:** `bench/compare.py`, run twice against two flash-attn builds.
-Raw logs in `results/a100-twopass.log` and `results/a100-pass2.log`; per-pass
-CSVs in `results/fa283-*.csv` and `results/fa263-*.csv`.
+Raw logs in `results/sm80-a100/logs/twopass.log` and `results/sm80-a100/logs/pass2.log`; per-pass
+CSVs in `results/sm80-a100/data/fa283-*.csv` and `results/sm80-a100/data/fa263-*.csv`.
 
 Every previous number in this repo came from a 20-SM laptop with 4 GB and
 99 KiB of shared memory. Those measured a kernel entangled with one card. This
@@ -60,7 +60,7 @@ treat it as a lower bound.
 
 **Read the small-S rows with care.** Below S=8192 a large part of the measured
 step is harness rather than kernel -- 47% at S=1024, 21% at 2048, 11% at 4096,
-and gone by 8192 (`bench/_small_s_dip.py`, `results/a100-dip-overhead.log`).
+and gone by 8192 (`bench/_small_s_dip.py`, `results/sm80-a100/logs/dip-overhead.log`).
 That is why the backward column *falls* from S=1024 to S=4096 while the work
 doubles: a rising kernel cost outrun by a faster-falling harness cost. The
 figures shade that region. Every headline number above is quoted from S >=
@@ -204,7 +204,7 @@ the correction from their source. The summary:
 
   Identical occupancy. It is not a difference between these kernels, and the
   gap has to be explained without it. See `docs/why-we-beat-flashmoba.md`
-  section 3, and `results/a100-occ_fm.log`.
+  section 3, and `results/sm80-a100/logs/occ_fm.log`.
 * **The running output lives in HBM.** The gathered query set changes per
   block, so the accumulator cannot stay in registers. It is an fp32 scratch
   buffer (`flash_moba_api.cpp:505`, zeroed every call, 67 MB at this shape),
@@ -319,7 +319,7 @@ gap between them and us.
 
 ### The roofline says the same thing independently
 
-`results/roofline.png` was drawn with `flash_moba` and `moonshot_efficient` at
+`results/sm80-a100/figures/roofline.png` was drawn with `flash_moba` and `moonshot_efficient` at
 **186.2 FLOP/byte**, above the A100's measured ridge of 153.5, at **4% and 2%
 of roof**. That intensity was an artefact of the traffic model: the version of
 `bench/roofline.py::traffic_flash_moba` in use counted only gathered Q, K, V
@@ -336,7 +336,7 @@ the roofline agreeing with the stage split and with
 `docs/traffic-derivation.md` §9 rather than contradicting them.
 `moonshot_efficient` had been borrowing the same model; it now has none until
 one is derived from its source, so it is absent from the figure rather than
-misplaced. `results/roofline.png` was regenerated from `results/a100-roofline.log`
+misplaced. `results/sm80-a100/figures/roofline.png` was regenerated from `results/sm80-a100/logs/roofline.log`
 with `--from-log`, which now re-models traffic from the current code rather than
 trusting the intensity the log stored; the latencies on it are unchanged.
 

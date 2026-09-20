@@ -33,7 +33,7 @@ from bench import plots
 # Configuration
 # ---------------------------------------------------------------------------
 
-RESULTS = "results"
+from bench import paths
 
 # Below this sequence length the measured step is substantially harness rather
 # than kernel: bench/_small_s_dip put the gap between the autograd step and the
@@ -227,15 +227,17 @@ def draw(seq_lens, series, mode: str, path: str) -> str:
     return plots.save(fig, path)
 
 
-def main() -> None:
+def main(card: str | None = None) -> None:
     for mode in ("fwd", "bwd"):
-        source = os.path.join(RESULTS, f"moba-{mode}.csv")
+        source = os.path.join(paths.card_dir(card, "data"),
+                              f"moba-{mode}.csv")
         if not os.path.exists(source):
             print(f"  no {source}; run `python -m bench.compare` first")
             continue
         seq_lens, series = read(source)
         out = draw(seq_lens, series, mode,
-                   os.path.join(RESULTS, f"moba-{mode}.png"))
+                   os.path.join(paths.card_dir(card, "figures", True),
+                                f"moba-{mode}.png"))
         print(f"  wrote {out}  ({len(series)} backends)")
 
 

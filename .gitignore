@@ -55,32 +55,37 @@ REMOTE.md
 # --- Benchmark output ---
 #
 # Ignored by default: a results/ directory is per-machine, and a laptop run and
-# an A100 run write the same filenames. But the docs cite specific files as the
-# evidence behind published numbers, and evidence that is not in the repo is
-# not evidence -- a fresh clone was getting six broken references. So the
-# measurements and figures that docs/ points at are un-ignored individually.
+# a rented-box run must not overwrite each other. What earns a commit is a
+# measurement a document cites; the 350 KB compiler transcripts from building
+# flash-attn and bootstrapping the box do not. Those prove a build happened,
+# which no document claims.
 #
-# The line is drawn at *what a number came from*, not at *what a run produced*:
-# the sweep CSVs, the per-pass CSVs, the figures and the measurement logs stay;
-# the 350 KB compiler transcripts from building flash-attn and bootstrapping the
-# box do not. Those prove a build happened, which no document claims.
+# LAYOUT. `results/<card>/{data,figures,logs}/`, card first, because the card
+# is the axis a measurement cannot be read without. A path names its own
+# provenance, and two cards can hold files of the same name without colliding
+# -- which matters because `triton.testing` writes a fixed set of names.
 #
-# Two ordering rules make this work, and each one silently broke it once:
+# Three ordering rules make this work, and each one silently broke it once:
 #
-# 1. `results/*`, not `results/`. Git never descends into an excluded
-#    *directory*, so a negation under one can never match -- it is dead text.
-#    Excluding the contents lets git look inside and test each entry.
-# 2. This block sits at the end of the file. The last matching pattern wins,
+# 1. Exclude the *contents*, never the directory. Git does not descend into an
+#    excluded directory, so a negation under one is dead text. `!results/**/`
+#    re-includes every directory so the file negations below are reachable at
+#    all. Dropping that one line un-tracks the entire tree.
+# 2. `**` rather than `*`, because the files now sit three levels down. The
+#    previous block matched one level and would miss every one of them.
+# 3. This block sits at the end of the file. The last matching pattern wins,
 #    and `*.csv` / `*.png` under "Benchmark scratch" above would otherwise
 #    re-ignore every figure and measurement un-ignored here.
-results/*
-!results/*.csv
-!results/*.json
-!results/*.png
-!results/a100-device.txt
-!results/a100-sweep.log
-!results/a100-twopass.log
-!results/a100-pass2.log
-!results/a100-roofline.log
-!results/a100-dip-stages.log
-!results/a100-dip-overhead.log
+results/**
+!results/**/
+!results/**/*.csv
+!results/**/*.json
+!results/**/*.png
+!results/**/*.md
+!results/*/logs/*.log
+!results/*/logs/*.txt
+
+# Re-excluded after the negations above, deliberately: build transcripts, not
+# measurements. 692 KB between them and nothing cites either.
+results/*/logs/bootstrap.log
+results/*/logs/fa283-build.log

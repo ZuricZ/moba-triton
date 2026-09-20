@@ -3,8 +3,8 @@
 **Date:** 2026-09-20
 **Device:** A100-PCIE-40GB, sm_80 | bf16 | B=1, H=4, head_dim 64
 **Source:** `bench/block_sweep.py` (`uv run python -m bench.block_sweep`)
-**Data:** `results/block-sweep-budget.csv`, `results/block-sweep-fixed-top-k.csv`
-**Confirmation run:** `results/block-sweep-*-3050ti.csv`, same shape on 20 SMs
+**Data:** `results/sm80-a100/data/block-sweep-budget.csv`, `results/sm80-a100/data/block-sweep-fixed-top-k.csv`
+**Confirmation run:** `results/sm86-3050ti/data/block-sweep-*.csv`, same shape on 20 SMs
 
 ## What this asked, and what it answered instead
 
@@ -162,7 +162,7 @@ O(log^2 N) stages: 0.31 MB at 2048, and 37x faster at 1024 besides.
 16384 / 16 = 1024 columns, one step below the ceiling, and the sweep's own
 floor of `block_size = 16` means it cannot reach 2048 without a longer
 sequence. The crash was in the separate S=65536 run
-(`results/a100-65k.log`), where `block_size=32` gives 2048 columns.
+(`results/sm80-a100/logs/65k.log`), where `block_size=32` gives 2048 columns.
 
 The fix does change these numbers slightly -- the retired sort was 2-6% of each
 row, most at `block_size=128` where the row is shortest and least at

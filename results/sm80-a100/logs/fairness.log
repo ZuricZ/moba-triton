@@ -1,0 +1,63 @@
++ ./scripts/bootstrap_remote.sh --use-fa=2.6.3
+
+[1m== flash-attn 2.6.3[0m
+flash_attn -> /home/build/site-fa-2.6.3
++ ./.venv/bin/python -u -m bench._a100_fairness
+pass: flash-attn 2.6.3 on NVIDIA A100-PCIE-40GB
+
+/home/moba-triton/references/MoBA/moba/moba_efficient.py:133: UserWarning: index_reduce() is in beta and the API may change at any time. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/cuda/Indexing.cu:1478.)
+  max_lse_1d = max_lse_1d.index_reduce(
+wrote results/fairness-fa2.6.3.json
+
+==============================================================================
+MERGED over flash-attn 2.6.3
+==============================================================================
+
+Correctness -- max error against the PyTorch oracle
+  S=1024   ours 0.0037   flash_moba 0.0019   triton_moba -   moonshot_efficient 0.0019
+  S=4096   ours 0.0478   flash_moba 0.0478   triton_moba -   moonshot_efficient 0.0478
+
+Latency, and the ratio to ours
+  shape                         ours           flash_moba          triton_moba   moonshot_efficient
+  -------------------------------------------------------------------------------------------------
+  B1 S16384 H32 D128           6.235                2.91x                    -                7.22x
+  B1 S8192 H32 D128            3.016                2.70x                    -                4.84x
+  B1 S8192 H4 D64              0.398                2.68x                    -                6.39x
+  B4 S8192 H32 D128           11.186                2.67x                    -               12.58x
+
+Absent backends, and why -- one per pass that refused them:
+  fa2.6.3  B1 S16384 H32 D128       triton_moba          needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has 
++ ./scripts/bootstrap_remote.sh --use-fa=2.8.3
+
+[1m== flash-attn 2.8.3[0m
+flash_attn -> /home/build/site-fa-2.8.3
++ ./.venv/bin/python -u -m bench._a100_fairness
+pass: flash-attn 2.8.3 on NVIDIA A100-PCIE-40GB
+
+wrote results/fairness-fa2.8.3.json
+
+==============================================================================
+MERGED over flash-attn 2.6.3, 2.8.3
+==============================================================================
+
+Correctness -- max error against the PyTorch oracle
+  S=1024   ours 0.0037   flash_moba 0.0019   triton_moba 0.0019   moonshot_efficient 0.0019
+  S=4096   ours 0.0478   flash_moba 0.0478   triton_moba 0.0402   moonshot_efficient 0.0478
+
+Latency, and the ratio to ours
+  shape                         ours           flash_moba          triton_moba   moonshot_efficient
+  -------------------------------------------------------------------------------------------------
+  B1 S16384 H32 D128           6.235                2.91x                5.50x                7.22x
+  B1 S8192 H32 D128            3.016                2.70x                3.91x                4.84x
+  B1 S8192 H4 D64              0.398                2.68x                6.42x                6.39x
+  B4 S8192 H32 D128           11.186                2.67x                5.08x               12.58x
+
+Absent backends, and why -- one per pass that refused them:
+  fa2.6.3  B1 S16384 H32 D128       triton_moba          needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has 
+  fa2.8.3  B1 S16384 H32 D128       moonshot_efficient   needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by v
+
+Same backend, both passes -- run-to-run spread across a flash-attn switch:
+  flash_moba           0.5%
+  ours                 1.0%
++ echo FAIRNESS_DONE
+FAIRNESS_DONE

@@ -3,7 +3,7 @@
 **Date:** 2026-08-15
 **Device:** NVIDIA GeForce RTX 3050 Ti Laptop, sm_86, 4095 MiB, 20 SMs
 **Stack:** Python 3.13.15, torch 2.13.0+cu126, triton 3.7.1, bf16
-**Raw data:** `results/local_rtx3050ti.csv`
+**Raw data:** `results/sm86-3050ti/data/local_rtx3050ti.csv`
 **Reproduce:** see "Reproducing" at the bottom.
 
 This is the number the project exists to move. Everything measured here is a
@@ -100,7 +100,7 @@ from bench.suite import run_suite
 from bench.report import to_csv, to_markdown
 rows = run_suite(shapes=[(1,4,512,64),(1,8,1024,64)],
                  gates=[(16,2),(32,2),(64,2),(128,2)])
-to_csv(rows, \"results/local_rtx3050ti.csv\")
+to_csv(rows, \"results/sm86-3050ti/data/local_rtx3050ti.csv\")
 print(to_markdown(rows))
 "'
 ```
@@ -120,7 +120,7 @@ implementation we can measure is currently *slower* than dense.
 
 **Date:** 2026-08-22
 **Device:** RTX 3050 Ti Laptop, sm_86, 4095 MiB, 20 SMs, WSL2 on WDDM
-**Raw data:** `results/kernel_v1.csv`
+**Raw data:** `results/sm86-3050ti/data/kernel_v1.csv`
 **Config:** `block_size=128, top_k=8`, head_dim 128, bf16 — the configuration
 both reference implementations benchmark.
 

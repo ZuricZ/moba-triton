@@ -37,6 +37,7 @@ the limit of the design, to be reported rather than tuned around.
 
 import torch
 
+from bench import paths
 from bench.report import to_csv, to_markdown
 from bench.suite import BYTES_PER_MIB, default_seq_lens, run_suite
 
@@ -239,7 +240,7 @@ def main() -> None:
     seq_lens = ([int(s) for s in args.seq_lens.split(",")] if args.seq_lens
                 else default_seq_lens(longest=args.longest))
     shapes = [(BATCH, s, HEADS, HEAD_DIM) for s in seq_lens]
-    Path("results").mkdir(exist_ok=True)
+    out_dir = paths.card_dir(kind="data", create=True)
     print(f"sequence lengths: {seq_lens}")
 
     for name, build in PANELS:
@@ -249,7 +250,7 @@ def main() -> None:
                          memory_budget_mb=args.memory_budget,
                          only=(set(args.backends.split(","))
                                if args.backends else None))
-        to_csv(rows, f"results/block-sweep-{name}{args.tag}.csv")
+        to_csv(rows, f"{out_dir}/block-sweep-{name}{args.tag}.csv")
         print(to_markdown(rows))
         print(scratch_table(shapes, gates))
 

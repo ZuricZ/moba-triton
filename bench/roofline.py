@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 import torch
 import triton.testing
 
-from bench import plots
+from bench import paths, plots
 from bench.suite import (
     BYTES_PER_MIB,
     cool_down_device,
@@ -751,7 +751,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seq-lens", default="2048,4096,8192",
                         help="comma separated")
-    parser.add_argument("--out", default="results/roofline.png")
+    parser.add_argument("--out", default=None,
+                        help="default: this card's figures directory")
     parser.add_argument("--attainable-tflops", type=float, default=None,
                         help="the roof, from `python -m bench.tile_ceiling` "
                              "(its dots+softmax figure). Without it the GEMM "
@@ -800,8 +801,9 @@ def main() -> None:
         print_table(points, ceilings)
         print_breakdown(points, max(seq_lens))
         import os
-        os.makedirs("results", exist_ok=True)
-        print(f"\nwrote {plot(points, ceilings, args.out)}")
+        out = args.out or os.path.join(
+            paths.card_dir(kind="figures", create=True), "roofline.png")
+        print(f"\nwrote {plot(points, ceilings, out)}")
     finally:
         unlock_clocks()
 

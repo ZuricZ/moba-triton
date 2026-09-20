@@ -1,0 +1,33 @@
++ ./scripts/bootstrap_remote.sh --use-fa=2.6.3
+
+[1m== flash-attn 2.6.3[0m
+flash_attn -> /home/build/site-fa-2.6.3
++ ./.venv/bin/python -c 'import flash_attn; assert flash_attn.__version__.startswith(chr(50)+chr(46)+chr(54)); print(chr(70)+chr(65), flash_attn.__version__)'
+FA 2.6.3
++ ./.venv/bin/python -u -m bench._a100_fairness
+========================================================================
+1. CORRECTNESS -- does each sparse backend agree with the oracle?
+========================================================================
+/home/moba-triton/references/MoBA/moba/moba_efficient.py:133: UserWarning: index_reduce() is in beta and the API may change at any time. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/cuda/Indexing.cu:1478.)
+  max_lse_1d = max_lse_1d.index_reduce(
+  S=1024     ours 0.0037   flash_moba 0.0019   triton_moba FAILED RuntimeError   moonshot_efficient 0.0019
+  S=4096     ours 0.0478   flash_moba 0.0478   triton_moba FAILED RuntimeError   moonshot_efficient 0.0478
+  (relative to the PyTorch oracle; routing flips dominate, so equal
+   error means equally valid block choices, not identical output)
+
+========================================================================
+2. SHAPE -- does the gap survive a realistic model shape?
+========================================================================
+  shape                         ours           flash_moba          triton_moba   moonshot_efficient
+  ------------------------------------------------------------------------
+  (competitor columns are the ratio to ours, i.e. x slower)
+  sweep shape              triton_moba: RuntimeError
+  B1 S8192 H4 D64              0.398                2.62x                    -                6.28x  sweep shape
+  GPT-3 13B-ish            triton_moba: RuntimeError
+  B1 S8192 H32 D128            2.993                2.72x                    -                4.87x  GPT-3 13B-ish
+  same, batch 4            triton_moba: RuntimeError
+  B4 S8192 H32 D128           11.186                2.67x                    -               12.59x  same, batch 4
+  long, wide               triton_moba: RuntimeError
+  B1 S16384 H32 D128           6.235                2.92x                    -                7.19x  long, wide
++ echo PASS_B_DONE
+PASS_B_DONE

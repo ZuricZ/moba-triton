@@ -4,8 +4,8 @@
 **Device:** A100-PCIE-40GB, sm_80 | bf16 | B=1, H=4, head_dim 64 unless stated
 **Source:** `bench/residual.py`, `bench/tile_census.py`, `bench/profile.py`,
 `bench/compare.py`
-**Data:** `results/a100-residual.json`, `results/a100-final-batch.log`,
-`results/a100-occ_fm.log`, `results/moba-fwd.csv`
+**Data:** `results/sm80-a100/data/residual.json`, `results/sm80-a100/logs/final-batch.log`,
+`results/sm80-a100/logs/occ_fm.log`, `results/sm80-a100/data/moba-fwd.csv`
 **Presentable version:** https://claude.ai/artifact/4fZjJ8nEKS79Mk1D5XcAAz
 
 This is the argument the whole project rests on, with the three explanations
@@ -54,7 +54,7 @@ roughly 16 of them for a 64-row tile.
 
 `bench/tile_census.py` cross-checks against measured routing: at S=8192 it
 reports 247,808 pairs, matching the `nnz` column of
-`results/a100-dip-stages.log` exactly.
+`results/sm80-a100/logs/dip-stages.log` exactly.
 
 **So 2.26x is accounted for. Measured on the attention kernels alone the gap
 at 65K is 8.35x, leaving 3.7x -- and it grows with `S`, which rules out any

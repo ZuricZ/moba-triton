@@ -66,7 +66,7 @@ from moba.kernels.routing import build_csc_fused
 
 BLOCK_SIZE, TOP_K = 128, 8
 DTYPE = torch.bfloat16
-RESULTS = "results"
+from bench import paths
 
 # The shape every other result in this repository uses, so panel A's numbers
 # sit beside them without a translation note.
@@ -456,7 +456,8 @@ def main() -> None:
                         help="comma separated")
     parser.add_argument("--panel", default="abcd",
                         help="any of a, b, c, d; default all four")
-    parser.add_argument("--out", default=f"{RESULTS}/a100-residual.json")
+    parser.add_argument("--out", default=None,
+                        help="default: this card's data directory")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -498,8 +499,9 @@ def main() -> None:
         if locked:
             unlock_clocks()
 
-    os.makedirs(RESULTS, exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as handle:
+    out = args.out or os.path.join(
+        paths.card_dir(kind="data", create=True), "residual.json")
+    with open(out, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, sort_keys=True)
     print(f"\nwrote {args.out}")
 

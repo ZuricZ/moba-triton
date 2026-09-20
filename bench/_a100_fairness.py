@@ -60,7 +60,7 @@ SHAPES = (
     (1, 16384, 32, 128, "long, wide"),
 )
 
-RESULTS = "results"
+from bench import paths
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,8 @@ def load_passes() -> dict:
         {flash_attn_version: pass dict}.
     """
     passes = {}
-    for path in sorted(glob.glob(os.path.join(RESULTS, "fairness-fa*.json"))):
+    for path in sorted(glob.glob(os.path.join(
+            paths.card_dir(kind="data"), "fairness-fa*.json"))):
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
         passes[data["flash_attn"]] = data
@@ -325,8 +326,8 @@ def main() -> None:
             "correctness": measure_correctness(),
             "shapes": measure_shapes()}
 
-    os.makedirs(RESULTS, exist_ok=True)
-    path = os.path.join(RESULTS, f"fairness-fa{version}.json")
+    path = os.path.join(paths.card_dir(kind="data", create=True),
+                        f"fairness-fa{version}.json")
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, sort_keys=True)
     print(f"wrote {path}\n")

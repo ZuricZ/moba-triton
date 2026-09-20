@@ -1,0 +1,427 @@
+sequence lengths: [1024, 2048, 4096, 8192, 16384]
+
+========================================================================
+panel: budget   gates: [(128, 8), (64, 16), (32, 32), (16, 64)]
+========================================================================
+[1/20] S=1024 block=128 top_k=8
+[2/20] S=1024 block=64 top_k=16, ~6 min left
+[3/20] S=1024 block=32 top_k=32, ~5 min left
+[4/20] S=1024 block=16 top_k=64, ~5 min left
+[5/20] S=2048 block=128 top_k=8, ~4 min left
+[6/20] S=2048 block=64 top_k=16, ~4 min left
+[7/20] S=2048 block=32 top_k=32, ~4 min left
+[8/20] S=2048 block=16 top_k=64, ~3 min left
+[9/20] S=4096 block=128 top_k=8, ~3 min left
+[10/20] S=4096 block=64 top_k=16, ~3 min left
+[11/20] S=4096 block=32 top_k=32, ~2 min left
+[12/20] S=4096 block=16 top_k=64, ~2 min left
+[13/20] S=8192 block=128 top_k=8, ~2 min left
+[14/20] S=8192 block=64 top_k=16, ~2 min left
+[15/20] S=8192 block=32 top_k=32, ~1 min left
+[16/20] S=8192 block=16 top_k=64, ~1 min left
+[17/20] S=16384 block=128 top_k=8, ~1 min left
+[18/20] S=16384 block=64 top_k=16, ~1 min left
+[19/20] S=16384 block=32 top_k=32, ~0 min left
+[20/20] S=16384 block=16 top_k=64, ~0 min left
+**Device:** NVIDIA A100-PCIE-40GB (sm_80), 40440 MB | torch 2.13.0+cu126, triton 3.7.1, CUDA 12.6
+
+| backend | seq_len | block_size | top_k | dtype | latency_ms | tflops | sparsity | speedup_vs_dense | speedup_ceiling | attainment | status | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| moonshot_efficient | 1024 | 128 | 8 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 128 | 8 | bfloat16 | 0.027 | 19.908 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 128 | 8 | bfloat16 | 0.695 | 0.773 | 1.000 | 0.039 | 1.000 | 0.039 | ok |  |
+| ours | 1024 | 128 | 8 | bfloat16 | 0.244 | 2.205 | 1.000 | 0.111 | 1.000 | 0.111 | ok |  |
+| fa2_minimal | 1024 | 128 | 8 | bfloat16 | 0.030 | 17.897 | 1.000 | 0.899 | 1.000 | 0.899 | ok |  |
+| flash_moba | 1024 | 128 | 8 | bfloat16 | 0.479 | 1.122 | 1.000 | 0.056 | 1.000 | 0.056 | ok |  |
+| moonshot_naive | 1024 | 128 | 8 | bfloat16 | 1.106 | 0.486 | 1.000 | 0.024 | 1.000 | 0.024 | ok |  |
+| triton_moba | 1024 | 128 | 8 | bfloat16 | 1.823 | 0.295 | 1.000 | 0.015 | 1.000 | 0.015 | ok |  |
+| moonshot_efficient | 1024 | 64 | 16 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 64 | 16 | bfloat16 | 0.027 | 20.023 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 64 | 16 | bfloat16 | 0.692 | 0.777 | 1.000 | 0.039 | 1.000 | 0.039 | ok |  |
+| ours | 1024 | 64 | 16 | bfloat16 | 0.233 | 2.308 | 1.000 | 0.115 | 1.000 | 0.115 | ok |  |
+| fa2_minimal | 1024 | 64 | 16 | bfloat16 | 0.030 | 17.806 | 1.000 | 0.889 | 1.000 | 0.889 | ok |  |
+| flash_moba | 1024 | 64 | 16 | bfloat16 | 0.566 | 0.950 | 1.000 | 0.047 | 1.000 | 0.047 | ok |  |
+| moonshot_naive | 1024 | 64 | 16 | bfloat16 | 1.399 | 0.384 | 1.000 | 0.019 | 1.000 | 0.019 | ok |  |
+| triton_moba | 1024 | 64 | 16 | bfloat16 | 1.811 | 0.297 | 1.000 | 0.015 | 1.000 | 0.015 | ok |  |
+| flash_moba | 1024 | 32 | 32 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 1024 | 32 | 32 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 32 | 32 | bfloat16 | 0.027 | 19.994 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 32 | 32 | bfloat16 | 0.697 | 0.771 | 1.000 | 0.039 | 1.000 | 0.039 | ok |  |
+| ours | 1024 | 32 | 32 | bfloat16 | 0.241 | 2.226 | 1.000 | 0.111 | 1.000 | 0.111 | ok |  |
+| fa2_minimal | 1024 | 32 | 32 | bfloat16 | 0.030 | 17.821 | 1.000 | 0.891 | 1.000 | 0.891 | ok |  |
+| moonshot_naive | 1024 | 32 | 32 | bfloat16 | 1.995 | 0.269 | 1.000 | 0.013 | 1.000 | 0.013 | ok |  |
+| triton_moba | 1024 | 32 | 32 | bfloat16 | 1.887 | 0.285 | 1.000 | 0.014 | 1.000 | 0.014 | ok |  |
+| flash_moba | 1024 | 16 | 64 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 1024 | 16 | 64 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 16 | 64 | bfloat16 | 0.027 | 19.904 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 16 | 64 | bfloat16 | 0.694 | 0.774 | 1.000 | 0.039 | 1.000 | 0.039 | ok |  |
+| ours | 1024 | 16 | 64 | bfloat16 | 0.576 | 0.933 | 1.000 | 0.047 | 1.000 | 0.047 | ok |  |
+| fa2_minimal | 1024 | 16 | 64 | bfloat16 | 0.030 | 17.795 | 1.000 | 0.894 | 1.000 | 0.894 | ok |  |
+| moonshot_naive | 1024 | 16 | 64 | bfloat16 | 3.305 | 0.163 | 1.000 | 0.008 | 1.000 | 0.008 | ok |  |
+| triton_moba | 1024 | 16 | 64 | bfloat16 | 2.183 | 0.246 | 1.000 | 0.012 | 1.000 | 0.012 | ok |  |
+| moonshot_efficient | 2048 | 128 | 8 | bfloat16 | - | - | 0.719 | - | 1.391 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 128 | 8 | bfloat16 | 0.044 | 49.139 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 128 | 8 | bfloat16 | 1.008 | 1.532 | 0.719 | 0.043 | 1.391 | 0.031 | ok |  |
+| ours | 2048 | 128 | 8 | bfloat16 | 0.239 | 6.466 | 0.719 | 0.183 | 1.391 | 0.132 | ok |  |
+| fa2_minimal | 2048 | 128 | 8 | bfloat16 | 0.067 | 31.976 | 0.719 | 0.651 | 1.391 | 0.468 | ok |  |
+| flash_moba | 2048 | 128 | 8 | bfloat16 | 0.544 | 2.837 | 0.719 | 0.080 | 1.391 | 0.058 | ok |  |
+| moonshot_naive | 2048 | 128 | 8 | bfloat16 | 2.160 | 0.715 | 0.719 | 0.020 | 1.391 | 0.015 | ok |  |
+| triton_moba | 2048 | 128 | 8 | bfloat16 | 1.830 | 0.844 | 0.719 | 0.024 | 1.391 | 0.017 | ok |  |
+| moonshot_efficient | 2048 | 64 | 16 | bfloat16 | - | - | 0.735 | - | 1.361 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 64 | 16 | bfloat16 | 0.044 | 49.220 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 64 | 16 | bfloat16 | 1.011 | 1.562 | 0.735 | 0.043 | 1.361 | 0.032 | ok |  |
+| ours | 2048 | 64 | 16 | bfloat16 | 0.247 | 6.388 | 0.735 | 0.177 | 1.361 | 0.130 | ok |  |
+| fa2_minimal | 2048 | 64 | 16 | bfloat16 | 0.068 | 31.818 | 0.735 | 0.646 | 1.361 | 0.475 | ok |  |
+| flash_moba | 2048 | 64 | 16 | bfloat16 | 0.669 | 2.359 | 0.735 | 0.065 | 1.361 | 0.048 | ok |  |
+| moonshot_naive | 2048 | 64 | 16 | bfloat16 | 2.731 | 0.578 | 0.735 | 0.016 | 1.361 | 0.012 | ok |  |
+| triton_moba | 2048 | 64 | 16 | bfloat16 | 1.907 | 0.827 | 0.735 | 0.023 | 1.361 | 0.017 | ok |  |
+| flash_moba | 2048 | 32 | 32 | bfloat16 | - | - | 0.742 | - | 1.347 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 2048 | 32 | 32 | bfloat16 | - | - | 0.742 | - | 1.347 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 32 | 32 | bfloat16 | 0.044 | 49.156 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 32 | 32 | bfloat16 | 1.005 | 1.586 | 0.742 | 0.043 | 1.347 | 0.032 | ok |  |
+| ours | 2048 | 32 | 32 | bfloat16 | 0.390 | 4.088 | 0.742 | 0.112 | 1.347 | 0.083 | ok |  |
+| fa2_minimal | 2048 | 32 | 32 | bfloat16 | 0.068 | 31.827 | 0.742 | 0.647 | 1.347 | 0.481 | ok |  |
+| moonshot_naive | 2048 | 32 | 32 | bfloat16 | 3.908 | 0.408 | 0.742 | 0.011 | 1.347 | 0.008 | ok |  |
+| triton_moba | 2048 | 32 | 32 | bfloat16 | 2.283 | 0.699 | 0.742 | 0.019 | 1.347 | 0.014 | ok |  |
+| flash_moba | 2048 | 16 | 64 | bfloat16 | - | - | 0.746 | - | 1.340 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 2048 | 16 | 64 | bfloat16 | - | - | 0.746 | - | 1.340 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 16 | 64 | bfloat16 | 0.044 | 48.974 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 16 | 64 | bfloat16 | 1.010 | 1.587 | 0.746 | 0.043 | 1.340 | 0.032 | ok |  |
+| ours | 2048 | 16 | 64 | bfloat16 | 1.102 | 1.455 | 0.746 | 0.040 | 1.340 | 0.030 | ok |  |
+| fa2_minimal | 2048 | 16 | 64 | bfloat16 | 0.067 | 32.051 | 0.746 | 0.654 | 1.340 | 0.488 | ok |  |
+| moonshot_naive | 2048 | 16 | 64 | bfloat16 | 6.246 | 0.257 | 0.746 | 0.007 | 1.340 | 0.005 | ok |  |
+| triton_moba | 2048 | 16 | 64 | bfloat16 | 3.076 | 0.521 | 0.746 | 0.014 | 1.340 | 0.011 | ok |  |
+| moonshot_efficient | 4096 | 128 | 8 | bfloat16 | - | - | 0.414 | - | 2.414 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 128 | 8 | bfloat16 | 0.146 | 58.695 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 128 | 8 | bfloat16 | 2.641 | 1.347 | 0.414 | 0.055 | 2.414 | 0.023 | ok |  |
+| ours | 4096 | 128 | 8 | bfloat16 | 0.250 | 14.253 | 0.414 | 0.586 | 2.414 | 0.243 | ok |  |
+| fa2_minimal | 4096 | 128 | 8 | bfloat16 | 0.158 | 54.304 | 0.414 | 0.925 | 2.414 | 0.383 | ok |  |
+| flash_moba | 4096 | 128 | 8 | bfloat16 | 0.671 | 5.304 | 0.414 | 0.218 | 2.414 | 0.090 | ok |  |
+| moonshot_naive | 4096 | 128 | 8 | bfloat16 | 6.180 | 0.576 | 0.414 | 0.024 | 2.414 | 0.010 | ok |  |
+| triton_moba | 4096 | 128 | 8 | bfloat16 | 1.943 | 1.831 | 0.414 | 0.075 | 2.414 | 0.031 | ok |  |
+| moonshot_efficient | 4096 | 64 | 16 | bfloat16 | - | - | 0.426 | - | 2.348 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 64 | 16 | bfloat16 | 0.147 | 58.607 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 64 | 16 | bfloat16 | 2.653 | 1.379 | 0.426 | 0.055 | 2.348 | 0.024 | ok |  |
+| ours | 4096 | 64 | 16 | bfloat16 | 0.380 | 9.626 | 0.426 | 0.386 | 2.348 | 0.164 | ok |  |
+| fa2_minimal | 4096 | 64 | 16 | bfloat16 | 0.158 | 54.344 | 0.426 | 0.927 | 2.348 | 0.395 | ok |  |
+| flash_moba | 4096 | 64 | 16 | bfloat16 | 1.002 | 3.653 | 0.426 | 0.146 | 2.348 | 0.062 | ok |  |
+| moonshot_naive | 4096 | 64 | 16 | bfloat16 | 7.368 | 0.497 | 0.426 | 0.020 | 2.348 | 0.008 | ok |  |
+| triton_moba | 4096 | 64 | 16 | bfloat16 | 2.396 | 1.527 | 0.426 | 0.061 | 2.348 | 0.026 | ok |  |
+| flash_moba | 4096 | 32 | 32 | bfloat16 | - | - | 0.432 | - | 2.316 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 4096 | 32 | 32 | bfloat16 | - | - | 0.432 | - | 2.316 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 32 | 32 | bfloat16 | 0.147 | 58.581 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 32 | 32 | bfloat16 | 2.652 | 1.399 | 0.432 | 0.055 | 2.316 | 0.024 | ok |  |
+| ours | 4096 | 32 | 32 | bfloat16 | 0.771 | 4.810 | 0.432 | 0.190 | 2.316 | 0.082 | ok |  |
+| fa2_minimal | 4096 | 32 | 32 | bfloat16 | 0.159 | 54.115 | 0.432 | 0.924 | 2.316 | 0.399 | ok |  |
+| moonshot_naive | 4096 | 32 | 32 | bfloat16 | 9.770 | 0.380 | 0.432 | 0.015 | 2.316 | 0.006 | ok |  |
+| triton_moba | 4096 | 32 | 32 | bfloat16 | 4.090 | 0.907 | 0.432 | 0.036 | 2.316 | 0.015 | ok |  |
+| flash_moba | 4096 | 16 | 64 | bfloat16 | - | - | 0.435 | - | 2.300 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 4096 | 16 | 64 | bfloat16 | - | - | 0.435 | - | 2.300 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 16 | 64 | bfloat16 | 0.146 | 58.815 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 16 | 64 | bfloat16 | 3.168 | 1.179 | 0.435 | 0.046 | 2.300 | 0.020 | ok |  |
+| ours | 4096 | 16 | 64 | bfloat16 | 2.355 | 1.586 | 0.435 | 0.062 | 2.300 | 0.027 | ok |  |
+| fa2_minimal | 4096 | 16 | 64 | bfloat16 | 0.158 | 54.325 | 0.435 | 0.924 | 2.300 | 0.402 | ok |  |
+| moonshot_naive | 4096 | 16 | 64 | bfloat16 | 16.458 | 0.227 | 0.435 | 0.009 | 2.300 | 0.004 | ok |  |
+| triton_moba | 4096 | 16 | 64 | bfloat16 | 8.163 | 0.458 | 0.435 | 0.018 | 2.300 | 0.008 | ok |  |
+| moonshot_efficient | 8192 | 128 | 8 | bfloat16 | - | - | 0.221 | - | 4.529 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 128 | 8 | bfloat16 | 0.366 | 93.893 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 128 | 8 | bfloat16 | 9.575 | 0.792 | 0.221 | 0.038 | 4.529 | 0.008 | ok |  |
+| ours | 8192 | 128 | 8 | bfloat16 | 0.402 | 18.879 | 0.221 | 0.911 | 4.529 | 0.201 | ok |  |
+| fa2_minimal | 8192 | 128 | 8 | bfloat16 | 0.459 | 74.814 | 0.221 | 0.797 | 4.529 | 0.176 | ok |  |
+| flash_moba | 8192 | 128 | 8 | bfloat16 | 1.090 | 6.963 | 0.221 | 0.336 | 4.529 | 0.074 | ok |  |
+| moonshot_naive | 8192 | 128 | 8 | bfloat16 | 20.020 | 0.379 | 0.221 | 0.018 | 4.529 | 0.004 | ok |  |
+| triton_moba | 8192 | 128 | 8 | bfloat16 | 2.502 | 3.032 | 0.221 | 0.146 | 4.529 | 0.032 | ok |  |
+| moonshot_efficient | 8192 | 64 | 16 | bfloat16 | - | - | 0.228 | - | 4.393 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 64 | 16 | bfloat16 | 0.366 | 93.891 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 64 | 16 | bfloat16 | 9.618 | 0.813 | 0.228 | 0.038 | 4.393 | 0.009 | ok |  |
+| ours | 8192 | 64 | 16 | bfloat16 | 0.709 | 11.030 | 0.228 | 0.516 | 4.393 | 0.117 | ok |  |
+| fa2_minimal | 8192 | 64 | 16 | bfloat16 | 0.461 | 74.526 | 0.228 | 0.794 | 4.393 | 0.181 | ok |  |
+| flash_moba | 8192 | 64 | 16 | bfloat16 | 1.919 | 4.077 | 0.228 | 0.191 | 4.393 | 0.043 | ok |  |
+| moonshot_naive | 8192 | 64 | 16 | bfloat16 | 22.514 | 0.347 | 0.228 | 0.016 | 4.393 | 0.004 | ok |  |
+| triton_moba | 8192 | 64 | 16 | bfloat16 | 4.429 | 1.766 | 0.228 | 0.083 | 4.393 | 0.019 | ok |  |
+| flash_moba | 8192 | 32 | 32 | bfloat16 | - | - | 0.231 | - | 4.328 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 8192 | 32 | 32 | bfloat16 | - | - | 0.231 | - | 4.328 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 32 | 32 | bfloat16 | 0.366 | 93.783 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 32 | 32 | bfloat16 | 10.311 | 0.770 | 0.231 | 0.036 | 4.328 | 0.008 | ok |  |
+| ours | 8192 | 32 | 32 | bfloat16 | 1.568 | 5.064 | 0.231 | 0.234 | 4.328 | 0.054 | ok |  |
+| fa2_minimal | 8192 | 32 | 32 | bfloat16 | 0.461 | 74.539 | 0.231 | 0.795 | 4.328 | 0.184 | ok |  |
+| moonshot_naive | 8192 | 32 | 32 | bfloat16 | 27.619 | 0.287 | 0.231 | 0.013 | 4.328 | 0.003 | ok |  |
+| triton_moba | 8192 | 32 | 32 | bfloat16 | 11.831 | 0.671 | 0.231 | 0.031 | 4.328 | 0.007 | ok |  |
+| flash_moba | 8192 | 16 | 64 | bfloat16 | - | - | 0.233 | - | 4.296 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 8192 | 16 | 64 | bfloat16 | - | - | 0.233 | - | 4.296 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 16 | 64 | bfloat16 | 0.364 | 94.337 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 16 | 64 | bfloat16 | 10.679 | 0.749 | 0.233 | 0.034 | 4.296 | 0.008 | ok |  |
+| ours | 8192 | 16 | 64 | bfloat16 | 6.423 | 1.245 | 0.233 | 0.057 | 4.296 | 0.013 | ok |  |
+| fa2_minimal | 8192 | 16 | 64 | bfloat16 | 0.459 | 74.928 | 0.233 | 0.794 | 4.296 | 0.185 | ok |  |
+| moonshot_naive | 8192 | 16 | 64 | bfloat16 | 38.193 | 0.209 | 0.233 | 0.010 | 4.296 | 0.002 | ok |  |
+| triton_moba | 8192 | 16 | 64 | bfloat16 | 23.844 | 0.335 | 0.233 | 0.015 | 4.296 | 0.004 | ok |  |
+| moonshot_efficient | 16384 | 128 | 8 | bfloat16 | - | - | 0.114 | - | 8.786 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 128 | 8 | bfloat16 | 1.200 | 114.564 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 128 | 8 | bfloat16 | 33.109 | 0.473 | 0.114 | 0.036 | 8.786 | 0.004 | ok |  |
+| ours | 16384 | 128 | 8 | bfloat16 | 0.721 | 21.690 | 0.114 | 1.663 | 8.786 | 0.189 | ok |  |
+| fa2_minimal | 16384 | 128 | 8 | bfloat16 | 1.600 | 85.900 | 0.114 | 0.750 | 8.786 | 0.085 | ok |  |
+| flash_moba | 16384 | 128 | 8 | bfloat16 | 2.138 | 7.318 | 0.114 | 0.561 | 8.786 | 0.064 | ok |  |
+| moonshot_naive | 16384 | 128 | 8 | bfloat16 | 69.554 | 0.225 | 0.114 | 0.017 | 8.786 | 0.002 | ok |  |
+| triton_moba | 16384 | 128 | 8 | bfloat16 | 4.951 | 3.160 | 0.114 | 0.242 | 8.786 | 0.028 | ok |  |
+| moonshot_efficient | 16384 | 64 | 16 | bfloat16 | - | - | 0.117 | - | 8.512 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 64 | 16 | bfloat16 | 1.207 | 113.900 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 64 | 16 | bfloat16 | 34.679 | 0.466 | 0.117 | 0.035 | 8.512 | 0.004 | ok |  |
+| ours | 16384 | 64 | 16 | bfloat16 | 1.343 | 12.023 | 0.117 | 0.899 | 8.512 | 0.106 | ok |  |
+| fa2_minimal | 16384 | 64 | 16 | bfloat16 | 1.608 | 85.456 | 0.117 | 0.750 | 8.512 | 0.088 | ok |  |
+| flash_moba | 16384 | 64 | 16 | bfloat16 | 3.905 | 4.135 | 0.117 | 0.309 | 8.512 | 0.036 | ok |  |
+| moonshot_naive | 16384 | 64 | 16 | bfloat16 | 75.162 | 0.215 | 0.117 | 0.016 | 8.512 | 0.002 | ok |  |
+| triton_moba | 16384 | 64 | 16 | bfloat16 | 12.638 | 1.278 | 0.117 | 0.095 | 8.512 | 0.011 | ok |  |
+| flash_moba | 16384 | 32 | 32 | bfloat16 | - | - | 0.119 | - | 8.381 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 32 | 32 | bfloat16 | - | - | 0.119 | - | 8.381 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 32 | 32 | bfloat16 | 1.206 | 113.956 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 32 | 32 | bfloat16 | 35.276 | 0.465 | 0.119 | 0.034 | 8.381 | 0.004 | ok |  |
+| ours | 16384 | 32 | 32 | bfloat16 | 4.277 | 3.834 | 0.119 | 0.282 | 8.381 | 0.034 | ok |  |
+| fa2_minimal | 16384 | 32 | 32 | bfloat16 | 1.608 | 85.480 | 0.119 | 0.750 | 8.381 | 0.090 | ok |  |
+| moonshot_naive | 16384 | 32 | 32 | bfloat16 | 86.384 | 0.190 | 0.119 | 0.014 | 8.381 | 0.002 | ok |  |
+| triton_moba | 16384 | 32 | 32 | bfloat16 | 42.664 | 0.384 | 0.119 | 0.028 | 8.381 | 0.003 | ok |  |
+| flash_moba | 16384 | 16 | 64 | bfloat16 | - | - | 0.120 | - | 8.317 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 16 | 64 | bfloat16 | - | - | 0.120 | - | 8.317 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 16 | 64 | bfloat16 | 1.202 | 114.304 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 16 | 64 | bfloat16 | 36.421 | 0.454 | 0.120 | 0.033 | 8.317 | 0.004 | ok |  |
+| ours | 16384 | 16 | 64 | bfloat16 | 21.291 | 0.776 | 0.120 | 0.056 | 8.317 | 0.007 | ok |  |
+| fa2_minimal | 16384 | 16 | 64 | bfloat16 | 1.604 | 85.716 | 0.120 | 0.750 | 8.317 | 0.090 | ok |  |
+| moonshot_naive | 16384 | 16 | 64 | bfloat16 | 107.487 | 0.154 | 0.120 | 0.011 | 8.317 | 0.001 | ok |  |
+| triton_moba | 16384 | 16 | 64 | bfloat16 | 92.737 | 0.178 | 0.120 | 0.013 | 8.317 | 0.002 | ok |  |
+
+Scratch memory (MiB)
+
+| S | block | top_k | ours | query-group design | ratio |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 128 | 8 | 4.2 | 1.0 | 4.2x |
+| 1024 | 64 | 16 | 8.5 | 1.0 | 8.5x |
+| 1024 | 32 | 32 | 17.0 | 1.0 | 17.0x |
+| 1024 | 16 | 64 | 34.0 | 1.0 | 34.0x |
+| 2048 | 128 | 8 | 8.5 | 2.0 | 4.2x |
+| 2048 | 64 | 16 | 17.0 | 2.0 | 8.5x |
+| 2048 | 32 | 32 | 34.0 | 2.0 | 17.0x |
+| 2048 | 16 | 64 | 68.0 | 2.0 | 34.0x |
+| 4096 | 128 | 8 | 17.0 | 4.0 | 4.2x |
+| 4096 | 64 | 16 | 34.0 | 4.0 | 8.5x |
+| 4096 | 32 | 32 | 68.0 | 4.0 | 17.0x |
+| 4096 | 16 | 64 | 136.0 | 4.0 | 34.0x |
+| 8192 | 128 | 8 | 34.0 | 8.0 | 4.2x |
+| 8192 | 64 | 16 | 68.0 | 8.0 | 8.5x |
+| 8192 | 32 | 32 | 136.0 | 8.0 | 17.0x |
+| 8192 | 16 | 64 | 272.0 | 8.0 | 34.0x |
+| 16384 | 128 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 64 | 16 | 136.0 | 16.0 | 8.5x |
+| 16384 | 32 | 32 | 272.0 | 16.0 | 17.0x |
+| 16384 | 16 | 64 | 544.0 | 16.0 | 34.0x |
+
+========================================================================
+panel: fixed-top-k   gates: [(128, 8), (64, 8), (32, 8), (16, 8)]
+========================================================================
+[1/20] S=1024 block=128 top_k=8
+[2/20] S=1024 block=64 top_k=8, ~5 min left
+[3/20] S=1024 block=32 top_k=8, ~5 min left
+[4/20] S=1024 block=16 top_k=8, ~4 min left
+[5/20] S=2048 block=128 top_k=8, ~4 min left
+[6/20] S=2048 block=64 top_k=8, ~4 min left
+[7/20] S=2048 block=32 top_k=8, ~4 min left
+[8/20] S=2048 block=16 top_k=8, ~3 min left
+[9/20] S=4096 block=128 top_k=8, ~3 min left
+[10/20] S=4096 block=64 top_k=8, ~3 min left
+[11/20] S=4096 block=32 top_k=8, ~3 min left
+[12/20] S=4096 block=16 top_k=8, ~2 min left
+[13/20] S=8192 block=128 top_k=8, ~2 min left
+[14/20] S=8192 block=64 top_k=8, ~2 min left
+[15/20] S=8192 block=32 top_k=8, ~2 min left
+[16/20] S=8192 block=16 top_k=8, ~1 min left
+[17/20] S=16384 block=128 top_k=8, ~1 min left
+[18/20] S=16384 block=64 top_k=8, ~1 min left
+[19/20] S=16384 block=32 top_k=8, ~1 min left
+[20/20] S=16384 block=16 top_k=8, ~0 min left
+**Device:** NVIDIA A100-PCIE-40GB (sm_80), 40440 MB | torch 2.13.0+cu126, triton 3.7.1, CUDA 12.6
+
+| backend | seq_len | block_size | top_k | dtype | latency_ms | tflops | sparsity | speedup_vs_dense | speedup_ceiling | attainment | status | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| moonshot_efficient | 1024 | 128 | 8 | bfloat16 | - | - | 1.000 | - | 1.000 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 128 | 8 | bfloat16 | 0.027 | 19.885 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 128 | 8 | bfloat16 | 0.693 | 0.775 | 1.000 | 0.039 | 1.000 | 0.039 | ok |  |
+| ours | 1024 | 128 | 8 | bfloat16 | 0.230 | 2.333 | 1.000 | 0.117 | 1.000 | 0.117 | ok |  |
+| fa2_minimal | 1024 | 128 | 8 | bfloat16 | 0.031 | 17.394 | 1.000 | 0.875 | 1.000 | 0.875 | ok |  |
+| flash_moba | 1024 | 128 | 8 | bfloat16 | 0.479 | 1.122 | 1.000 | 0.056 | 1.000 | 0.056 | ok |  |
+| moonshot_naive | 1024 | 128 | 8 | bfloat16 | 1.108 | 0.485 | 1.000 | 0.024 | 1.000 | 0.024 | ok |  |
+| triton_moba | 1024 | 128 | 8 | bfloat16 | 1.809 | 0.297 | 1.000 | 0.015 | 1.000 | 0.015 | ok |  |
+| moonshot_efficient | 1024 | 64 | 8 | bfloat16 | - | - | 0.719 | - | 1.391 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 64 | 8 | bfloat16 | 0.027 | 19.883 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 64 | 8 | bfloat16 | 0.695 | 0.556 | 0.719 | 0.039 | 1.391 | 0.028 | ok |  |
+| ours | 1024 | 64 | 8 | bfloat16 | 0.232 | 1.663 | 0.719 | 0.116 | 1.391 | 0.084 | ok |  |
+| fa2_minimal | 1024 | 64 | 8 | bfloat16 | 0.031 | 17.496 | 0.719 | 0.880 | 1.391 | 0.633 | ok |  |
+| flash_moba | 1024 | 64 | 8 | bfloat16 | 0.524 | 0.737 | 0.719 | 0.052 | 1.391 | 0.037 | ok |  |
+| moonshot_naive | 1024 | 64 | 8 | bfloat16 | 1.404 | 0.275 | 0.719 | 0.019 | 1.391 | 0.014 | ok |  |
+| triton_moba | 1024 | 64 | 8 | bfloat16 | 1.856 | 0.208 | 0.719 | 0.015 | 1.391 | 0.010 | ok |  |
+| flash_moba | 1024 | 32 | 8 | bfloat16 | - | - | 0.415 | - | 2.412 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 1024 | 32 | 8 | bfloat16 | - | - | 0.415 | - | 2.412 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 32 | 8 | bfloat16 | 0.027 | 19.918 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 32 | 8 | bfloat16 | 0.695 | 0.321 | 0.415 | 0.039 | 2.412 | 0.016 | ok |  |
+| ours | 1024 | 32 | 8 | bfloat16 | 0.226 | 0.985 | 0.415 | 0.119 | 2.412 | 0.049 | ok |  |
+| fa2_minimal | 1024 | 32 | 8 | bfloat16 | 0.031 | 17.514 | 0.415 | 0.879 | 2.412 | 0.365 | ok |  |
+| moonshot_naive | 1024 | 32 | 8 | bfloat16 | 1.989 | 0.112 | 0.415 | 0.014 | 2.412 | 0.006 | ok |  |
+| triton_moba | 1024 | 32 | 8 | bfloat16 | 1.869 | 0.119 | 0.415 | 0.014 | 2.412 | 0.006 | ok |  |
+| flash_moba | 1024 | 16 | 8 | bfloat16 | - | - | 0.221 | - | 4.515 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 1024 | 16 | 8 | bfloat16 | - | - | 0.221 | - | 4.515 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 1024 | 16 | 8 | bfloat16 | 0.027 | 19.901 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 1024 | 16 | 8 | bfloat16 | 0.693 | 0.172 | 0.221 | 0.039 | 4.515 | 0.009 | ok |  |
+| ours | 1024 | 16 | 8 | bfloat16 | 0.234 | 0.509 | 0.221 | 0.116 | 4.515 | 0.026 | ok |  |
+| fa2_minimal | 1024 | 16 | 8 | bfloat16 | 0.031 | 17.507 | 0.221 | 0.880 | 4.515 | 0.195 | ok |  |
+| moonshot_naive | 1024 | 16 | 8 | bfloat16 | 3.145 | 0.038 | 0.221 | 0.009 | 4.515 | 0.002 | ok |  |
+| triton_moba | 1024 | 16 | 8 | bfloat16 | 1.906 | 0.062 | 0.221 | 0.014 | 4.515 | 0.003 | ok |  |
+| moonshot_efficient | 2048 | 128 | 8 | bfloat16 | - | - | 0.719 | - | 1.391 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 128 | 8 | bfloat16 | 0.044 | 49.005 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 128 | 8 | bfloat16 | 1.008 | 1.533 | 0.719 | 0.044 | 1.391 | 0.031 | ok |  |
+| ours | 2048 | 128 | 8 | bfloat16 | 0.371 | 4.159 | 0.719 | 0.118 | 1.391 | 0.085 | ok |  |
+| fa2_minimal | 2048 | 128 | 8 | bfloat16 | 0.067 | 31.858 | 0.719 | 0.650 | 1.391 | 0.467 | ok |  |
+| flash_moba | 2048 | 128 | 8 | bfloat16 | 0.634 | 2.438 | 0.719 | 0.069 | 1.391 | 0.050 | ok |  |
+| moonshot_naive | 2048 | 128 | 8 | bfloat16 | 2.425 | 0.637 | 0.719 | 0.018 | 1.391 | 0.013 | ok |  |
+| triton_moba | 2048 | 128 | 8 | bfloat16 | 2.751 | 0.562 | 0.719 | 0.016 | 1.391 | 0.011 | ok |  |
+| moonshot_efficient | 2048 | 64 | 8 | bfloat16 | - | - | 0.414 | - | 2.413 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 64 | 8 | bfloat16 | 0.044 | 48.695 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 64 | 8 | bfloat16 | 1.022 | 0.871 | 0.414 | 0.043 | 2.413 | 0.018 | ok |  |
+| ours | 2048 | 64 | 8 | bfloat16 | 0.287 | 3.097 | 0.414 | 0.154 | 2.413 | 0.064 | ok |  |
+| fa2_minimal | 2048 | 64 | 8 | bfloat16 | 0.067 | 31.869 | 0.414 | 0.654 | 2.413 | 0.271 | ok |  |
+| flash_moba | 2048 | 64 | 8 | bfloat16 | 0.661 | 1.347 | 0.414 | 0.067 | 2.413 | 0.028 | ok |  |
+| moonshot_naive | 2048 | 64 | 8 | bfloat16 | 2.792 | 0.319 | 0.414 | 0.016 | 2.413 | 0.007 | ok |  |
+| triton_moba | 2048 | 64 | 8 | bfloat16 | 1.927 | 0.462 | 0.414 | 0.023 | 2.413 | 0.009 | ok |  |
+| flash_moba | 2048 | 32 | 8 | bfloat16 | - | - | 0.221 | - | 4.523 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 2048 | 32 | 8 | bfloat16 | - | - | 0.221 | - | 4.523 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 32 | 8 | bfloat16 | 0.044 | 49.018 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 32 | 8 | bfloat16 | 1.020 | 0.466 | 0.221 | 0.043 | 4.523 | 0.009 | ok |  |
+| ours | 2048 | 32 | 8 | bfloat16 | 0.229 | 2.074 | 0.221 | 0.191 | 4.523 | 0.042 | ok |  |
+| fa2_minimal | 2048 | 32 | 8 | bfloat16 | 0.068 | 31.673 | 0.221 | 0.646 | 4.523 | 0.143 | ok |  |
+| moonshot_naive | 2048 | 32 | 8 | bfloat16 | 3.898 | 0.122 | 0.221 | 0.011 | 4.523 | 0.002 | ok |  |
+| triton_moba | 2048 | 32 | 8 | bfloat16 | 1.952 | 0.243 | 0.221 | 0.022 | 4.523 | 0.005 | ok |  |
+| flash_moba | 2048 | 16 | 8 | bfloat16 | - | - | 0.114 | - | 8.756 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 2048 | 16 | 8 | bfloat16 | - | - | 0.114 | - | 8.756 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 2048 | 16 | 8 | bfloat16 | 0.044 | 48.957 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 2048 | 16 | 8 | bfloat16 | 1.029 | 0.238 | 0.114 | 0.043 | 8.756 | 0.005 | ok |  |
+| ours | 2048 | 16 | 8 | bfloat16 | 0.233 | 1.052 | 0.114 | 0.188 | 8.756 | 0.021 | ok |  |
+| fa2_minimal | 2048 | 16 | 8 | bfloat16 | 0.067 | 32.044 | 0.114 | 0.655 | 8.756 | 0.075 | ok |  |
+| moonshot_naive | 2048 | 16 | 8 | bfloat16 | 6.248 | 0.039 | 0.114 | 0.007 | 8.756 | 0.001 | ok |  |
+| triton_moba | 2048 | 16 | 8 | bfloat16 | 2.170 | 0.113 | 0.114 | 0.020 | 8.756 | 0.002 | ok |  |
+| moonshot_efficient | 4096 | 128 | 8 | bfloat16 | - | - | 0.414 | - | 2.414 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 128 | 8 | bfloat16 | 0.147 | 58.511 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 128 | 8 | bfloat16 | 2.643 | 1.346 | 0.414 | 0.056 | 2.414 | 0.023 | ok |  |
+| ours | 4096 | 128 | 8 | bfloat16 | 0.250 | 14.212 | 0.414 | 0.586 | 2.414 | 0.243 | ok |  |
+| fa2_minimal | 4096 | 128 | 8 | bfloat16 | 0.159 | 54.028 | 0.414 | 0.923 | 2.414 | 0.382 | ok |  |
+| flash_moba | 4096 | 128 | 8 | bfloat16 | 0.675 | 5.274 | 0.414 | 0.218 | 2.414 | 0.090 | ok |  |
+| moonshot_naive | 4096 | 128 | 8 | bfloat16 | 6.193 | 0.575 | 0.414 | 0.024 | 2.414 | 0.010 | ok |  |
+| triton_moba | 4096 | 128 | 8 | bfloat16 | 1.956 | 1.820 | 0.414 | 0.075 | 2.414 | 0.031 | ok |  |
+| moonshot_efficient | 4096 | 64 | 8 | bfloat16 | - | - | 0.221 | - | 4.527 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 64 | 8 | bfloat16 | 0.147 | 58.449 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 64 | 8 | bfloat16 | 2.659 | 0.714 | 0.221 | 0.055 | 4.527 | 0.012 | ok |  |
+| ours | 4096 | 64 | 8 | bfloat16 | 0.249 | 7.615 | 0.221 | 0.590 | 4.527 | 0.130 | ok |  |
+| fa2_minimal | 4096 | 64 | 8 | bfloat16 | 0.158 | 54.320 | 0.221 | 0.929 | 4.527 | 0.205 | ok |  |
+| flash_moba | 4096 | 64 | 8 | bfloat16 | 0.924 | 2.053 | 0.221 | 0.159 | 4.527 | 0.035 | ok |  |
+| moonshot_naive | 4096 | 64 | 8 | bfloat16 | 7.357 | 0.258 | 0.221 | 0.020 | 4.527 | 0.004 | ok |  |
+| triton_moba | 4096 | 64 | 8 | bfloat16 | 2.089 | 0.909 | 0.221 | 0.070 | 4.527 | 0.016 | ok |  |
+| flash_moba | 4096 | 32 | 8 | bfloat16 | - | - | 0.114 | - | 8.773 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 4096 | 32 | 8 | bfloat16 | - | - | 0.114 | - | 8.773 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 32 | 8 | bfloat16 | 0.146 | 58.735 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 32 | 8 | bfloat16 | 2.669 | 0.367 | 0.114 | 0.055 | 8.773 | 0.006 | ok |  |
+| ours | 4096 | 32 | 8 | bfloat16 | 0.300 | 3.269 | 0.114 | 0.488 | 8.773 | 0.056 | ok |  |
+| fa2_minimal | 4096 | 32 | 8 | bfloat16 | 0.159 | 54.207 | 0.114 | 0.923 | 8.773 | 0.105 | ok |  |
+| moonshot_naive | 4096 | 32 | 8 | bfloat16 | 10.929 | 0.090 | 0.114 | 0.013 | 8.773 | 0.002 | ok |  |
+| triton_moba | 4096 | 32 | 8 | bfloat16 | 3.357 | 0.292 | 0.114 | 0.044 | 8.773 | 0.005 | ok |  |
+| flash_moba | 4096 | 16 | 8 | bfloat16 | - | - | 0.058 | - | 17.251 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 4096 | 16 | 8 | bfloat16 | - | - | 0.058 | - | 17.251 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 4096 | 16 | 8 | bfloat16 | 0.147 | 58.335 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 4096 | 16 | 8 | bfloat16 | 3.127 | 0.159 | 0.058 | 0.047 | 17.251 | 0.003 | ok |  |
+| ours | 4096 | 16 | 8 | bfloat16 | 0.259 | 1.923 | 0.058 | 0.569 | 17.251 | 0.033 | ok |  |
+| fa2_minimal | 4096 | 16 | 8 | bfloat16 | 0.158 | 54.355 | 0.058 | 0.932 | 17.251 | 0.054 | ok |  |
+| moonshot_naive | 4096 | 16 | 8 | bfloat16 | 14.720 | 0.034 | 0.058 | 0.010 | 17.251 | 0.001 | ok |  |
+| triton_moba | 4096 | 16 | 8 | bfloat16 | 3.279 | 0.152 | 0.058 | 0.045 | 17.251 | 0.003 | ok |  |
+| moonshot_efficient | 8192 | 128 | 8 | bfloat16 | - | - | 0.221 | - | 4.529 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 128 | 8 | bfloat16 | 0.364 | 94.331 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 128 | 8 | bfloat16 | 9.586 | 0.792 | 0.221 | 0.038 | 4.529 | 0.008 | ok |  |
+| ours | 8192 | 128 | 8 | bfloat16 | 0.402 | 18.857 | 0.221 | 0.905 | 4.529 | 0.200 | ok |  |
+| fa2_minimal | 8192 | 128 | 8 | bfloat16 | 0.458 | 75.030 | 0.221 | 0.795 | 4.529 | 0.176 | ok |  |
+| flash_moba | 8192 | 128 | 8 | bfloat16 | 1.106 | 6.858 | 0.221 | 0.329 | 4.529 | 0.073 | ok |  |
+| moonshot_naive | 8192 | 128 | 8 | bfloat16 | 20.030 | 0.379 | 0.221 | 0.018 | 4.529 | 0.004 | ok |  |
+| triton_moba | 8192 | 128 | 8 | bfloat16 | 2.509 | 3.024 | 0.221 | 0.145 | 4.529 | 0.032 | ok |  |
+| moonshot_efficient | 8192 | 64 | 8 | bfloat16 | - | - | 0.114 | - | 8.781 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 64 | 8 | bfloat16 | 0.365 | 94.235 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 64 | 8 | bfloat16 | 9.650 | 0.406 | 0.114 | 0.038 | 8.781 | 0.004 | ok |  |
+| ours | 8192 | 64 | 8 | bfloat16 | 0.375 | 10.430 | 0.114 | 0.972 | 8.781 | 0.111 | ok |  |
+| fa2_minimal | 8192 | 64 | 8 | bfloat16 | 0.458 | 75.039 | 0.114 | 0.796 | 8.781 | 0.091 | ok |  |
+| flash_moba | 8192 | 64 | 8 | bfloat16 | 1.533 | 2.552 | 0.114 | 0.238 | 8.781 | 0.027 | ok |  |
+| moonshot_naive | 8192 | 64 | 8 | bfloat16 | 22.528 | 0.174 | 0.114 | 0.016 | 8.781 | 0.002 | ok |  |
+| triton_moba | 8192 | 64 | 8 | bfloat16 | 3.274 | 1.195 | 0.114 | 0.111 | 8.781 | 0.013 | ok |  |
+| flash_moba | 8192 | 32 | 8 | bfloat16 | - | - | 0.058 | - | 17.285 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 8192 | 32 | 8 | bfloat16 | - | - | 0.058 | - | 17.285 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 32 | 8 | bfloat16 | 0.364 | 94.447 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 32 | 8 | bfloat16 | 10.368 | 0.192 | 0.058 | 0.035 | 17.285 | 0.002 | ok |  |
+| ours | 8192 | 32 | 8 | bfloat16 | 0.384 | 5.173 | 0.058 | 0.947 | 17.285 | 0.055 | ok |  |
+| fa2_minimal | 8192 | 32 | 8 | bfloat16 | 0.463 | 74.176 | 0.058 | 0.785 | 17.285 | 0.045 | ok |  |
+| moonshot_naive | 8192 | 32 | 8 | bfloat16 | 27.777 | 0.072 | 0.058 | 0.013 | 17.285 | 0.001 | ok |  |
+| triton_moba | 8192 | 32 | 8 | bfloat16 | 4.752 | 0.418 | 0.058 | 0.077 | 17.285 | 0.004 | ok |  |
+| flash_moba | 8192 | 16 | 8 | bfloat16 | - | - | 0.029 | - | 34.245 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 8192 | 16 | 8 | bfloat16 | - | - | 0.029 | - | 34.245 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 8192 | 16 | 8 | bfloat16 | 0.364 | 94.419 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 8192 | 16 | 8 | bfloat16 | 10.666 | 0.094 | 0.029 | 0.034 | 34.245 | 0.001 | ok |  |
+| ours | 8192 | 16 | 8 | bfloat16 | 0.563 | 1.782 | 0.029 | 0.646 | 34.245 | 0.019 | ok |  |
+| fa2_minimal | 8192 | 16 | 8 | bfloat16 | 0.462 | 74.460 | 0.029 | 0.789 | 34.245 | 0.023 | ok |  |
+| moonshot_naive | 8192 | 16 | 8 | bfloat16 | 38.227 | 0.026 | 0.029 | 0.010 | 34.245 | 0.000 | ok |  |
+| triton_moba | 8192 | 16 | 8 | bfloat16 | 7.862 | 0.128 | 0.029 | 0.046 | 34.245 | 0.001 | ok |  |
+| moonshot_efficient | 16384 | 128 | 8 | bfloat16 | - | - | 0.114 | - | 8.786 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 128 | 8 | bfloat16 | 1.210 | 113.594 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 128 | 8 | bfloat16 | 33.044 | 0.473 | 0.114 | 0.037 | 8.786 | 0.004 | ok |  |
+| ours | 16384 | 128 | 8 | bfloat16 | 0.707 | 22.125 | 0.114 | 1.711 | 8.786 | 0.195 | ok |  |
+| fa2_minimal | 16384 | 128 | 8 | bfloat16 | 1.600 | 85.899 | 0.114 | 0.756 | 8.786 | 0.086 | ok |  |
+| flash_moba | 16384 | 128 | 8 | bfloat16 | 2.171 | 7.208 | 0.114 | 0.557 | 8.786 | 0.063 | ok |  |
+| moonshot_naive | 16384 | 128 | 8 | bfloat16 | 69.362 | 0.226 | 0.114 | 0.017 | 8.786 | 0.002 | ok |  |
+| triton_moba | 16384 | 128 | 8 | bfloat16 | 4.833 | 3.237 | 0.114 | 0.250 | 8.786 | 0.028 | ok |  |
+| moonshot_efficient | 16384 | 64 | 8 | bfloat16 | - | - | 0.058 | - | 17.302 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 64 | 8 | bfloat16 | 1.199 | 114.642 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 64 | 8 | bfloat16 | 34.672 | 0.229 | 0.058 | 0.035 | 17.302 | 0.002 | ok |  |
+| ours | 16384 | 64 | 8 | bfloat16 | 0.654 | 12.155 | 0.058 | 1.835 | 17.302 | 0.106 | ok |  |
+| fa2_minimal | 16384 | 64 | 8 | bfloat16 | 1.590 | 86.431 | 0.058 | 0.754 | 17.302 | 0.044 | ok |  |
+| flash_moba | 16384 | 64 | 8 | bfloat16 | 2.980 | 2.665 | 0.058 | 0.402 | 17.302 | 0.023 | ok |  |
+| moonshot_naive | 16384 | 64 | 8 | bfloat16 | 75.189 | 0.106 | 0.058 | 0.016 | 17.302 | 0.001 | ok |  |
+| triton_moba | 16384 | 64 | 8 | bfloat16 | 7.735 | 1.027 | 0.058 | 0.155 | 17.302 | 0.009 | ok |  |
+| flash_moba | 16384 | 32 | 8 | bfloat16 | - | - | 0.029 | - | 34.314 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 32 | 8 | bfloat16 | - | - | 0.029 | - | 34.314 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 32 | 8 | bfloat16 | 1.189 | 115.594 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 32 | 8 | bfloat16 | 35.233 | 0.114 | 0.029 | 0.034 | 34.314 | 0.001 | ok |  |
+| ours | 16384 | 32 | 8 | bfloat16 | 0.813 | 4.929 | 0.029 | 1.463 | 34.314 | 0.043 | ok |  |
+| fa2_minimal | 16384 | 32 | 8 | bfloat16 | 1.612 | 85.271 | 0.029 | 0.738 | 34.314 | 0.021 | ok |  |
+| moonshot_naive | 16384 | 32 | 8 | bfloat16 | 86.110 | 0.047 | 0.029 | 0.014 | 34.314 | 0.000 | ok |  |
+| triton_moba | 16384 | 32 | 8 | bfloat16 | 15.745 | 0.254 | 0.029 | 0.076 | 34.314 | 0.002 | ok |  |
+| flash_moba | 16384 | 16 | 8 | bfloat16 | - | - | 0.015 | - | 68.235 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 16 | 8 | bfloat16 | - | - | 0.015 | - | 68.235 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 16384 | 16 | 8 | bfloat16 | 1.197 | 114.874 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| naive_torch | 16384 | 16 | 8 | bfloat16 | 36.787 | 0.055 | 0.015 | 0.033 | 68.235 | 0.000 | ok |  |
+| ours | 16384 | 16 | 8 | bfloat16 | 1.447 | 1.392 | 0.015 | 0.827 | 68.235 | 0.012 | ok |  |
+| fa2_minimal | 16384 | 16 | 8 | bfloat16 | 1.612 | 85.241 | 0.015 | 0.742 | 68.235 | 0.011 | ok |  |
+| moonshot_naive | 16384 | 16 | 8 | bfloat16 | 107.463 | 0.019 | 0.015 | 0.011 | 68.235 | 0.000 | ok |  |
+| triton_moba | 16384 | 16 | 8 | bfloat16 | 25.132 | 0.080 | 0.015 | 0.048 | 68.235 | 0.001 | ok |  |
+
+Scratch memory (MiB)
+
+| S | block | top_k | ours | query-group design | ratio |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 128 | 8 | 4.2 | 1.0 | 4.2x |
+| 1024 | 64 | 8 | 4.2 | 1.0 | 4.2x |
+| 1024 | 32 | 8 | 4.2 | 1.0 | 4.2x |
+| 1024 | 16 | 8 | 4.2 | 1.0 | 4.2x |
+| 2048 | 128 | 8 | 8.5 | 2.0 | 4.2x |
+| 2048 | 64 | 8 | 8.5 | 2.0 | 4.2x |
+| 2048 | 32 | 8 | 8.5 | 2.0 | 4.2x |
+| 2048 | 16 | 8 | 8.5 | 2.0 | 4.2x |
+| 4096 | 128 | 8 | 17.0 | 4.0 | 4.2x |
+| 4096 | 64 | 8 | 17.0 | 4.0 | 4.2x |
+| 4096 | 32 | 8 | 17.0 | 4.0 | 4.2x |
+| 4096 | 16 | 8 | 17.0 | 4.0 | 4.2x |
+| 8192 | 128 | 8 | 34.0 | 8.0 | 4.2x |
+| 8192 | 64 | 8 | 34.0 | 8.0 | 4.2x |
+| 8192 | 32 | 8 | 34.0 | 8.0 | 4.2x |
+| 8192 | 16 | 8 | 34.0 | 8.0 | 4.2x |
+| 16384 | 128 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 64 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 32 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 16 | 8 | 68.0 | 16.0 | 4.2x |

@@ -200,6 +200,13 @@ Adopted 2026-09-05 from fla-org/NSA, Triton-MoBA and FlashMoBA. See
 - **`src/moba` is the library and nothing else.** The comparison harness lives
   in top-level `implementations/` and the test tolerance policy in `tests/`;
   neither ships. Nothing under `src/moba` may import either.
+- **`results/` is card-major**: `results/<card>/{data,figures,logs}/`,
+  e.g. `results/sm80-a100/data/moba-fwd.csv`. The card is a directory
+  rather than a filename suffix because `triton.testing` writes a fixed
+  set of names, so a second card silently overwrote the first in place.
+  Writers ask the driver which card they are on; readers take `--card`,
+  since A100 figures get drawn on this laptop. See `bench/paths.py` and
+  each `results/<card>/README.md`.
 - **Run benchmarks as modules**: `uv run python -m bench.stages`, not
   `python bench/stages.py`. A script gets only its own directory on the path,
   so the direct form cannot find top-level `implementations/`.
