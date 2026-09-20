@@ -273,8 +273,22 @@ def moba_fwd_kernel(
     else:
         # Unchanged by the move: the batch stride is H_Q*S*D head-major and
         # S*H_Q*D token-major, which is the same number.
-        q_base = pid_b * H_Q * S * D
-        q_part_base = pid_b * H_Q * S * K_SLOTS
+        # int64 from here down. The partial buffers are the largest
+        # objects this design allocates -- [B, H, S, K_SLOTS, D] against
+        # the output's [B, S, H, D] -- so they are the first thing to
+        # cross 2^31 *elements*, which is where Triton's default int32
+        # offsets wrap. Measured on an H100: B=4 H=32 S=65536 D=128 is
+        # 8.59e9 elements and raises an illegal memory access, while the
+        # same product reached three other ways (B=2 S=65536, B=4
+        # S=32768, B=8 S=16384) fails identically and 2^31 exactly
+        # passes -- so the boundary is the product, not any one axis.
+        # Widening the base is enough: every term added to an int64 is
+        # promoted. FlashMoBA avoids this by declaring `using index_t =
+        # int64_t` once in flash.h; Triton has no such declaration, so
+        # the cast is written where the chain starts. `routing.py`'s
+        # PACK64 guard is the same problem solved in the same way.
+        q_base = pid_b.to(tl.int64) * H_Q * S * D
+        q_part_base = pid_b.to(tl.int64) * H_Q * S * K_SLOTS
         part_span = S
 
     # Longest-first dispatch (D8). Only the block id changes -- results are
@@ -438,7 +452,9 @@ def moba_combine_kernel(
 
     m_base = PartM + pid_bh * S * K_SLOTS + offs_m * K_SLOTS
     l_base = PartL + pid_bh * S * K_SLOTS + offs_m * K_SLOTS
-    a_base = (PartAcc + pid_bh * S * K_SLOTS * D
+    # int64 for the reason moba_fwd_kernel records: PartAcc crosses 2^31
+    # elements before anything else in the pipeline does.
+    a_base = (PartAcc + pid_bh.to(tl.int64) * S * K_SLOTS * D
               + offs_m[:, None] * K_SLOTS * D + offs_d[None, :])
 
     # K_SLOTS is a constexpr, so `static_range` unrolls both loops at compile

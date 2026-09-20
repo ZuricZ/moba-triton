@@ -259,8 +259,11 @@ def moba_bwd_kernel(
         part_span = TOKENS
     else:
         # Unchanged by the move: H_Q*S*D and S*H_Q*D are the same number.
-        q_base = pid_b * H_Q * S * D
-        q_lin = pid_b * H_Q * S
+        # int64: see moba_fwd_kernel. DQPart is [B, H, S, K*TILES, D],
+        # larger than the forward's partials by the tile factor, so it
+        # crosses 2^31 elements sooner than anything else here.
+        q_base = pid_b.to(tl.int64) * H_Q * S * D
+        q_lin = pid_b.to(tl.int64) * H_Q * S
         part_span = S
 
     tiles: tl.constexpr = BLOCK_SIZE // KEY_TILE
@@ -418,7 +421,8 @@ def moba_dq_reduce_kernel(
 
     dq_slots: tl.constexpr = K_SLOTS * TILES
     m_base = PartM + pid_bh * S * K_SLOTS + offs_m * K_SLOTS
-    p_base = (DQPart + pid_bh * S * dq_slots * D
+    # int64 for the reason moba_fwd_kernel records.
+    p_base = (DQPart + pid_bh.to(tl.int64) * S * dq_slots * D
               + offs_m[:, None] * dq_slots * D + offs_d[None, :])
 
     acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
