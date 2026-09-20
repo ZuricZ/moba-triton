@@ -138,6 +138,65 @@ def test_gate_matches_the_oracle_when_the_budget_exceeds_the_blocks(device):
     assert int(idx.max()) < kbar.shape[2], "emitted a block id out of range"
 
 
+def test_gate_fills_every_slot_when_capacity_is_narrower_than_top_k(device):
+    """The slot array must cover `top_k`, not merely the reachable capacity.
+
+    The emit step sorts the whole slot array and stores its first `top_k`
+    entries in one masked store, so a slot array narrower than `top_k` leaves
+    the high slots untouched -- and `gate_select` allocates its output with
+    `torch.empty`, so untouched means whatever was already in that memory.
+    `past_blocks_selected` clamps to `num_blocks`, so every sequence with
+    fewer blocks than the budget reaches this.
+
+    `test_gate_matches_the_oracle_when_the_budget_exceeds_the_blocks` happens
+    to catch it, but only because a garbage id is usually out of range. That
+    is luck, not coverage: an uninitialised slot holding a small value would
+    set a plausible bit and pass. This reads the raw slots instead and demands
+    that each one be either a real id or the -1 padding.
+    """
+    cfg = MoBAConfig(block_size=128, top_k=12, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 2, 64), dtype=torch.bfloat16, device=device)
+    kbar = pool_blocks_naive(k, cfg)
+    num_blocks = kbar.shape[2]
+    assert num_blocks < cfg.top_k, "shape does not reach the case under test"
+
+    idx = gate_select(q, kbar, cfg)
+
+    assert idx.shape[-1] == cfg.top_k, "emitted the wrong number of slots"
+    assert bool(((idx == -1) | ((idx >= 0) & (idx < num_blocks))).all()), (
+        "a slot holds neither a valid block id nor the -1 padding"
+    )
+
+
+def test_gate_emits_correctly_at_a_top_k_the_block_sweep_reaches(device):
+    """A budget of 64, which `bench/block_sweep.py` uses at block_size 16.
+
+    Every other gate test runs top_k <= 12. The emit step sorts a slot array
+    whose width follows `top_k`, so a wide budget is a different code path in
+    practice even though it is the same source: at top_k 64 the retired
+    selection sort emitted 0.99 MB of PTX against 0.13 MB for the sort that
+    replaced it. Nothing else here would notice that path breaking.
+    """
+    cfg = MoBAConfig(block_size=16, top_k=64, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 2048, 2, 64), dtype=torch.bfloat16, device=device)
+    kbar = pool_blocks_naive(k, cfg)
+
+    idx = gate_select(q, kbar, cfg)
+    expected = gate_select_naive(q, kbar, cfg)
+
+    assert torch.equal(indices_to_mask(idx, kbar.shape[2]), expected), (
+        "selection differs from the oracle at a wide budget"
+    )
+    valid = idx >= 0
+    both = valid[..., 1:] & valid[..., :-1]
+    assert bool(((idx[..., 1:] > idx[..., :-1]) | ~both).all()), (
+        "selected block ids are not strictly ascending within a query"
+    )
+    assert bool((valid[..., 1:] <= valid[..., :-1]).all()), (
+        "padding is not a suffix; a -1 appears before a real selection"
+    )
+
+
 def test_gate_handles_more_blocks_than_a_single_tile_could_hold(device):
     """The streaming form has no ceiling on num_blocks, so this must just work.
 

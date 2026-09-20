@@ -303,23 +303,36 @@ def gate_kernel(
     # --- Emit ascending. -----------------------------------------------------
     # Slot j is the rank of a block among the query's selections ordered by
     # ascending block index -- the same rule the PyTorch index used, so the
-    # combine pass's fixed-slot addressing is unchanged. Repeatedly taking the
-    # lowest remaining selection produces exactly that order. Unlike the
-    # one-shot gate this scans K_POW2 entries rather than num_blocks, so the
-    # emit step no longer grows with the sequence either.
+    # combine pass's fixed-slot addressing is unchanged. Unlike the one-shot
+    # gate this scans K_POW2 entries rather than num_blocks, so the emit step
+    # does not grow with the sequence either.
+    #
+    # `remaining` holds each selected block id exactly once -- a block can be
+    # admitted only once, and the seeded current block is never also a past
+    # candidate -- with `N_BLOCKS` in every unused or retired slot. Sorting it
+    # ascending therefore puts the selections first, in the order the slot rule
+    # asks for, and sweeps the sentinels to the tail where the `< N_BLOCKS`
+    # test turns them into the -1 padding the consumer expects. The launcher
+    # guarantees `K_POW2 >= TOP_K`, so every stored slot has a value; without
+    # that a short sequence would leave the high slots unwritten, and
+    # `gate_select` allocates with `torch.empty`.
+    #
+    # This was a `tl.static_range(TOP_K)` loop taking one minimum per round
+    # until 2026-09-20 -- the same selection sort retired from
+    # `routing.offsets_and_order_kernel` in 838ca69, bounded by `top_k` rather
+    # than by `num_blocks`. It unrolled once per slot and each round scanned
+    # all K_POW2 of them, so emitted code grew as top_k^2: 0.99 MB of PTX at
+    # top_k 64 against 0.13 MB for the sort, and at top_k 256 it took 11
+    # minutes to compile against 14 seconds. Nothing ships above 8; the
+    # block-size sweep's budget panel reaches 64.
     remaining = tl.where(best_val > float("-inf"), best_idx, N_BLOCKS)
-    for j in tl.static_range(TOP_K):
-        nxt = tl.min(remaining, axis=1)
-        valid = nxt < N_BLOCKS
-        tl.store(
-            BlockIdx + out_base + offs_m * TOP_K + j,
-            tl.where(valid, nxt, -1).to(tl.int32),
-            mask=live,
-        )
-        # Safe to clear every slot equal to `nxt`: a block can be admitted only
-        # once, and the seeded current block is never a past candidate, so no
-        # index ever appears twice.
-        remaining = tl.where(remaining == nxt[:, None], N_BLOCKS, remaining)
+    ordered = tl.sort(remaining, descending=False)
+    out_slots = tl.arange(0, K_POW2)
+    tl.store(
+        BlockIdx + out_base + offs_m[:, None] * TOP_K + out_slots[None, :],
+        tl.where(ordered < N_BLOCKS, ordered, -1).to(tl.int32),
+        mask=live[:, None] & (out_slots[None, :] < TOP_K),
+    )
 
 
 # -------------------------------------------------------------------------
@@ -403,9 +416,17 @@ def gate_select(
 
     # Room for `take` past blocks plus the seeded current one. Rounded to a
     # power of two because `tl.arange` requires it.
+    #
+    # Also at least `top_k` wide, because the emit step sorts the whole slot
+    # array and stores its first `top_k` entries in one go. Capacity alone can
+    # be narrower: `past_blocks_selected` clamps to `num_blocks`, so a sequence
+    # with fewer blocks than the budget gives capacity < top_k, and the surplus
+    # slots would then never be written at all. They are retired to +inf in the
+    # kernel and emit as -1 padding, so widening costs a few registers on short
+    # sequences and changes no result.
     seed = 1 if cfg.always_select_current else 0
     capacity = take + seed
-    k_pow2 = triton.next_power_of_2(max(1, capacity))
+    k_pow2 = triton.next_power_of_2(max(1, capacity, cfg.top_k))
 
     out = torch.empty((b, h, s, cfg.top_k), device=q.device, dtype=torch.int32)
 
