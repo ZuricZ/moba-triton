@@ -123,6 +123,37 @@ TUNED: dict[tuple, dict] = {
     ("sm_80", "fwd", 128, 0, 64, 8, 4, 4, 65536):
         {"GROUP": 64, "num_warps": 4, "num_stages": 3},
 
+    # sm_90, block_size 128, D 64, top_k 8, H 4/4.
+    # Measured by bench/tune_table.py on an NVIDIA H100 80GB HBM3, 2026-09-20.
+    # Hopper wants a different shape to Ampere, and both differences say the
+    # same thing -- a wider card wants more work per program. The forward
+    # doubles the query-tile height (GROUP 64 -> 128); the backward doubles the
+    # warps (4 -> 8) while keeping the height. Uniform across all four
+    # brackets, so this is not the single-bracket outlier the tuner warns
+    # about.
+    #
+    # Worth recording that GROUP=128 is the configuration that measured 4 ms
+    # against GROUP=64's 0.71 ms on the sm_86 laptop (see moba_fwd's note on
+    # do_bench). The setting that is catastrophic on a 20-SM card is the winner
+    # on a 132-SM one, which is the whole argument for keying this table on
+    # architecture rather than picking a default and pruning the axis.
+    ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 1024):
+        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+    ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 4096):
+        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+    ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 16384):
+        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+    ("sm_90", "bwd", 128, 64, 64, 8, 4, 4, 65536):
+        {"GROUP": 64, "num_warps": 8, "num_stages": 2},
+    ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 1024):
+        {"GROUP": 128, "num_warps": 4, "num_stages": 3},
+    ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 4096):
+        {"GROUP": 128, "num_warps": 4, "num_stages": 3},
+    ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 16384):
+        {"GROUP": 128, "num_warps": 4, "num_stages": 3},
+    ("sm_90", "fwd", 128, 0, 64, 8, 4, 4, 65536):
+        {"GROUP": 128, "num_warps": 4, "num_stages": 3},
+
     # sm_86, block_size 128, D 64, top_k 8, H 4/4.
     # Measured by bench/tune_table.py on an RTX 3050 Ti Laptop GPU.
     ("sm_86", "bwd", 128, 64, 64, 8, 4, 4, 1024):
