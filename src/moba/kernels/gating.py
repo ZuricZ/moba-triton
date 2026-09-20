@@ -409,6 +409,14 @@ def gate_select(
     q_per_kv = head_group_size(h, kbar.shape[1])
     n = kbar.shape[2]
 
+    # Wider chunks amortise the merge overhead (2 * K_POW2 / BLOCK_N) but
+    # overshoot the causal horizon. Measured by bench/gate_block_sweep.py: 32
+    # wins below ~512 blocks, 128 wins above, by 19% at 4096. The crossover is
+    # where the horizon grows past the overshoot penalty, so the width is a
+    # function of candidate count rather than a constant.
+    if block_n is None:
+        block_n = 128 if n >= 512 else GATE_BLOCK_N
+
     q, kbar = q.contiguous(), kbar.contiguous()
 
     if varlen:
@@ -444,7 +452,7 @@ def gate_select(
         # it would be arithmetic that changes no decision.
         1.0,
         BLOCK_SIZE=cfg.block_size, BLOCK_M=block_m, D=d,
-        BLOCK_N=max(TENSOR_CORE_TILE, block_n or GATE_BLOCK_N),
+        BLOCK_N=max(TENSOR_CORE_TILE, block_n),
         N_BLOCKS=n, K_POW2=k_pow2, CAPACITY=capacity,
         TAKE=take, TOP_K=cfg.top_k,
         ALWAYS_CURRENT=cfg.always_select_current,
