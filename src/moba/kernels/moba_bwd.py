@@ -318,7 +318,12 @@ def moba_bwd_kernel(
         # same split: `part_row` names *which query*, addressing our head-major
         # Lse, Delta and dQ partials; the loads name *where it lives*, in the
         # caller's token-major tensors.
-        part_row = heads * part_span + rows
+        # int64: DQ_SLOTS is K_SLOTS * TILES = 16, so `dst * D` below is
+        # part_row * 2048 and crosses 2^31 at part_row ~1M (H=16 at
+        # S=65536) -- sooner than the forward, which is why the backward
+        # failed where the forward's panel B did not. The base alone was
+        # widened; the head+row term overflows on its own.
+        part_row = heads.to(tl.int64) * part_span + rows
 
         q_addr = (q_base + rows[:, None] * (H_Q * D)
                   + heads[:, None] * D + offs_d[None, :])

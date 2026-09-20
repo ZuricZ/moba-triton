@@ -346,7 +346,11 @@ def moba_fwd_kernel(
         # the load below says *where that query lives*, in the caller's
         # token-major tensor. Head-major let them coincide. Re-fusing them
         # would look like a head permutation in the output.
-        part_row = heads * part_span + rows
+        # int64: `part_row` is the head-major query index, and multiplied
+        # by K_SLOTS * D below it reaches part_row * 1024, crossing 2^31
+        # once part_row passes ~2.1M (H=64 at S=65536). The forward barely
+        # survived at H=32; widening the batch base alone was not enough.
+        part_row = heads.to(tl.int64) * part_span + rows
 
         # Gathered rows (D7). One row is D*itemsize bytes -- exactly one
         # 128-byte cache line at D=64 bf16 -- so this costs the same
