@@ -52,7 +52,8 @@ except ImportError:                                  # pragma: no cover
     from triton.testing import do_bench_cudagraph as do_bench
 
 from bench.roofline import traffic_flash_moba, traffic_ours
-from bench.suite import cool_down_device, warm_up_device
+from bench.suite import (cool_down_device, lock_clocks,
+                        unlock_clocks, warm_up_device)
 from bench.tile_census import decide_lg_block_m
 from implementations.layout import cu_seqlens_for, to_varlen
 from moba.config import MoBAConfig
@@ -467,19 +468,35 @@ def main() -> None:
           f"{torch.cuda.get_device_properties(0).multi_processor_count} SMs")
     print(f"sequence lengths: {seq_lens}")
 
-    data = {"device": torch.cuda.get_device_name(0), "seq_lens": seq_lens}
-    rows_a = []
-    if "a" in args.panel:
-        rows_a = panel_a(seq_lens)
-        data["panel_a"] = rows_a
-    if "b" in args.panel:
-        data["panel_b"] = panel_b(seq_lens)
-    if "c" in args.panel:
-        if not rows_a:
+    # Pin the clock. `time_ms` calls `cool_down_device` before every
+    # measurement, which on a laptop is the thermal protocol and on a
+    # datacenter card would be up to `COOLDOWN_CAP_S` of idling per timing --
+    # hours across four panels, to correct for a swing this card does not
+    # have. Locking makes that call a no-op and every measurement is taken
+    # under identical conditions instead, which is the better fix where the
+    # container allows it. `bench/suite.py` does the same for `run_suite`.
+    locked = lock_clocks()
+    print("clocks: " + ("pinned, cooldown disabled" if locked else
+                        "not pinned; the thermal protocol carries it"))
+
+    data = {"device": torch.cuda.get_device_name(0), "seq_lens": seq_lens,
+            "clocks_locked": locked}
+    try:
+        rows_a = []
+        if "a" in args.panel:
             rows_a = panel_a(seq_lens)
-        data["panel_c"] = panel_c(rows_a)
-    if "d" in args.panel:
-        data["panel_d"] = panel_d(seq_lens)
+            data["panel_a"] = rows_a
+        if "b" in args.panel:
+            data["panel_b"] = panel_b(seq_lens)
+        if "c" in args.panel:
+            if not rows_a:
+                rows_a = panel_a(seq_lens)
+            data["panel_c"] = panel_c(rows_a)
+        if "d" in args.panel:
+            data["panel_d"] = panel_d(seq_lens)
+    finally:
+        if locked:
+            unlock_clocks()
 
     os.makedirs(RESULTS, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as handle:
