@@ -11,6 +11,8 @@ that call (spec D11, deferred), the round-trip becomes a genuine routing check
 without changing.
 """
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -232,3 +234,27 @@ def test_slots_still_identify_a_query_s_own_selection_rank_under_gqa(device):
                     assert key not in seen, f"duplicate (query, slot): {key}"
                     seen.add(key)
                     assert key[3] < cfg.top_k, "slot outside the budget"
+
+
+def test_csc_to_mask_rejects_an_index_whose_offsets_contradict_its_counts(device):
+    """The inverse reads entries by count, so it must check the layout rule.
+
+    `csc_to_mask` recovers each entry's block id from `col_nnz` alone, which
+    is only sound because `col_offsets` is the exclusive prefix sum of those
+    counts. The per-block loop it replaced sliced by both fields at once and
+    would have produced a confident, wrong mask if they ever disagreed --
+    exactly the silent agreement the inverse exists to prevent. Corrupting one
+    field must be loud.
+    """
+    cfg = MoBAConfig(block_size=64, top_k=4, dtype=torch.bfloat16)
+    q, k, _ = make_qkv((1, 512, 2, 64), dtype=torch.bfloat16, device=device)
+    index = build_csc(q, k, cfg)
+
+    assert csc_to_mask(index, 512).any(), "the honest index must still work"
+
+    bad_offsets = index.col_offsets.clone()
+    bad_offsets[0, 0, 1] += 1
+    broken = dataclasses.replace(index, col_offsets=bad_offsets)
+
+    with pytest.raises(ValueError, match="exclusive prefix sum"):
+        csc_to_mask(broken, 512)

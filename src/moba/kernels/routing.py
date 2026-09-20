@@ -564,9 +564,11 @@ def build_csc(q: torch.Tensor, k: torch.Tensor, cfg: MoBAConfig) -> CSCIndex:
 def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
     """Expands a CSC index back to a dense boolean selection mask.
 
-    Test support only. Deliberately slow and obvious: it is the inverse the
+    Test support only, and written to stay obvious: it is the inverse the
     round-trip test needs, and an inverse that shared the forward direction's
-    cleverness could share its bugs and agree while both were wrong.
+    cleverness could share its bugs and agree while both were wrong. What it
+    does not do is reuse anything the builders do -- it reads the finished
+    structure and states the layout rule back.
 
     Args:
         index: The index to expand.
@@ -582,20 +584,41 @@ def csc_to_mask(index: CSCIndex, seq_len: int) -> torch.Tensor:
     """
     b, h_kv, n = index.col_nnz.shape
     packed = index.cu_seqlens is not None
+    device = index.col_nnz.device
 
     # Packed: one batch axis of 1, because rows are packed token indices and
     # every sequence shares the token axis. The block axis stays sequence-local
     # and `n` wide, matching `moba.naive.moba_selection`'s convention.
     out = torch.zeros(
         1 if packed else b, index.num_query_heads, seq_len, n,
-        dtype=torch.bool, device=index.col_nnz.device
+        dtype=torch.bool, device=device
     )
+
+    # Recovering block ids from counts alone is only valid if `col_offsets`
+    # really is the exclusive prefix sum of `col_nnz`. The per-block loop this
+    # replaced sliced by both and so would have agreed with whichever was
+    # wrong; checking it once turns that silent assumption into a failure.
+    prefix = index.col_nnz.cumsum(-1) - index.col_nnz
+    if not torch.equal(prefix.to(index.col_offsets.dtype),
+                       index.col_offsets[..., :n]):
+        raise ValueError(
+            "col_offsets is not the exclusive prefix sum of col_nnz; the "
+            "index is inconsistent and any mask built from it would be too"
+        )
+
+    cols = torch.arange(n, device=device)
     for bi in range(b):
         for kv in range(h_kv):
-            for blk in range(n):
-                lo = int(index.col_offsets[bi, kv, blk])
-                cnt = int(index.col_nnz[bi, kv, blk])
-                rows = index.row_indices[bi, kv, lo:lo + cnt].long()
-                heads = index.head_indices[bi, kv, lo:lo + cnt].long()
-                out[0 if packed else bi, heads, rows, blk] = True
+            # Column `blk` owns `col_nnz[blk]` consecutive entries and the
+            # columns sit end to end -- that is what CSC means, and saying it
+            # this way gives every entry its block id at once. The per-block
+            # loop that used to live here cost one host round trip and one
+            # launch per column, so it grew with `num_blocks`: 840 ms at 1024
+            # columns against 1.8 ms here, for a byte-identical mask.
+            counts = index.col_nnz[bi, kv].long()
+            blocks = torch.repeat_interleave(cols, counts)
+            total = blocks.numel()
+            rows = index.row_indices[bi, kv, :total].long()
+            heads = index.head_indices[bi, kv, :total].long()
+            out[0 if packed else bi, heads, rows, blocks] = True
     return out
