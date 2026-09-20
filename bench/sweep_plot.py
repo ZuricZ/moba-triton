@@ -242,4 +242,8 @@ def main(card: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    paths.add_card_argument(parser)
+    main(card=parser.parse_args().card)
