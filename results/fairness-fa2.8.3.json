@@ -43,7 +43,7 @@
     "B1 S16384 H32 D128": {
       "backends": {
         "flash_moba": {
-          "ms": 18.06540870666504,
+          "ms": 18.05619239807129,
           "reason": ""
         },
         "moonshot_efficient": {
@@ -51,11 +51,11 @@
           "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
         },
         "ours": {
-          "ms": 6.294528007507324,
+          "ms": 6.242303848266602,
           "reason": ""
         },
         "triton_moba": {
-          "ms": 34.28147315979004,
+          "ms": 34.2476806640625,
           "reason": ""
         }
       },
@@ -64,7 +64,7 @@
     "B1 S8192 H32 D128": {
       "backends": {
         "flash_moba": {
-          "ms": 8.145919799804688,
+          "ms": 8.157183647155762,
           "reason": ""
         },
         "moonshot_efficient": {
@@ -72,11 +72,11 @@
           "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
         },
         "ours": {
-          "ms": 3.042304039001465,
+          "ms": 3.01363205909729,
           "reason": ""
         },
         "triton_moba": {
-          "ms": 11.78931188583374,
+          "ms": 11.764735698699951,
           "reason": ""
         }
       },
@@ -85,7 +85,7 @@
     "B1 S8192 H4 D64": {
       "backends": {
         "flash_moba": {
-          "ms": 1.0685440301895142,
+          "ms": 1.0711040496826172,
           "reason": ""
         },
         "moonshot_efficient": {
@@ -93,11 +93,11 @@
           "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
         },
         "ours": {
-          "ms": 0.3993600010871887,
+          "ms": 0.3768320083618164,
           "reason": ""
         },
         "triton_moba": {
-          "ms": 2.5579519271850586,
+          "ms": 2.4872961044311523,
           "reason": ""
         }
       },
@@ -106,7 +106,7 @@
     "B4 S8192 H32 D128": {
       "backends": {
         "flash_moba": {
-          "ms": 29.901824951171875,
+          "ms": 29.92639923095703,
           "reason": ""
         },
         "moonshot_efficient": {
@@ -114,11 +114,11 @@
           "reason": "needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped)"
         },
         "ours": {
-          "ms": 11.279359817504883,
+          "ms": 11.200000286102295,
           "reason": ""
         },
         "triton_moba": {
-          "ms": 56.84940719604492,
+          "ms": 56.53606414794922,
           "reason": ""
         }
       },

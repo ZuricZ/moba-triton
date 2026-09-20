@@ -1,0 +1,221 @@
+
+##### 17:01:16  1  full test suite on sm_80 -- validates the tl.sort fixes on this card
+
+tests/test_varlen.py::test_packed_dense_baseline_really_uses_the_variable_length_kernel
+  /home/moba-triton/implementations/sdpa_dense.py:115: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:831.)
+    out = F.scaled_dot_product_attention(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_optional_backends.py::test_available_reference_reduces_to_dense_causal
+====== 1 failed, 500 passed, 2 skipped, 659 warnings in 193.37s (0:03:13) ======
+
+##### 17:04:33  2  tuned-config coverage on this card
+
+sm_80 (NVIDIA A100-PCIE-40GB)
+  fwd: complete
+  bwd: complete
+
+##### 17:04:34  3  block sweep S=65536, sparse backends only
+
+sequence lengths: [65536]
+
+========================================================================
+panel: budget   gates: [(128, 8), (64, 16), (32, 32), (16, 64)]
+========================================================================
+[1/4] S=65536 block=128 top_k=8
+[2/4] S=65536 block=64 top_k=16, ~0 min left
+[3/4] S=65536 block=32 top_k=32, ~0 min left
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/moba-triton/bench/block_sweep.py", line 255, in <module>
+    main()
+    ~~~~^^
+  File "/home/moba-triton/bench/block_sweep.py", line 245, in main
+    rows = run_suite(shapes, gates,
+                     memory_budget_mb=args.memory_budget,
+                     only=(set(args.backends.split(","))
+                           if args.backends else None))
+  File "/home/moba-triton/bench/suite.py", line 515, in run_suite
+    g = torch.Generator(device="cuda").manual_seed(0)
+        ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+
+
+##### 17:04:58  4  residual panel B, full parallelism sweep
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/moba-triton/bench/residual.py", line 508, in <module>
+    main()
+    ~~~~^^
+  File "/home/moba-triton/bench/residual.py", line 490, in main
+    data["panel_b"] = panel_b(seq_lens)
+                      ~~~~~~~^^^^^^^^^^
+  File "/home/moba-triton/bench/residual.py", line 329, in panel_b
+    torch.cuda.empty_cache()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/moba-triton/.venv/lib/python3.13/site-packages/torch/cuda/memory.py", line 228, in empty_cache
+    torch._C._cuda_emptyCache()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+
+
+##### 17:05:50  5  roofline log at the A100 lengths
+
+    Q                            32.0 MiB   25% ##########
+    K                            32.0 MiB   25% ##########
+    V                            32.0 MiB   25% ##########
+    O                            32.0 MiB   25% ##########
+
+  flash_moba  (3718.0 MiB, closed-form window model; docs/traffic-derivation.md s8.2)
+    K (per window-block chunk)   1134.5 MiB   31% ############
+    V (per window-block chunk)   1134.5 MiB   31% ############
+    o_tmp fp32 round trip (x top_k)   1024.0 MiB   28% ###########
+    Q (gathered, x top_k)       256.0 MiB    7% ###
+    o_tmp zero-fill + final read    128.0 MiB    3% #
+    O                            32.0 MiB    1% #
+    row indices                   8.0 MiB    0% #
+    LSE                           1.0 MiB    0% #
+
+  ours  (864.5 MiB)
+    partials write              256.2 MiB   30% ############
+    partials read               256.2 MiB   30% ############
+    Q (gathered, x top_k)       256.0 MiB   30% ############
+    K                            32.0 MiB    4% #
+    V                            32.0 MiB    4% #
+    O                            32.0 MiB    4% #
+
+  sdpa_dense  (128.0 MiB, ignores K/V re-reads across query tiles)
+    Q                            32.0 MiB   25% ##########
+    K                            32.0 MiB   25% ##########
+    V                            32.0 MiB   25% ##########
+    O                            32.0 MiB   25% ##########
+
+wrote results/a100-roofline.png
+
+##### 17:08:18  6  main comparison sweep
+
+  flash_moba      4096      32        8     0.674    0.21x       12.75       6.37
+  moonshot_naive   4096      32        8     6.181    0.02x        1.39       0.69
+  naive_torch     4096      32        8     2.635    0.05x        3.26       1.63
+  ours            4096      32        8     0.245    0.59x       35.10      17.55
+  sdpa_dense      4096      32        8     0.144    1.00x       59.49      29.75
+  triton_moba     4096      32        8     1.958    0.07x        4.39       2.19
+  fa2_minimal     8192      64        8     0.463    0.78x       74.15      18.54
+  flash_moba      8192      64        8     1.062    0.34x       32.36       8.09
+  moonshot_naive   8192      64        8    19.994    0.02x        1.72       0.43
+  naive_torch     8192      64        8     9.529    0.04x        3.61       0.90
+  ours            8192      64        8     0.381    0.95x       90.20      22.55
+  sdpa_dense      8192      64        8     0.361    1.00x       95.06      23.76
+  triton_moba     8192      64        8     2.500    0.14x       13.75       3.44
+  fa2_minimal    16384     128        8     1.574    0.76x       87.32      10.92
+  flash_moba     16384     128        8     2.177    0.55x       63.15       7.89
+  moonshot_naive  16384     128        8    69.327    0.02x        1.98       0.25
+  naive_torch    16384     128        8    32.989    0.04x        4.17       0.52
+  ours           16384     128        8     0.667    1.80x      206.17      25.77
+  sdpa_dense     16384     128        8     1.200    1.00x      114.57      14.32
+  triton_moba    16384     128        8     4.787    0.25x       28.71       3.59
+  fa2_minimal    32768     256        8     5.801    0.71x       94.76       5.92
+  flash_moba     32768     256        8     5.094    0.81x      107.91       6.74
+  moonshot_naive  32768     256        8         -        -           -          -
+  naive_torch    32768     256        8   124.710    0.03x        4.41       0.28
+  ours           32768     256        8     1.174    3.53x      468.27      29.27
+  sdpa_dense     32768     256        8     4.142    1.00x      132.72       8.30
+  triton_moba    32768     256        8    13.711    0.30x       40.09       2.51
+  fa2_minimal    65536     512        8    21.529    0.72x      102.14       3.19
+  flash_moba     65536     512        8    12.287    1.25x      178.97       5.59
+  moonshot_naive  65536     512        8         -        -           -          -
+  naive_torch    65536     512        8         -        -           -          -
+  ours           65536     512        8     2.659    5.80x      826.91      25.84
+  sdpa_dense     65536     512        8    15.414    1.00x      142.66       4.46
+  triton_moba    65536     512        8    48.045    0.32x       45.77       1.43
+
+no number produced:
+  moonshot_naive       OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  moonshot_naive_bwd   OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  naive_torch          OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 3
+  naive_torch_bwd      OutOfMemoryError: CUDA out of memory. Tried to allocate 8.00 GiB. GPU 0 has a total capacity of 39
+
+##### 17:15:59  7  stage timings
+
+| S | part_acc | size | gate | attn | combine | kernel | gate share | combine share of kernel |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | float32 | 16 MB | 80 us | 111 us | 25 us | 135 us | 37% | 18% |
+| 1024 | bfloat16 | 8 MB | 80 us | 101 us | 16 us | 117 us | 41% | 14% |
+| 2048 | float32 | 32 MB | 119 us | 180 us | 43 us | 223 us | 35% | 19% |
+| 2048 | bfloat16 | 16 MB | 119 us | 163 us | 25 us | 188 us | 39% | 13% |
+| 4096 | float32 | 64 MB | 123 us | 253 us | 73 us | 326 us | 27% | 22% |
+| 4096 | bfloat16 | 32 MB | 123 us | 228 us | 44 us | 272 us | 31% | 16% |
+| 8192 | float32 | 128 MB | 174 us | 428 us | 125 us | 552 us | 24% | 23% |
+| 8192 | bfloat16 | 64 MB | 174 us | 382 us | 76 us | 458 us | 28% | 17% |
+
+partial-storage accuracy at (1, 1024, 2, 128):
+  float32   rel err vs float32 partials 0.0e+00
+  bfloat16  rel err vs float32 partials 4.3e-03
+
+Gate is 28% of the pass at S=8192, above the 20% threshold for further work.
+
+##### 17:16:21  8  fairness table
+
+pass: flash-attn 2.8.3 on NVIDIA A100-PCIE-40GB
+
+wrote results/fairness-fa2.8.3.json
+
+==============================================================================
+MERGED over flash-attn 2.6.3, 2.8.3
+==============================================================================
+
+Correctness -- max error against the PyTorch oracle
+  S=1024   ours 0.0037   flash_moba 0.0019   triton_moba 0.0019   moonshot_efficient 0.0019
+  S=4096   ours 0.0478   flash_moba 0.0478   triton_moba 0.0402   moonshot_efficient 0.0478
+
+Latency, and the ratio to ours
+  shape                         ours           flash_moba          triton_moba   moonshot_efficient
+  -------------------------------------------------------------------------------------------------
+  B1 S16384 H32 D128           6.235                2.91x                5.49x                7.22x
+  B1 S8192 H32 D128            3.016                2.70x                3.90x                4.84x
+  B1 S8192 H4 D64              0.398                2.68x                6.24x                6.39x
+  B4 S8192 H32 D128           11.186                2.67x                5.05x               12.58x
+
+Absent backends, and why -- one per pass that refused them:
+  fa2.6.3  B1 S16384 H32 D128       triton_moba          needs the flash-attn >= 2.7 signature: flash-attn 2.6.3 has 
+  fa2.8.3  B1 S16384 H32 D128       moonshot_efficient   needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by v
+
+Same backend, both passes -- run-to-run spread across a flash-attn switch:
+  flash_moba           0.5%
+  ours                 5.7%
+
+##### 17:17:00  9  backward pass at the sweep shapes
+
+| ours | 16384 | 128 | 8 | bfloat16 | 0.673 | 23.231 | 0.114 | - | 8.786 | - | ok |  |
+| flash_moba | 16384 | 128 | 8 | bfloat16 | 2.142 | 7.304 | 0.114 | - | 8.786 | - | ok |  |
+| moonshot_efficient | 16384 | 64 | 8 | bfloat16 | - | - | 0.058 | - | 17.302 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| ours | 16384 | 64 | 8 | bfloat16 | 0.554 | 14.348 | 0.058 | - | 17.302 | - | ok |  |
+| flash_moba | 16384 | 64 | 8 | bfloat16 | 2.955 | 2.688 | 0.058 | - | 17.302 | - | ok |  |
+| flash_moba | 16384 | 32 | 8 | bfloat16 | - | - | 0.029 | - | 34.314 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 32 | 8 | bfloat16 | - | - | 0.029 | - | 34.314 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| ours | 16384 | 32 | 8 | bfloat16 | 0.638 | 6.276 | 0.029 | - | 34.314 | - | ok |  |
+| flash_moba | 16384 | 16 | 8 | bfloat16 | - | - | 0.015 | - | 68.235 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 16384 | 16 | 8 | bfloat16 | - | - | 0.015 | - | 68.235 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| ours | 16384 | 16 | 8 | bfloat16 | 0.895 | 2.250 | 0.015 | - | 68.235 | - | ok |  |
+
+Scratch memory (MiB)
+
+| S | block | top_k | ours | query-group design | ratio |
+|---:|---:|---:|---:|---:|---:|
+| 16384 | 128 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 64 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 32 | 8 | 68.0 | 16.0 | 4.2x |
+| 16384 | 16 | 8 | 68.0 | 16.0 | 4.2x |
+
+##### 17:18:13  DONE
+

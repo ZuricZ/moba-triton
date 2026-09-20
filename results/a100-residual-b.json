@@ -1,0 +1,39 @@
+{
+  "clocks_locked": false,
+  "device": "NVIDIA A100-PCIE-40GB",
+  "panel_b": [
+    {
+      "batch": 1,
+      "head_dim": 64,
+      "heads": 4,
+      "ours_ms": 0.4076171102206831,
+      "programs_ours": 256,
+      "programs_theirs": 64,
+      "seq_len": 8192,
+      "theirs_ms": 1.0491069540565396
+    },
+    {
+      "batch": 1,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 3.0347395943057154,
+      "programs_ours": 2048,
+      "programs_theirs": 512,
+      "seq_len": 8192,
+      "theirs_ms": 8.15094687721946
+    },
+    {
+      "batch": 4,
+      "head_dim": 128,
+      "heads": 32,
+      "ours_ms": 11.287808060646057,
+      "programs_ours": 8192,
+      "programs_theirs": 2048,
+      "seq_len": 8192,
+      "theirs_ms": 30.120960235595703
+    }
+  ],
+  "seq_lens": [
+    8192
+  ]
+}

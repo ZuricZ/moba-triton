@@ -1,0 +1,69 @@
+
+##### 17:18:41  A  65k sweep: ours + flash_moba + sdpa_dense, no triton_moba
+
+| 65536 | 64 | 16 | 544.0 | 64.0 | 8.5x |
+| 65536 | 32 | 32 | 1088.0 | 64.0 | 17.0x |
+| 65536 | 16 | 64 | 2176.0 | 64.0 | 34.0x |
+
+========================================================================
+panel: fixed-top-k   gates: [(128, 8), (64, 8), (32, 8), (16, 8)]
+========================================================================
+[1/4] S=65536 block=128 top_k=8
+[2/4] S=65536 block=64 top_k=8, ~0 min left
+[3/4] S=65536 block=32 top_k=8, ~0 min left
+[4/4] S=65536 block=16 top_k=8, ~0 min left
+**Device:** NVIDIA A100-PCIE-40GB (sm_80), 40440 MB | torch 2.13.0+cu126, triton 3.7.1, CUDA 12.6
+
+| backend | seq_len | block_size | top_k | dtype | latency_ms | tflops | sparsity | speedup_vs_dense | speedup_ceiling | attainment | status | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| moonshot_efficient | 65536 | 128 | 8 | bfloat16 | - | - | 0.029 | - | 34.367 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 65536 | 128 | 8 | bfloat16 | 15.517 | 141.724 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| ours | 65536 | 128 | 8 | bfloat16 | 2.616 | 24.458 | 0.029 | 5.931 | 34.367 | 0.173 | ok |  |
+| flash_moba | 65536 | 128 | 8 | bfloat16 | 12.416 | 5.154 | 0.029 | 1.250 | 34.367 | 0.036 | ok |  |
+| moonshot_efficient | 65536 | 64 | 8 | bfloat16 | - | - | 0.015 | - | 68.446 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 65536 | 64 | 8 | bfloat16 | 15.650 | 140.518 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| ours | 65536 | 64 | 8 | bfloat16 | 3.193 | 10.063 | 0.015 | 4.901 | 68.446 | 0.072 | ok |  |
+| flash_moba | 65536 | 64 | 8 | bfloat16 | 13.849 | 2.320 | 0.015 | 1.130 | 68.446 | 0.017 | ok |  |
+| flash_moba | 65536 | 32 | 8 | bfloat16 | - | - | 0.007 | - | 136.500 | - | skipped | block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 65536 | 32 | 8 | bfloat16 | - | - | 0.007 | - | 136.500 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 65536 | 32 | 8 | bfloat16 | 15.534 | 141.560 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| ours | 65536 | 32 | 8 | bfloat16 | 4.677 | 3.444 | 0.007 | 3.321 | 136.500 | 0.024 | ok |  |
+| flash_moba | 65536 | 16 | 8 | bfloat16 | - | - | 0.004 | - | 272.185 | - | skipped | block_size=16 is not a multiple of 64, which flash-moba requires (n_lg_block_dim) |
+| moonshot_efficient | 65536 | 16 | 8 | bfloat16 | - | - | 0.004 | - | 272.185 | - | skipped | needs the flash-attn 2.6.x signature: flash-attn 2.8.3 (by version; signature is wrapped) |
+| sdpa_dense | 65536 | 16 | 8 | bfloat16 | 15.581 | 141.134 | 1.000 | 1.000 | 1.000 | 1.000 | ok | dense roofline |
+| ours | 65536 | 16 | 8 | bfloat16 | 8.120 | 0.995 | 0.004 | 1.919 | 272.185 | 0.007 | ok |  |
+
+Scratch memory (MiB)
+
+| S | block | top_k | ours | query-group design | ratio |
+|---:|---:|---:|---:|---:|---:|
+| 65536 | 128 | 8 | 272.0 | 64.0 | 4.2x |
+| 65536 | 64 | 8 | 272.0 | 64.0 | 4.2x |
+| 65536 | 32 | 8 | 272.0 | 64.0 | 4.2x |
+| 65536 | 16 | 8 | 272.0 | 64.0 | 4.2x |
+
+##### 17:19:43  B  triton_moba alone at 65k -- is it the crasher?
+
+[3/4] S=65536 block=32 top_k=32, ~0 min left
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/moba-triton/bench/block_sweep.py", line 255, in <module>
+    main()
+    ~~~~^^
+  File "/home/moba-triton/bench/block_sweep.py", line 245, in main
+    rows = run_suite(shapes, gates,
+                     memory_budget_mb=args.memory_budget,
+                     only=(set(args.backends.split(","))
+                           if args.backends else None))
+  File "/home/moba-triton/bench/suite.py", line 515, in run_suite
+    g = torch.Generator(device="cuda").manual_seed(0)
+        ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+
+
+##### 17:19:55  AFTER DONE
+
