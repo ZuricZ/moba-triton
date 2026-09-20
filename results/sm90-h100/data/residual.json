@@ -1,0 +1,151 @@
+{
+  "clocks_locked": false,
+  "device": "NVIDIA H100 80GB HBM3",
+  "panel_c": [
+    {
+      "attend_ms": 0.13583760350811325,
+      "bytes": 113311744,
+      "gibs": 776.8819710511674,
+      "impl": "ours",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 8192
+    },
+    {
+      "attend_ms": 0.5490235969235625,
+      "bytes": 356122624,
+      "gibs": 604.0997890090248,
+      "impl": "theirs",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 8192
+    },
+    {
+      "attend_ms": 0.2068573299024265,
+      "bytes": 226623488,
+      "gibs": 1020.3146797459663,
+      "impl": "ours",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 16384
+    },
+    {
+      "attend_ms": 0.9859998290256787,
+      "bytes": 723779584,
+      "gibs": 683.6433899700452,
+      "impl": "theirs",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 16384
+    },
+    {
+      "attend_ms": 0.5594893600923795,
+      "bytes": 906493952,
+      "gibs": 1508.9443007649056,
+      "impl": "ours",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 65536
+    },
+    {
+      "attend_ms": 3.943877329428991,
+      "bytes": 3898605568,
+      "gibs": 920.6319243011773,
+      "impl": "theirs",
+      "roof_gibs": 2297.7940871837072,
+      "seq_len": 65536
+    }
+  ],
+  "panel_d": [
+    {
+      "is_policy": false,
+      "ms": 0.3514021494577635,
+      "seq_len": 8192,
+      "window": 128
+    },
+    {
+      "is_policy": false,
+      "ms": 0.3722102654306856,
+      "seq_len": 8192,
+      "window": 256
+    },
+    {
+      "is_policy": true,
+      "ms": 0.5505174022571296,
+      "seq_len": 8192,
+      "window": 512
+    },
+    {
+      "is_policy": false,
+      "ms": 0.6935412107512008,
+      "seq_len": 8192,
+      "window": 768
+    },
+    {
+      "is_policy": false,
+      "ms": 0.8855872582463384,
+      "seq_len": 8192,
+      "window": 1024
+    },
+    {
+      "is_policy": false,
+      "ms": 1.1640548035502434,
+      "seq_len": 16384,
+      "window": 128
+    },
+    {
+      "is_policy": false,
+      "ms": 0.7803419838780942,
+      "seq_len": 16384,
+      "window": 256
+    },
+    {
+      "is_policy": false,
+      "ms": 0.8594913207135111,
+      "seq_len": 16384,
+      "window": 512
+    },
+    {
+      "is_policy": true,
+      "ms": 0.9892225380866758,
+      "seq_len": 16384,
+      "window": 768
+    },
+    {
+      "is_policy": false,
+      "ms": 1.2581042164080851,
+      "seq_len": 16384,
+      "window": 1024
+    },
+    {
+      "is_policy": false,
+      "ms": 11.773875951766968,
+      "seq_len": 65536,
+      "window": 128
+    },
+    {
+      "is_policy": false,
+      "ms": 7.688349326451619,
+      "seq_len": 65536,
+      "window": 256
+    },
+    {
+      "is_policy": false,
+      "ms": 5.64652608422672,
+      "seq_len": 65536,
+      "window": 512
+    },
+    {
+      "is_policy": false,
+      "ms": 4.865265560150147,
+      "seq_len": 65536,
+      "window": 768
+    },
+    {
+      "is_policy": true,
+      "ms": 3.9842746357123056,
+      "seq_len": 65536,
+      "window": 1024
+    }
+  ],
+  "seq_lens": [
+    8192,
+    16384,
+    65536
+  ]
+}

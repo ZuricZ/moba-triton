@@ -1,0 +1,53 @@
+########## PROFILE ##########
+profiling ours at S=8192 (ncu replays kernels; wall-clock here is meaningless)
+
+  kernel                                              read     write   occ %  tensor %
+  ------------------------------------------------------------------------------------
+  moba_combine_kernel                                68.0M      0.4M   122.6       0.6
+  moba_fwd_kernel                                    29.9M     18.2M    22.9      42.7
+  gate_kernel                                         8.1M      0.0M    62.0       3.8
+  pool_blocks_kernel                                  8.0M      0.0M    23.7       0.0
+  scatter_pairs_kernel                                2.0M      0.0M    22.5       0.0
+  count_columns_kernel                                2.0M      0.0M    22.5       0.0
+  array<char *, 1>>                                   0.1M      0.0M   117.5       0.0
+  CUDAGeneratorImpl *>                                0.0M      0.0M   152.9       3.5
+  offsets_and_order_kernel                            0.0M      0.0M    12.4       0.0
+  array<char *, 1>>                                   0.0M      0.0M    22.9       0.0
+  ------------------------------------------------------------------------------------
+  total DRAM traffic                                          136.8 MiB
+  modelled by bench/roofline.py                               108.1 MiB
+  measured / modelled                                          1.27x
+
+  Measured traffic exceeds the model: something moves bytes the model
+  does not know about -- spills, write allocation, or a stage not counted.
+########## ROOFLINE ##########
+
+  moonshot_naive  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  naive_torch  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  ours  (108.1 MiB)
+    partials write               32.0 MiB   30% ############
+    partials read                32.0 MiB   30% ############
+    Q (gathered, x top_k)        32.0 MiB   30% ############
+    K                             4.0 MiB    4% #
+    V                             4.0 MiB    4% #
+    O                             4.0 MiB    4% #
+
+  sdpa_dense  (16.0 MiB, ignores K/V re-reads across query tiles)
+    Q                             4.0 MiB   25% ##########
+    K                             4.0 MiB   25% ##########
+    V                             4.0 MiB   25% ##########
+    O                             4.0 MiB   25% ##########
+
+wrote results/sm90-h100/figures/roofline.png

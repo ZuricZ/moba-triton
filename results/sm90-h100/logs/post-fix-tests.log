@@ -1,0 +1,72 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/moba-triton
+configfile: pyproject.toml
+testpaths: tests
+collected 503 items / 16 deselected / 487 selected
+
+tests/test_backends.py .............................
+  unavailable backends:
+    flash_moba: block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim)
+    moonshot_efficient: requires flash-attn 2.6.3 and einops (No module named 'flash_attn'); one build also brings up triton_moba
+    triton_moba: requires flash_attn (see references/Triton-MoBA)
+.                    [  6%]
+tests/test_backward.py ....................                              [ 10%]
+tests/test_bench.py ........................                             [ 15%]
+tests/test_config.py ........                                            [ 16%]
+tests/test_disagreement.py 
+  === disagreement matrix (dtype=torch.float32, blk=32, top_k=2) ===
+    skipped: ours: dtype torch.float32 has no tensor-core tl.dot path; this kernel computes in bfloat16 or float16
+    skipped: fa2_minimal: torch.float32 has no tensor-core tl.dot path here
+    skipped: flash_moba: block_size=32 is not a multiple of 64, which flash-moba requires (n_lg_block_dim)
+    skipped: moonshot_efficient: requires flash-attn 2.6.3 and einops (No module named 'flash_attn'); one build also brings up triton_moba
+    skipped: triton_moba: requires flash_attn (see references/Triton-MoBA)
+    moonshot_naive vs naive_torch    max abs diff 0.000e+00
+.....                                         [ 17%]
+tests/test_fa2_minimal.py ....................                           [ 21%]
+tests/test_flash_moba_parity.py .......                                  [ 23%]
+tests/test_gate.py ...........................................           [ 32%]
+tests/test_gqa.py .................                                      [ 35%]
+tests/test_heads.py ........                                             [ 37%]
+tests/test_kernel_invariants.py .....                                    [ 38%]
+tests/test_moba_kernel.py .............................................. [ 47%]
+...................................                                      [ 55%]
+tests/test_optional_backends.py ........s.........                       [ 58%]
+tests/test_packing.py .................                                  [ 62%]
+tests/test_registry.py ...............                                   [ 65%]
+tests/test_routing.py ..................................                 [ 72%]
+tests/test_routing_fused.py ............................................ [ 81%]
+.......................                                                  [ 86%]
+tests/test_semantics.py .......................                          [ 90%]
+tests/test_smoke.py ......                                               [ 91%]
+tests/test_tolerance.py ..............                                   [ 94%]
+tests/test_varlen.py .........................                           [100%]
+
+=============================== warnings summary ===============================
+tests/test_backends.py: 8 warnings
+tests/test_backward.py: 14 warnings
+tests/test_gqa.py: 10 warnings
+tests/test_moba_kernel.py: 25 warnings
+tests/test_registry.py: 1 warning
+tests/test_varlen.py: 9 warnings
+  /root/moba-triton/.venv/lib/python3.13/site-packages/triton/compiler/code_generator.py:629: DeprecationWarning: AnnAssign.__init__ missing 1 required positional argument: 'simple'. This will become an error in Python 3.15.
+    init_node = ast.AnnAssign(target=st_target, value=default_value, annotation=annotation)
+
+tests/test_packing.py::test_validation_does_not_synchronize_with_the_host
+  /root/moba-triton/.venv/lib/python3.13/site-packages/torch/cuda/__init__.py:1333: UserWarning: Synchronization debug mode is a prototype feature and does not yet detect all synchronizing operations (Triggered internally at /__w/pytorch/pytorch/torch/csrc/cuda/Module.cpp:1028.)
+    torch._C._cuda_set_sync_debug_mode(debug_mode)
+
+tests/test_varlen.py::test_packed_dense_baseline_really_uses_the_variable_length_kernel
+  /root/moba-triton/implementations/sdpa_dense.py:115: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:571.)
+    out = F.scaled_dot_product_attention(
+
+tests/test_varlen.py::test_packed_dense_baseline_really_uses_the_variable_length_kernel
+  /root/moba-triton/implementations/sdpa_dense.py:115: UserWarning: Flash attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:559.)
+    out = F.scaled_dot_product_attention(
+
+tests/test_varlen.py::test_packed_dense_baseline_really_uses_the_variable_length_kernel
+  /root/moba-triton/implementations/sdpa_dense.py:115: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:831.)
+    out = F.scaled_dot_product_attention(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========= 486 passed, 1 skipped, 16 deselected, 71 warnings in 59.21s ==========

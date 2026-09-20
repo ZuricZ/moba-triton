@@ -1,0 +1,54 @@
+NVIDIA H100 80GB HBM3, 132 SMs
+sequence lengths: [8192, 16384, 65536]
+clocks: not pinned; the thermal protocol carries it
+
+==============================================================================
+PANEL A -- gate against attention  (B=1 H=4 D=64 block=128 top_k=8)
+==============================================================================
+      S          gate    attend     whole  gate share
+   8192   ours     0.139     0.136     0.266      52.3%
+   8192 theirs     0.307     0.549     0.834      36.8%
+                             whole pipeline: theirs / ours = 3.14x
+                             attention only: theirs / ours = 4.04x
+  16384   ours     0.233     0.207     0.434      53.7%
+  16384 theirs     0.504     0.986     1.531      33.0%
+                             whole pipeline: theirs / ours = 3.53x
+                             attention only: theirs / ours = 4.77x
+  65536   ours     0.855     0.559     1.425      60.0%
+  65536 theirs     1.688     3.944     5.698      29.6%
+                             whole pipeline: theirs / ours = 4.00x
+                             attention only: theirs / ours = 7.05x
+
+==============================================================================
+PANEL C -- modelled bytes over measured time
+==============================================================================
+roof: 2298 GiB/s, measured by copy on this card
+      S         modelled MiB  attend ms     GiB/s  % of roof
+   8192   ours         108.1      0.136     776.9     33.8%
+   8192 theirs         339.6      0.549     604.1     26.3%
+  16384   ours         216.1      0.207    1020.3     44.4%
+  16384 theirs         690.2      0.986     683.6     29.8%
+  65536   ours         864.5      0.559    1508.9     65.7%
+  65536 theirs        3718.0      3.944     920.6     40.1%
+
+==============================================================================
+PANEL D -- their window against their own policy
+==============================================================================
+      S  window            attend ms  vs policy
+   8192     128                0.351          -
+   8192     256                0.372          -
+   8192     512                0.551      1.00x  <- their policy
+   8192     768                0.694      1.26x
+   8192    1024                0.886      1.61x
+  16384     128                1.164          -
+  16384     256                0.780          -
+  16384     512                0.859          -
+  16384     768                0.989      1.00x  <- their policy
+  16384    1024                1.258      1.27x
+  65536     128               11.774          -
+  65536     256                7.688          -
+  65536     512                5.647          -
+  65536     768                4.865          -
+  65536    1024                3.984      1.00x  <- their policy
+
+wrote /root/moba-triton/results/sm90-h100/data/residual-cd.json

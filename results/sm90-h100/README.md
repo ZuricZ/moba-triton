@@ -1,42 +1,67 @@
-# H100 — sm_90
-
-**Empty. Nothing has been run on an H100 yet.**
-
-This directory exists so the next session has somewhere to write, and so the
-question "which card produced this" has an answer before the first file lands
-rather than after.
-
-## Before renting one
-
-Four things are pinned to sm_80 and need a value for sm_90. Three are data,
-one is a datasheet row; none is kernel code.
-
-| what | where | if skipped |
-|---|---|---|
-| no `sm_90` tuned entries | `src/moba/kernels/tuned_configs.py` | every launch silently takes `DEFAULT` — correct but untuned, and the A100 headline *was* measured with the table. Run `bench/tune_table.py`, 8 brackets × 2 passes, **before** any headline number. |
-| no `sm_90` datasheet | `bench/roofline.py` `SPEC` | prints no audit rather than a guessed roof; the figure loses its roof line. Needs the SXM/PCIe split — 989 TFLOP/s ÷ 3352 GB/s versus 756 ÷ 2039. |
-| measured bandwidth roof | `bench/residual.py` | the "% of roof" column in panel C is A100's 1239 GiB/s. Measured, not datasheet, so it must be re-measured here. |
-| `sm8x` window cap | `bench/tile_census.py`, `bench/roofline.py` | already correct for sm_90 (no cap). Docstrings say "the roofline is for an A100". |
-
-## The two questions worth the rent
-
-1. **Their window policy, directly.** `docs/why-we-beat-flashmoba.md` §3
-   eliminates "it is tuned for an H100" *indirectly*, by narrowing their
-   window on an A100. On an H100 it becomes a direct measurement on the
-   hardware their paper reports. It is the only alibi in that document a
-   skeptic can currently push on.
-2. **Whether occupancy diverges.** On the A100 both kernels measured 2
-   blocks/SM, 8 warps, 12%. Shared memory grows 164 → 228 KB but the register
-   file does **not** — 65,536 either way. At 230 registers per thread we may
-   already be register-limited rather than SMEM-limited, in which case the
-   extra shared memory buys nothing. One `bench/profile.py` run settles it.
-
-## Suggested order
+# H100 80GB HBM3 — sm_90
 
 ```
-pytest                                    # confirm 500 pass on sm_90
-python -m bench.tune_table                # BEFORE any headline number
-python -m bench.compare                   # writes into data/ here, not the A100's
-python -m bench.residual                  # re-measure the roof first
-python -m bench.profile                   # the occupancy question
+NVIDIA H100 80GB HBM3, 81559 MiB, compute capability 9.0, driver 550.163.01
+132 SMs, 228 KiB shared memory per SM
+rented box, 2026-09-20, ~87 min, ~$4.35, deleted after
 ```
+
+Recorded from `nvidia-smi` into `logs/device.txt`. The board name `H100 80GB
+HBM3` is what `bench/roofline.py`'s `SPEC_BY_NAME` matches, so the roofline
+resolves the SXM datasheet (989.4 TFLOP/s, 3352 GB/s) without asking.
+
+This is the first card past the 40 GB A100, and the first time several shapes
+could run at all.
+
+## What this session produced
+
+| finding | where |
+|---|---|
+| headline: 3.82x FlashMoBA / 4.96x SDPA fwd at 65K, 4.23x / 7.21x at 131K | `data/moba-fwd.csv` |
+| backward 2.57x / 3.08x | `data/moba-bwd.csv` |
+| gap narrowed vs A100 (4.62x): bytes stayed 4.30x, efficiency 1.95x -> 1.64x | `data/residual.json`, `logs/residual-cd.log` |
+| their window policy 1.57x off at S=8192, still correct at 65536 | `logs/residual-cd.log` |
+| **int32 overflow in the partials index**, found, fixed, re-verified | `logs/int32-overflow*.log` |
+| `tune_table` returned a backward config 1.29x worse than DEFAULT | `logs/tune-table.log`, `logs/ab-backward-config.log` |
+| measured/modeled byte ratio 1.27x (ours), occupancy column untrustworthy (152% for memset) | `logs/profile-roofline.log` |
+
+## What the tuning table cost
+
+`tune_table` ran with clocks unpinnable in this container, and its backward
+pick was 1.29x worse than `DEFAULT` — caught only because the bootstrap's
+pre-table `compare` became an untuned control. The corrected values are in
+`src/moba/kernels/tuned_configs.py` (`c20668d`). Lesson for the next box: when
+clocks are not lockable, treat `tune_table` output as a hypothesis and A/B the
+winner against `DEFAULT` before committing it.
+
+## The int32 bug, in one paragraph
+
+`part_acc` is `[B, H, S, top_k, D]`, the largest object this design allocates,
+and its addressing wrapped at 2^31 elements. B=4 H=32 S=65536 D=128 is 8.59e9
+elements (16 GiB, fits fine) and raised an illegal memory access. Three shapes
+reaching 2^32 by different routes all failed; two shapes sitting on 2^31 both
+passed — a 32-bit index, not capacity. Fixed by widening the address base to
+int64 (`04236d3`); full details in `docs/deferred-decisions.md` DD-2a.
+
+## Which doc cites what
+
+* `data/moba-fwd.csv`, `data/moba-bwd.csv` — the H100 headline
+* `data/residual.json` — panels C and D only; panel C's roof is measured
+  per run (2298 GiB/s). Panels A and B never made it into the JSON: the
+  full run crashed at B (the int32 bug) before writing, so A and B live
+  only in `logs/residual-ab.log`.
+* `figures/roofline.png` — the first roofline with a real Hopper roof
+* `logs/int32-overflow.log` / `-after-fix.log` — DD-2a
+* `logs/ab-backward-config.log`, `logs/ab-forward-group.log` — the A/B that corrected the table
+
+`logs/bootstrap.log` is present on disk but not tracked (build transcript,
+like the A100's). `logs/post-fix-tests.log` is the 486-pass suite after the
+int64 fix.
+
+## Known bad / open
+
+* `naive_torch` and `moonshot_naive` OOM at S>=32768 (dense O(S^2)); `NaN` by
+  design rather than a crash.
+* CUPTI's occupancy column is not trustworthy on sm_90 — it reports >100% for
+  a memset. The tensor-core utilisation column (ours 42.7%, theirs 15.5%) is
+  the sound number.

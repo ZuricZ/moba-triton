@@ -1,0 +1,34 @@
+tuning on sm_90 (NVIDIA H100 80GB HBM3), block_size=128 top_k=8 D=64
+  S=1024    fwd  {'GROUP': 128, 'num_warps': 4, 'num_stages': 3}
+  S=1024    bwd  {'GROUP': 64, 'num_warps': 8, 'num_stages': 2}
+  S=4096    fwd  {'GROUP': 128, 'num_warps': 4, 'num_stages': 3}
+  S=4096    bwd  {'GROUP': 64, 'num_warps': 8, 'num_stages': 2}
+  S=16384   fwd  {'GROUP': 128, 'num_warps': 4, 'num_stages': 3}
+  S=16384   bwd  {'GROUP': 64, 'num_warps': 8, 'num_stages': 2}
+  S=65536   fwd  {'GROUP': 128, 'num_warps': 4, 'num_stages': 3}
+  S=65536   bwd  {'GROUP': 64, 'num_warps': 8, 'num_stages': 2}
+
+paste into src/moba/kernels/tuned_configs.py, inside TUNED:
+
+    # sm_90, block_size 128, D 64, top_k 8, H 4/4.
+    # Measured by bench/tune_table.py on NVIDIA H100 80GB HBM3.
+    ('sm_90', 'bwd', 128, 64, 64, 8, 4, 4, 1024):
+        {'GROUP': 64, 'num_warps': 8, 'num_stages': 2},
+    ('sm_90', 'bwd', 128, 64, 64, 8, 4, 4, 4096):
+        {'GROUP': 64, 'num_warps': 8, 'num_stages': 2},
+    ('sm_90', 'bwd', 128, 64, 64, 8, 4, 4, 16384):
+        {'GROUP': 64, 'num_warps': 8, 'num_stages': 2},
+    ('sm_90', 'bwd', 128, 64, 64, 8, 4, 4, 65536):
+        {'GROUP': 64, 'num_warps': 8, 'num_stages': 2},
+    ('sm_90', 'fwd', 128, 0, 64, 8, 4, 4, 1024):
+        {'GROUP': 128, 'num_warps': 4, 'num_stages': 3},
+    ('sm_90', 'fwd', 128, 0, 64, 8, 4, 4, 4096):
+        {'GROUP': 128, 'num_warps': 4, 'num_stages': 3},
+    ('sm_90', 'fwd', 128, 0, 64, 8, 4, 4, 16384):
+        {'GROUP': 128, 'num_warps': 4, 'num_stages': 3},
+    ('sm_90', 'fwd', 128, 0, 64, 8, 4, 4, 65536):
+        {'GROUP': 128, 'num_warps': 4, 'num_stages': 3},
+
+Check before pasting: a config that differs from DEFAULT on only one
+bracket is more likely a noisy measurement than a real boundary. Re-run
+that bracket before believing it.

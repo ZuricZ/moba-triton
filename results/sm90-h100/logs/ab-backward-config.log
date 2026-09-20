@@ -1,0 +1,9 @@
+backward, S=65536, B=1 H=4 D=64, block 128 top_k 8
+ num_warps  num_stages   ms (min of 3)
+         4           2           2.726
+         4           3           2.559  <- DEFAULT, what the untuned run used
+         8           2           3.303  <- what tune_table picked
+         8           3           3.123
+
+fastest: num_warps=4 num_stages=3 at 2.559 ms
+tuned pick is 1.29x the fastest cell

@@ -1,0 +1,39 @@
+clocks not lockable -- cool/warm protocol per measurement
+sequence lengths: [65536]
+providers: fa2_minimal, flash_moba, moonshot_naive, naive_torch, ours, sdpa_dense, fa2_minimal_bwd, flash_moba_bwd, moonshot_naive_bwd, naive_torch_bwd, ours_bwd, sdpa_dense_bwd
+
+[W920 20:47:13.181387247 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 14145028096, total: 84929216512).
+[W920 20:47:13.232404941 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 17179869184 bytes (free: 14683996160, total: 84929216512).
+[W920 20:47:15.335438182 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 14683996160, total: 84929216512).
+[W920 20:47:15.432483651 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 15220867072, total: 84929216512).
+moba-fwd:
+   seq_len  fa2_minimal (latency (ms))  flash_moba (latency (ms))  moonshot_naive (latency (ms))  naive_torch (latency (ms))  ours (latency (ms))  sdpa_dense (latency (ms))
+0  65536.0                    8.478656                   5.732896                            NaN                         NaN             1.484736                   7.427296
+[W920 20:47:36.095836647 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 15214575616, total: 84929216512).
+[W920 20:47:36.102896345 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 15216672768, total: 84929216512).
+[W920 20:47:36.106560168 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 15216672768, total: 84929216512).
+[W920 20:47:36.194615820 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 15218769920, total: 84929216512).
+moba-bwd:
+   seq_len  fa2_minimal (latency (ms))  flash_moba (latency (ms))  moonshot_naive (latency (ms))  naive_torch (latency (ms))  ours (latency (ms))  sdpa_dense (latency (ms))
+0  65536.0                   74.501663                   6.972928                            NaN                         NaN             2.580384                  26.439297
+  wrote results/sm90-h100/figures/moba-fwd.png  (4 backends)
+  wrote results/sm90-h100/figures/moba-bwd.png  (4 backends)
+
+Forward, block_size=128 top_k=8, B=1 H=4 D=64
+  'dense' counts FLOPs the dense equivalent would do (FlashMoBA's convention);
+  'attended' counts only what ran (ours). They differ by the sparsity ratio.
+
+  backend            S  blocks  attends        ms  x dense  TF/s dense  TF/s attn
+  --------------------------------------------------------------------------------
+  fa2_minimal    65536     512        8     8.479    0.88x      259.36       8.10
+  flash_moba     65536     512        8     5.733    1.30x      383.58      11.99
+  moonshot_naive  65536     512        8         -        -           -          -
+  naive_torch    65536     512        8         -        -           -          -
+  ours           65536     512        8     1.485    5.00x     1481.09      46.28
+  sdpa_dense     65536     512        8     7.427    1.00x      296.07       9.25
+
+no number produced:
+  moonshot_naive       OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 7
+  moonshot_naive_bwd   OutOfMemoryError: CUDA out of memory. Tried to allocate 64.00 GiB. GPU 0 has a total capacity of 7
+  naive_torch          OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 7
+  naive_torch_bwd      OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 7

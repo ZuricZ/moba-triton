@@ -1,0 +1,16 @@
+
+forward, S=65536, B=1 H=4 D=64, block 128 top_k 8
+  GROUP   ms (min of 3)
+    128           1.502  <- tune_table's pick
+     64           1.511  <- what sm_80 picked
+     32           1.737
+     16           1.985
+  fastest GROUP=128 at 1.502 ms; tuner's pick is 1.000x that
+
+forward, S=16384, B=1 H=4 D=64, block 128 top_k 8
+  GROUP   ms (min of 3)
+    128           0.437  <- tune_table's pick
+     64           0.437  <- what sm_80 picked
+     32           0.585
+     16           0.749
+  fastest GROUP=128 at 0.437 ms; tuner's pick is 1.000x that

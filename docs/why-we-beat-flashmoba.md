@@ -105,6 +105,23 @@ S=65,536   window 128 -> 31.018 ms   window 512 -> 12.472 ms
 Narrowing it makes them 3.3x slower. `decide_lg_block_m` picks the best
 window at every length measured; it is tuned correctly for sm_80.
 
+**Re-tested on an H100, 2026-09-20** (`results/sm90-h100/logs/residual-cd.log`),
+and there the claim narrows rather than failing. Their policy is still the
+best window at S=65,536 — the length the headline lives at — but
+it is off at shorter ones:
+
+```
+      S  fastest window   their policy   penalty
+   8192     128               512         1.57x
+  16384     256               768         1.27x
+  65536    1024              1024         1.00x  <- still correct here
+```
+
+So the elimination survives where it matters — the gap grows with `S`,
+and the window that produces it is the correctly-chosen one — but the
+general statement "tuned correctly at every length" holds only on sm_80. On
+Hopper their policy is up to 1.57x off at S=8192.
+
 ### Eliminated: they get worse occupancy
 
 This one was asserted in `docs/a100-results.md` from arithmetic rather than

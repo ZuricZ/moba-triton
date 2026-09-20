@@ -197,11 +197,20 @@ raising heads and head_dim at a sequence length we already benchmark:
 | `[4, 65536, 32, 128]`, top_k 8 | **16.0 GiB** | **43%** |
 | `[2, 1048576, 16, 128]`, top_k 8 | 64 GiB | does not fit |
 
-The middle row is not hypothetical. It is the "same, batch 4" entry in
-`bench/residual.py`'s `SHAPES` and one of the rows in the fairness table, so
-it has already run on the rented A100 — where `ours` held 2.67x-2.91x. The
-scratch buffer was 43% of the card while it did. On an 80 GB H100 the same
-shape at S=131072 would want 32 GiB.
+The middle row is the "same, batch 4" entry in `bench/residual.py`'s
+`SHAPES`.
+
+**Corrected the same day.** An earlier version of this paragraph said that
+row "has already run on the rented A100, where `ours` held 2.67x-2.91x".
+It had not. The A100's panel B ran only at S=8192
+(`results/sm80-a100/data/residual-b.json`) and the fairness run topped out
+at `B1 S16384 H32 D128`; the 2.67x-2.91x figures are from those smaller
+shapes. That shape had never run anywhere.
+
+**And when it finally did, it did not hit a memory wall at all.** On an
+80 GB H100, where 16 GiB of scratch fits with room to spare, it raised an
+illegal memory access — a 32-bit index overflow in the partials
+addressing, not exhaustion. See DD-2a below.
 
 So the "revisit when" condition is not a distant 1M-token scenario. It is
 within a factor of about 1.2 of a configuration in the benchmark suite today,
@@ -209,3 +218,55 @@ and any of batch, heads, head_dim or `top_k` doubling crosses it. The fix is
 unchanged and still does not touch the kernel -- chunk the queries host-side
 and reuse the buffer -- but it should be costed before a sweep raises one of
 those four, not after an out-of-memory error names the shape for us.
+
+## DD-2a -- the partials buffer overflowed int32 before it overflowed memory
+
+**Found and fixed:** 2026-09-20 on the rented H100
+(`results/sm90-h100/logs/int32-overflow.log`).
+
+DD-2 costed this buffer in bytes and asked when it stops fitting. The
+binding limit turned out to be *elements*, and it arrives four times
+sooner.
+
+Triton's offsets are int32 unless something in the expression is widened,
+and `part_acc` is `[B, H, S, top_k, D]` -- the largest object this design
+allocates, against the output's `[B, S, H, D]`. Two address expressions
+multiplied a batch- or head-scaled base by `D` without widening:
+`moba_fwd_kernel`'s store to `PartAcc`, and `moba_combine_kernel`'s
+`a_base`. The backward had the same pattern in `DQPart`, larger still by
+the tile factor.
+
+The boundary follows the *product*, not any one axis, which is what makes
+it a 32-bit index rather than a capacity limit:
+
+| `B*H*S*top_k*D` | shape | before the fix |
+|---:|---|---|
+| 2,147,483,648 (2^31) | B=1 H=32 S=65536 D=128 | ran |
+| 2,147,483,648 (2^31) | B=4 H=32 S=16384 D=128 | ran |
+| 4,294,967,296 (2^32) | B=2 S=65536 / B=4 S=32768 / B=8 S=16384 | **all three: illegal memory access** |
+| 8,589,934,592 (2^33) | B=4 H=32 S=65536 D=128 | illegal memory access |
+
+Three different routes to the same element count fail identically, and two
+different shapes sitting exactly on 2^31 both pass. An 8 GiB buffer failing
+on an 80 GB card rules out exhaustion.
+
+**Fixed** by widening only the base of each chain to int64; every term
+added to an int64 is promoted, so the per-lane offsets stay 32-bit and the
+cost is a few address registers per program. Re-measured at S=65536:
+forward 1.492 -> 1.485 ms, backward 2.658 -> 2.580 ms, i.e. nothing. All
+six shapes above now return finite output.
+
+FlashMoBA never meets this: FA-2 declares `using index_t = int64_t` once
+in `csrc/flash_moba/src/flash.h:24` and every stride inherits it, and their
+window design allocates no `top_k`-deep partials buffer at all.
+`routing.py`'s `PACK64` guard is this project solving the same problem in
+the same place by hand.
+
+**Headroom after the fix.** int64 tops out at 9.22e18 elements. FlashMoBA's
+1M benchmark shape is 3.44e10 -- four parts per billion of the range.
+`part_acc` there is 64 GiB, so memory binds roughly 268 million times before
+the index does, which is the correct ordering: exhaustion is catchable, an
+overflowed index is an illegal access that poisons the CUDA context and
+takes unrelated work down with it. DD-2's host-side query chunking is still
+the fix for the memory limit; it is no longer racing an indexing bug to get
+there.

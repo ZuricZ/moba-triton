@@ -1,0 +1,25 @@
+  bfloat16_t>>, 0, 1, 0, 0, 1, 0, 0>                 42.1M      0.2M    12.5      15.5
+  bfloat16_t>>, 1, 0, 1>                              8.1M      0.0M    22.7       2.2
+  bfloat16_t>>, 0, 0>                                 4.0M      0.0M    23.0       0.0
+  NullType, const long *, const long *, int>          2.1M      0.0M    25.0       0.0
+  StoreWithCast<1>>                                   0.1M      0.0M    12.5       0.0
+  direct_copy_kernel_cuda                             0.1M      0.0M     9.3       0.0
+  direct_copy_kernel_cuda                             0.1M      0.0M    11.7       0.0
+  NullType, int, long>                                0.0M      0.0M    12.5       0.0
+  CUDAGeneratorImpl *>                                0.0M      0.0M   152.6       3.5
+  div_floor_kernel_cuda                               0.0M      0.0M    11.1       0.0
+  array<char *, 2>>                                   0.0M      0.0M    20.8       1.0
+  array<char *, 1>>                                   0.0M      0.0M   152.1       0.0
+  array<char *, 1>>                                   0.0M      0.0M    24.5       0.0
+  bfloat16_t>>>                                       0.0M      0.0M     3.4       0.0
+  array<char *, 1>>                                   0.0M      0.0M    12.4       0.0
+  StoreWithoutCast>                                   0.0M      0.0M     8.8       0.2
+  arange_cuda_out                                     0.0M      0.0M     5.8       0.0
+  ScanTileState<long, 1>>                             0.0M      0.0M    11.5       0.0
+  ------------------------------------------------------------------------------------
+  total DRAM traffic                                        17182.2 MiB
+  modelled by bench/roofline.py                               339.6 MiB
+  measured / modelled                                         50.59x
+
+  Measured traffic exceeds the model: something moves bytes the model
+  does not know about -- spills, write allocation, or a stage not counted.

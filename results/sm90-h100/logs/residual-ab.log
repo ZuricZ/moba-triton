@@ -1,0 +1,57 @@
+NVIDIA H100 80GB HBM3, 132 SMs
+sequence lengths: [8192, 16384, 65536]
+clocks: not pinned; the thermal protocol carries it
+
+==============================================================================
+PANEL A -- gate against attention  (B=1 H=4 D=64 block=128 top_k=8)
+==============================================================================
+      S          gate    attend     whole  gate share
+   8192   ours     0.139     0.136     0.265      52.5%
+   8192 theirs     0.302     0.550     0.837      36.0%
+                             whole pipeline: theirs / ours = 3.16x
+                             attention only: theirs / ours = 4.05x
+  16384   ours     0.233     0.206     0.435      53.7%
+  16384 theirs     0.501     0.984     1.530      32.7%
+                             whole pipeline: theirs / ours = 3.52x
+                             attention only: theirs / ours = 4.78x
+  65536   ours     0.852     0.561     1.424      59.8%
+  65536 theirs     1.693     3.942     5.674      29.8%
+                             whole pipeline: theirs / ours = 3.98x
+                             attention only: theirs / ours = 7.03x
+
+==============================================================================
+PANEL B -- does the gap survive a busy GPU?
+==============================================================================
+  B    H    D       S | their progs    ours |   ours ms  theirs ms   ratio
+  1    4   64    8192 |          64     256 |     0.268      0.803   2.99x   the sweep shape
+  1    4   64   16384 |          88     512 |     0.433      1.531   3.54x   the sweep shape
+  1    4   64   65536 |         256   2,048 |     1.485      5.809   3.91x   the sweep shape
+  1   32  128    8192 |         512   2,048 |     1.220      3.663   3.00x   GPT-3 13B-ish
+  1   32  128   16384 |         704   4,096 |     2.587      8.175   3.16x   GPT-3 13B-ish
+  1   32  128   65536 |       2,048  16,384 |    13.389     48.065   3.59x   GPT-3 13B-ish
+  4   32  128    8192 |       2,048   8,192 |     4.293     12.919   3.01x   same, batch 4
+  4   32  128   16384 |       2,816  16,384 |     9.455     29.054   3.07x   same, batch 4
+      (refused: AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaE)
+      (theirs unavailable: AcceleratorError)
+  4   32  128   65536 |       8,192  65,536 |         -          -       -   same, batch 4
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/root/moba-triton/bench/residual.py", line 534, in <module>
+    main()
+    ~~~~^^
+  File "/root/moba-triton/bench/residual.py", line 515, in main
+    data["panel_b"] = panel_b(seq_lens)
+                      ~~~~~~~^^^^^^^^^^
+  File "/root/moba-triton/bench/residual.py", line 349, in panel_b
+    torch.cuda.empty_cache()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/root/moba-triton/.venv/lib/python3.13/site-packages/torch/cuda/memory.py", line 228, in empty_cache
+    torch._C._cuda_emptyCache()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+

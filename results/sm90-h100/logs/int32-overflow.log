@@ -1,0 +1,6 @@
+B=1 H=32 S=65536 D=128  part_acc 2,147,483,648 elems (1.00x int32, 4.0 GiB)  OK  out (1, 65536, 32, 128)  finite=True
+B=2 H=32 S=65536 D=128  part_acc 4,294,967,296 elems (2.00x int32, 8.0 GiB)  FAIL  RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered
+B=4 H=32 S=32768 D=128  part_acc 4,294,967,296 elems (2.00x int32, 8.0 GiB)  FAIL  RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered
+B=4 H=32 S=65536 D=128  part_acc 8,589,934,592 elems (4.00x int32, 16.0 GiB)  FAIL  RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered
+B=4 H=32 S=16384 D=128  part_acc 2,147,483,648 elems (1.00x int32, 4.0 GiB)  OK  out (4, 16384, 32, 128)  finite=True
+B=8 H=32 S=16384 D=128  part_acc 4,294,967,296 elems (2.00x int32, 8.0 GiB)  FAIL  RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered
