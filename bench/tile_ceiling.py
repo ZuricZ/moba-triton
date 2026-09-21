@@ -32,6 +32,35 @@ are measured:
 The pair brackets the true ceiling, and their difference prices the softmax at
 our tile shape -- currently an unattributed part of the roofline gap.
 
+MEASURED, AND THE PREMISE ABOVE IS WRONG ON A SMALL CARD (2026-09-21, sm_86).
+The paragraph that opens this docstring predicts the tile roof lands *below* the
+GEMM. On the RTX 3050 Ti it lands above it:
+
+    bf16, 4096^3 GEMM     13.04 TFLOP/s
+    bf16, our tile        14.23 TFLOP/s   <- 1.09x FASTER
+
+The reason is the card, not the tile. A 4096^3 bf16 GEMM touches about 100 MB
+of operands against roughly 2 MB of L2 here, so on 4 GB the "friendliest shape
+a tensor core will ever see" is itself memory bound. This kernel cycles K/V
+through an L2-resident circular buffer on purpose, so it is the only one of the
+two measuring arithmetic at all. Expect the predicted ordering to return on a
+card whose L2 and bandwidth can feed the big GEMM (A100, H100); it has not been
+measured on either. Not for want of opportunity: this module landed 2026-09-14
+(`4916c29`), before the A100 was rented on 09-18 and before the H100 on 09-20,
+and was simply never run on either. Both cards are now deleted, so the ordering
+above stands unverified on anything larger than a laptop.
+
+WHAT THIS DID NOT CHANGE, WHICH IS THE POINT WORTH KEEPING. Correcting the flat
+roof moved no conclusion in any document. Every kernel the write-ups argue about
+-- `ours`, `flash_moba`, both naive paths -- is *memory* bound, and a memory
+bound point is measured against the slanted roof, `intensity * bandwidth`, which
+the flat roof does not enter. At S=8192 `ours` reads 75.8 FLOP/byte and a roof
+of 12.47 TFLOP/s, and 75.8 * 153.3 GiB/s = 12.48: the flat roof is absent from
+that number. The flat roof governs only the ridge point and the compute-bound
+dense baselines (`sdpa_dense`, `fa2_minimal`). `ours` at 75.8 sits below the
+ridge either way -- 86.5 with the measured roof, 79.2 with the GEMM -- so even
+the classification is unchanged.
+
 WHAT KEEPS THE COMPILER HONEST. Two hazards, both of which would produce a
 flattering number:
 
