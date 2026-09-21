@@ -346,7 +346,6 @@ def gate_select(
     cfg: MoBAConfig,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
-    block_n: int | None = None,
 ) -> torch.Tensor:
     """Selects blocks for every query, returning ids rather than a dense mask.
 
@@ -362,11 +361,6 @@ def gate_select(
             given, `q` holds one packed batch and `B` must be 1.
         max_seqlen: Longest sequence, required with `cu_seqlens`. It shapes the
             launch grid; deriving it would cost a host synchronization.
-        block_n: Representative width per streaming chunk, overriding
-            `GATE_BLOCK_N`. Exposed so a sweep can re-tune the width at long
-            context: the merge overhead is `2 * K_POW2 / BLOCK_N`, so wider
-            chunks amortize it, and the 4K-64K sweep that fixed `GATE_BLOCK_N`
-            at 32 stopped where 64 began to tie.
 
     Returns:
         Selected block ids shaped [B, H, S, top_k], int32, ascending within
@@ -444,7 +438,7 @@ def gate_select(
         # it would be arithmetic that changes no decision.
         1.0,
         BLOCK_SIZE=cfg.block_size, BLOCK_M=block_m, D=d,
-        BLOCK_N=max(TENSOR_CORE_TILE, block_n or GATE_BLOCK_N),
+        BLOCK_N=max(TENSOR_CORE_TILE, GATE_BLOCK_N),
         N_BLOCKS=n, K_POW2=k_pow2, CAPACITY=capacity,
         TAKE=take, TOP_K=cfg.top_k,
         ALWAYS_CURRENT=cfg.always_select_current,
