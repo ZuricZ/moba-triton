@@ -16,10 +16,16 @@ MoonshotAI's reference bitwise, block choice for block choice.
 
 ## Results
 
-![Speedup over FlashMoBA and dense attention, against sequence length](results/sm90-h100/figures/speedup.png)
-
 Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
 `[1, S, 4, 64]`, which is FlashMoBA's published configuration.
+
+![Forward pass latency against sequence length, six implementations, log-log](results/sm90-h100/figures/moba-fwd.png)
+
+This is what was measured: wall-clock latency, everything else on this page is
+derived from it. Two lines stop early because those implementations run out of
+memory, which is itself the result at that end of the axis. The backward pass
+has its own figure in
+[`results/sm90-h100/figures/`](results/sm90-h100/figures/).
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -27,11 +33,21 @@ Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
 | 131,072 | 3.94 ms | 4.2x | 7.2x | 6.18 ms | 3.1x | 16.8x |
 | 524,288 | 38.2 ms | 3.9x | 13.0x | 47.0 ms | 3.3x | 36.0x |
 
-Two different things are happening in those ratio columns. Against dense
-attention the margin keeps growing, because dense work is quadratic in S and
-this is not. Against FlashMoBA, which is also sparse, the ratio settles around
-4x: both kernels are linear in S, and what separates them is a constant factor
-in how much memory traffic each spends per selected block.
+On a log-log latency plot a speedup is the vertical gap between two lines, and
+whether it is growing is the difference between two slopes. Dividing shows that
+directly:
+
+![Speedup over FlashMoBA and dense attention, against sequence length](results/sm90-h100/figures/speedup.png)
+
+Two different things are happening. Against dense attention the margin keeps
+growing, because dense work is quadratic in S and this is not. Against
+FlashMoBA, which is also sparse, the ratio settles around 4x: both kernels are
+linear in S, and what separates them is a constant factor in how much memory
+traffic each spends per selected block.
+
+The cost of dividing is that absolute scale disappears, which is why both
+figures are here. A ratio cannot tell you whether 3.9x is 3.9x of 38 ms or of
+38 us, and at some point that is the number you have to budget for.
 
 The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
 FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
