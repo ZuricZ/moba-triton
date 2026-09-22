@@ -120,10 +120,12 @@ the programs run at the same time, so the slowest sets the pace. Those same
 five queries are why block 0 is worth loading once and why its program finishes
 last, so no scheduler can remove the imbalance without giving up the saving.
 
-The grouping is stored as compressed sparse column and built entirely on the
-GPU with a count, a prefix sum and a scatter, using no `nonzero()` anywhere.
-`nonzero()` returns a data-dependent number of results, which forces a copy
-back to the CPU before PyTorch can allocate. That round trip costs about 230 us
+The grouping is stored as compressed sparse column. There are two builders: a
+PyTorch reference that searches the oracle's dense mask with `nonzero()`, and
+the one the kernels use, which is a count, a prefix sum and a scatter on device
+and never lets a dense mask exist. The difference is the point. `nonzero()`
+returns a data-dependent number of results, so PyTorch must copy a count back
+to the CPU before it can allocate, and that round trip costs about 230 us
 against about 6 us for the same arithmetic kept on device.
 
 ## Using it
@@ -155,11 +157,12 @@ out.sum().backward()                    # dq, dk, dv
 Tensors crossing the API are token-major `[B, S, H, D]`, matching
 FlashAttention and every reference implementation.
 
-Three optional arguments cover the rest. `causal=True` masks within the query's
-own block, since blocks wholly in the past need no mask. `cu_seqlens` takes
-packed variable-length batches, where each sequence attends independently.
-`index` accepts a precomputed routing index, which holds block selection fixed
-while the inputs vary.
+Four optional arguments cover the rest. `causal` masks within the query's own
+block and is on by default, since blocks wholly in the past need no mask.
+`cu_seqlens` takes packed variable-length batches, where each sequence attends
+and receives gradient independently; it needs `max_seqlen` beside it, because
+deriving that would cost a host synchronization. `index` accepts a precomputed
+routing index, which holds block selection fixed while the inputs vary.
 
 The gate itself receives no gradient. MoBA's routing is a hard top-k, and the
 backward reuses the forward's selection as a fixed sparsity pattern, matching
@@ -267,9 +270,10 @@ separates how much of the win is byte count and how much is efficiency,
 line by line, and [`docs/environment.md`](docs/environment.md) pins every
 version and the reference commit each number was measured against.
 
-The rest of `docs/` holds the individual measurements, including three
-occasions where a result flattered this kernel and turned out to be a
-measurement artifact.
+The rest of `docs/` holds the individual measurements, including the four
+measurement artifacts caught so far. Three flattered this kernel; the fourth
+penalised it, which is the direction a habit of suspecting good news does not
+catch.
 
 ## Layout
 
@@ -277,6 +281,9 @@ measurement artifact.
 src/moba/                 the library, and nothing else
   config.py               MoBAConfig: semantics flags, block arithmetic
   naive.py                the PyTorch oracle, an executable definition of MoBA
+  gqa.py                  grouped-query head mapping
+  varlen.py               packed variable-length sequences
+  device.py               capability checks
   kernels/
     pooling.py            block to representative key
     gating.py             queries against representatives, top-k blocks
