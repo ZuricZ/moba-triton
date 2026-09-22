@@ -239,9 +239,28 @@ number of cross-lane operations, so there is no asymptotic regime to enter. The
 lever is merging less often, which means coarse-to-fine selection, and that
 changes which blocks get chosen rather than how they are found.
 
-Also open: a comment pass over the kernels, a crash in the community Triton
-port above S=65536 that keeps it out of the long sweeps, and host-side query
-chunking for the memory wall.
+The other open item is the memory this design trades for its speed. The
+attention stage writes one partial output per (query, selected block) into a
+buffer shaped `[B, H, S, top_k, D]`, allocated across the whole sequence, which
+is `top_k` copies of the output:
+
+| shape | partials buffer |
+|---|---:|
+| `[1, 65536, 4, 64]`, top_k 8 | 268 MB |
+| `[2, 1048576, 16, 128]`, top_k 8 | 64 GiB |
+
+The second is FlashMoBA's 1M benchmark shape, and it does not fit an 80 GB
+card. That is the cost of the inversion rather than an oversight: allocating
+across all of S is what lets a block-owning program gather over the entire
+sequence and keep its tiles full, and FlashMoBA made the opposite trade,
+holding scratch at one copy of the output and paying for it in padding at every
+length. The fix needs no kernel change, only chunking the queries host-side and
+reusing the buffer, but it is unbuilt
+([`docs/deferred-decisions.md`](docs/deferred-decisions.md) DD-2).
+
+One gap in the comparison, for completeness: the community Triton port crashes
+above S=65536 on this harness, so it appears in the A100 table and not in the
+long sweeps.
 
 ## Reading further
 
