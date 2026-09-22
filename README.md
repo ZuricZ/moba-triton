@@ -21,11 +21,16 @@ Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
 
 ![Forward pass latency against sequence length, six implementations, log-log](results/sm90-h100/figures/moba-fwd.png)
 
-This is what was measured: wall-clock latency, everything else on this page is
+![Forward and backward latency against sequence length, the full training step](results/sm90-h100/figures/moba-bwd.png)
+
+This is what was measured: wall-clock latency. Everything else on this page is
 derived from it. Two lines stop early because those implementations run out of
-memory, which is itself the result at that end of the axis. The backward pass
-has its own figure in
-[`results/sm90-h100/figures/`](results/sm90-h100/figures/).
+memory, which is itself the result at that end of the axis.
+
+Both passes are here because you cannot train with a forward pass, and the
+backward is where the gap against dense attention is widest. It is also the
+weaker of the two against FlashMoBA, 3.3x rather than 3.9x at 524K, which is
+the honest reason not to show only the forward.
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
