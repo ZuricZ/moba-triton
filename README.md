@@ -1,93 +1,126 @@
 # MoBA Triton Kernel
 
-A [Triton](https://triton-lang.org) implementation of **MoBA** — Mixture of
-Block Attention ([Lu et al., Moonshot AI](https://arxiv.org/abs/2502.13189)) —
-written to turn MoBA's arithmetic sparsity into wall-clock speedup at long
-context.
+A [Triton](https://triton-lang.org) implementation of MoBA, Mixture of Block
+Attention ([Lu et al., Moonshot AI](https://arxiv.org/abs/2502.13189)).
 
-MoBA is sparse attention where **each query picks its own handful of key
-blocks**. That per-query choice is what makes it cheap on paper and awkward on
-a GPU: it breaks the one assumption FlashAttention is built on. This kernel is
-organized around that problem — it inverts FlashAttention's loop order so a
-program owns a *key* block and gathers the queries that chose it, rather than
-owning a query tile and loading the union of whatever its queries wanted.
+MoBA is sparse attention in which every query picks its own handful of key
+blocks. That per-query choice is what makes it cheap on paper and awkward on a
+GPU, because it breaks the assumption FlashAttention is built on. This kernel
+inverts FlashAttention's loop order: a program owns one key block and gathers
+the queries that chose it, rather than owning a query tile and loading the
+union of whatever its queries asked for.
 
-Forward and backward, grouped-query attention, and variable-length packing are
-all implemented and tested against a PyTorch oracle. **461 tests pass.**
+Forward and backward, grouped-query attention and variable-length packing are
+all implemented. Correctness is checked against a PyTorch oracle that matches
+MoonshotAI's reference bitwise, block choice for block choice.
 
-> **Scope.** This is a learning project. The numbers below are from an
-> **A100-PCIE-40GB**; the laptop figures they replace are in
-> [`docs/reference-comparison.md`](docs/reference-comparison.md).
+## Results
 
----
+![Speedup over FlashMoBA and dense attention, against sequence length](results/sm90-h100/figures/speedup.png)
 
-## Results so far
+Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
+`[1, S, 4, 64]`, which is FlashMoBA's published configuration.
 
-`block_size=128, top_k=8` (FlashMoBA's published configuration), bf16,
-shape `[1, S, 4, 64]`, forward pass, on an A100-40GB:
-
-| S | blocks | **ours** | FlashMoBA (CUDA) | Triton-MoBA | MoonshotAI (fused) | torch SDPA |
+| S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
-| 4096 | 32 | 0.250 ms | 0.640 ms | 1.787 ms | 1.849 ms | 0.144 ms |
-| 8192 | 64 | 0.419 ms | 1.030 ms | 2.387 ms | 2.422 ms | 0.352 ms |
-| 16384 | 128 | **0.692 ms** | 2.108 ms | 4.669 ms | 5.063 ms | 1.182 ms |
-| 32768 | 256 | **1.262 ms** | 5.080 ms | 13.573 ms | 17.144 ms | 4.062 ms |
-| 65536 | 512 | **2.727 ms** | 12.419 ms | 47.876 ms | 57.162 ms | 15.180 ms |
+| 65,536 | 1.49 ms | 3.8x | 5.0x | 2.66 ms | 2.6x | 10.0x |
+| 131,072 | 3.94 ms | 4.2x | 7.2x | 6.18 ms | 3.1x | 16.8x |
+| 524,288 | 38.2 ms | 3.9x | 13.0x | 47.0 ms | 3.3x | 36.0x |
 
-At S=65536 that is **5.57x torch SDPA, 4.55x FlashMoBA's CUDA kernel, 17.6x the
-community Triton port, and 20.7x MoonshotAI's own fused implementation** -- and
-the margin grows with context, which is the regime MoBA exists for.
+Two different things are happening in those ratio columns. Against dense
+attention the margin keeps growing, because dense work is quadratic in S and
+this is not. Against FlashMoBA, which is also sparse, the ratio settles around
+4x: both kernels are linear in S, and what separates them is a constant factor
+in how much memory traffic each spends per selected block.
 
-Triton-MoBA is the comparison that isolates the idea from the language: it is
-also Triton, compiled by the same compiler, and it is 17.6x slower. That ratio
-*grows* with context (5.7x at S=8192), which a constant-factor advantage in
-tiling or tuning could not produce -- it is the loop order.
+The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
+FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
+architectures, one ordering.
 
-Four things this table says:
+Past S=131072 the dense baselines stop being a practical comparison and become
+a demonstration instead. PyTorch's own reference implementation runs out of
+memory at S=32768 trying to allocate 16 GiB, because the score matrix is
+quadratic in S.
 
-- **The advantage compounds with sequence length**, exactly as the
-  loop-inversion argument predicts: 0.84× → 1.71× → 3.22× → 5.57× against
-  dense. Below the crossover there is no sparsity to exploit — at S=1024,
-  `top_k=8` selects all 8 blocks — so dense should win, and does.
-- **The win is in the attention kernel, not the gate.** Timing the pipelines'
-  halves separately gives 1.9–2.1× on routing but **3.2–3.4× on attention**,
-  which is the stage where the two designs differ. FlashMoBA also gathers per
-  KV block, but only within a 512–1024-query window, so at long context its
-  tiles are mostly padding, and its shared-memory footprint leaves one program
-  per A100 SM; ours gathers across the whole sequence
-  (`docs/traffic-derivation.md`).
-- **The dense baselines stop being possible.** `naive_torch` OOMs at S=32768
-  trying to allocate 16 GiB, because attention memory is quadratic in S. Ours
-  runs S=65536 in 2.7 ms.
-- **It is verified, not assumed.** Compared selection for selection, `ours`
-  reproduces the PyTorch oracle's (query, block) choices exactly at S=4096 and
-  8192; FlashMoBA selects the same count and differs on ~0.5% near-ties. The
-  gap widens rather than closes at realistic shapes — 3.12× at `H=32, D=128,
-  batch 4`.
+## Why per-query selection is hard
 
-Full A100 results, the fairness checks behind the FlashMoBA claim, and why
-Triton-MoBA could not run alongside MoonshotAI:
-[`docs/a100-results.md`](docs/a100-results.md).
+FlashAttention's speed rests on one trick. Load a tile of keys into on-chip
+memory once, then reuse that load across a whole tile of queries: one expensive
+trip to HBM, many cheap uses.
 
-Full numbers, the four measurement artifacts caught along the way, and the
-thermal protocol these required:
-[`docs/reference-comparison.md`](docs/reference-comparison.md).
+MoBA removes the precondition. Two adjacent queries routinely select different
+blocks, so a query-major program has to load the union of everything its
+queries asked for and then mask away what each individual query did not want.
+The masked-away part is tensor-core work that gets computed and thrown out, and
+it gets worse as context grows:
 
----
+| S | blocks | tile utilization | discarded |
+|---:|---:|---:|---:|
+| 4,096 | 32 | 0.43 | 57% |
+| 8,192 | 64 | 0.23 | 77% |
+| 16,384 | 128 | 0.12 | 88% |
+
+That is the direction MoBA exists to scale in, so the waste grows exactly where
+the method is meant to pay off. The table describes a query-major kernel that
+masks, which is what FlashAttention's variable-length path gives both the
+community Triton port and MoonshotAI's fused implementation. FlashMoBA avoids
+it by gathering per block as well, but only inside a window of 512 to 1024
+queries, so at long context its tiles are mostly padding
+([`docs/traffic-derivation.md`](docs/traffic-derivation.md)).
+
+The fix is to invert the loop. A program owns one KV block and gathers exactly
+the queries that selected it, so every key it loads is used by every query it
+holds.
+
+| | FlashAttention-2 | This kernel |
+|---|---|---|
+| A program owns | a tile of queries | a tile of keys |
+| It loops over | key blocks | the queries that chose this block |
+| Which keys it loads | a contiguous range | one block, always used in full |
+| Wasted tensor-core work | none, it is dense | none, by construction |
+| Softmax normalizer | complete when the loop ends | incomplete, needs a merge pass |
+| Numerics, tiling, SRAM budget | same | same |
+
+The last two rows are the trade. Inverting the loop buys full utilization and
+costs output ownership, because a query's answer now arrives in pieces from
+several programs. A final pass rescales and sums those pieces, which is the
+same algebra FlashAttention already runs between loop iterations, moved to run
+across programs instead of across iterations.
+
+## The transpose
+
+The gate answers "for each query, which blocks?". The inverted kernel needs the
+other direction, "for each block, which queries?", stored as compressed sparse
+column. Six queries and three blocks, small enough to check by hand:
+
+![The gate's per-query choice, and the same decision transposed into CSC](docs/figures/csc-transpose.svg)
+
+Both halves record one decision. The right-hand form is the one a block-major
+kernel can schedule, because a program needs its query list before it starts.
+
+It also shows the kernel's main open problem. B0 holds five queries and B2
+holds two, because early blocks are visible to every later query and late
+blocks to almost nobody. Measured on real selections that skew reaches 6.2x in
+the worst column, and the scheduler has to absorb it.
+
+The transpose is built on the GPU with a count, a prefix sum and a scatter, and
+uses no `nonzero()` anywhere. `nonzero()` returns a data-dependent number of
+results, which forces a copy back to the CPU before PyTorch can allocate. That
+round trip costs about 230 us against about 6 us for the same arithmetic kept
+on device.
 
 ## Using it
 
-Requires a CUDA GPU and Linux (or WSL2). Triton has no native-Windows support
-here.
+Requires a CUDA GPU and Linux or WSL2. Triton has no native Windows support.
 
 ```bash
 git clone https://github.com/ZuricZ/moba-triton.git
 cd moba-triton
-uv sync                      # torch is pinned to the cu126 index; see pyproject.toml
+uv sync                      # torch is pinned to the cu126 index
 uv run pytest -m "not slow"
 ```
 
-The whole public API is two names:
+The public API is two names:
 
 ```python
 import torch
@@ -99,215 +132,115 @@ q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16,
 
 cfg = MoBAConfig(block_size=128, top_k=8)
 out = moba_attention(q, k, v, cfg)      # [B, S, H, D]
-out.sum().backward()                     # dq, dk, dv — the gate gets no gradient
+out.sum().backward()                    # dq, dk, dv
 ```
 
-Tensors crossing the API are **token-major `[B, S, H, D]`**, matching
+Tensors crossing the API are token-major `[B, S, H, D]`, matching
 FlashAttention and every reference implementation.
 
-Three optional arguments cover the rest:
+Three optional arguments cover the rest. `causal=True` masks within the query's
+own block, since blocks wholly in the past need no mask. `cu_seqlens` takes
+packed variable-length batches, where each sequence attends independently.
+`index` accepts a precomputed routing index, which holds block selection fixed
+while the inputs vary.
 
-| Argument | What it does |
-|---|---|
-| `causal=True` | Masks within the query's own block. Blocks wholly in the past need no mask. |
-| `cu_seqlens` | Variable-length packing: pass `[1, T, H, D]` plus cumulative token counts, and each sequence attends independently. |
-| `index` | A precomputed routing index, to hold block selection fixed while inputs vary. |
+The gate itself receives no gradient. MoBA's routing is a hard top-k, and the
+backward reuses the forward's selection as a fixed sparsity pattern, matching
+MoonshotAI's reference. `MoBAConfig` carries four further flags pinning down
+details the paper leaves open, such as tie-breaking and whether a query's own
+block consumes a `top_k` slot. The reasoning is in
+[`src/moba/config.py`](src/moba/config.py).
 
-`MoBAConfig` also carries four flags pinning down details the MoBA paper leaves
-open — tie-breaking, whether the query's own block consumes a `top_k` slot,
-whether pooling respects the causal mask. Defaults match MoonshotAI's reference
-bitwise. Reasoning is in [`src/moba/config.py`](src/moba/config.py).
+## Scope
 
----
+This is a learning project, and the numbers above come with three limits.
 
-## How it works
+It is one configuration. Everything here is `block_size=128, top_k=8` at
+`[1, S, 4, 64]`, chosen because it is what FlashMoBA publishes. A block-size
+sweep is in [`docs/block-size-results.md`](docs/block-size-results.md), but the
+headline is a single point.
 
-### 1. What MoBA computes
+It is two rented cards. The H100 and A100 runs each lasted one session and both
+machines are gone, so nothing here can be re-measured without renting again.
+The development machine is a 4 GB laptop that cannot hold these shapes.
 
-Dense attention has every query look at every key. MoBA cuts the keys into
-fixed-size blocks, builds **one representative key per block** by averaging it,
-and has each query score itself against the *representatives* — a much smaller
-problem. It keeps the `top_k` highest-scoring blocks and attends only to those.
+Speed is not quality. Selection is verified against the oracle, but no model
+was trained or evaluated here, so none of this says whether MoBA is a good
+idea. It says how fast this implementation of it runs.
 
-With `block_size=128, top_k=8` at S=8192, that's 64 blocks of which each query
-reads 8: **one eighth of the work** of dense attention.
+## Future work
 
-The catch is in one word: *each*. The choice is per query, not per query
-block.
+The gate is now the bottleneck. At S=524288 block selection is 87% of the
+forward pass, while the attention half on its own is 21x FlashMoBA's.
+Selection is quadratic in S, since every query scores every past block, and
+attention is linear, so the gate is what holds the whole-pipeline ratio near
+4x.
 
-### 2. Why per-query choice breaks FlashAttention
+The obvious fix does not work. Replacing the hand-rolled merge loop with
+Triton's `tl.topk` was built, verified bit-identical against the shipping
+kernel, and measured at 1.04x to 1.10x
+([`docs/gate-topk-measurements.md`](docs/gate-topk-measurements.md)). At
+32-wide chunks and k=8, a bitonic network and a hand-rolled loop cost the same
+number of cross-lane operations, so there is no asymptotic regime to enter. The
+lever is merging less often rather than merging faster, which means a
+coarse-to-fine selection scheme, and that changes which blocks get chosen
+rather than how they are found.
 
-FlashAttention's speed rests on a single trick: load a tile of keys into fast
-on-chip memory (SRAM) **once**, then reuse that load across a whole tile of
-queries. One expensive trip to HBM, many cheap uses.
+Also open: a comment pass over the kernels, a crash in the community Triton
+port above S=65536 that keeps it out of the long sweeps, and host-side query
+chunking for the memory wall.
 
-MoBA removes the precondition. Two adjacent queries routinely select different
-blocks, so a query-major program must load the *union* of everything its
-queries asked for, then mask away what each individual query didn't want. The
-masked-away part is tensor-core work that gets computed and thrown out.
+## Reading further
 
-Measured, at `block_size=128, top_k=8`:
+Start with [loop order and memory
+traffic](docs/learning/01-loop-order-and-memory-traffic.md), which builds the
+argument above from first principles and assumes no GPU background, then
+[anatomy of a FlashAttention
+kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md), which reads a
+real Triton kernel and then breaks it on purpose.
 
-| seq_len | num_blocks | utilization | discarded |
-|---:|---:|---:|---:|
-| 4096 | 32 | 0.43 | 57% |
-| 8192 | 64 | 0.23 | 77% |
-| 16384 | 128 | 0.12 | **88%** |
+For the measurements, [`docs/h100-results.md`](docs/h100-results.md) has the
+full sweep, and [`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)
+separates how much of the win is byte count and how much is efficiency.
+[`docs/flashmoba-digest.md`](docs/flashmoba-digest.md) is a line-by-line
+account of what FlashMoBA's CUDA actually does, and
+[`docs/environment.md`](docs/environment.md) pins every version and the
+reference commit each published number was measured against.
 
-It gets *worse* as context grows — precisely the direction MoBA is meant to
-scale in.
-
-That table describes a query-major kernel that masks, which is what
-FlashAttention's varlen path gives Triton-MoBA and MoonshotAI. FlashMoBA avoids
-it by gathering per block too, and pays a different price for doing so inside a
-bounded query window (`docs/traffic-derivation.md`).
-
-**So the kernel inverts the loop: a program owns one KV block and gathers
-exactly the queries that selected it.** Every key it loads is used by every
-query it holds. Utilization is 100% by construction rather than by tuning.
-
-| | FlashAttention-2 | This kernel |
-|---|---|---|
-| A program owns | a tile of **queries** | a tile of **keys** |
-| It loops over | key blocks | the queries that chose this block |
-| Which keys does it load? | a contiguous range | one block, always used in full |
-| Wasted tensor-core work | none (dense) | none (by construction) |
-| Softmax normalizer | complete when the loop ends | *incomplete* — needs a merge pass |
-| Numerics, tiling, SRAM budget | — | **same** |
-
-The last two rows are the trade. Inverting the loop buys perfect utilization
-and costs output ownership: a query's answer now arrives in pieces from several
-programs.
-
-### 3. The five stages
-
-```
-   pooling  ──▶  gating  ──▶  routing  ──▶  moba_fwd  ──▶  combine
-   one key       score vs.     transpose      attend        merge the
-   per block     reps, top-k   the choice     partials      partials
-```
-
-Each is a module under [`src/moba/kernels/`](src/moba/kernels/), named for the
-stage rather than the mechanism.
-
-**Routing is the interesting one.** The gate answers *"for each query, which
-blocks?"*. The inverted kernel needs the transpose: *"for each block, which
-queries?"*. That transpose is stored as **CSC** — compressed sparse column,
-where columns are KV blocks and entries are query indices.
-
-Small enough to count by hand — 6 queries, `block_size=2` (so 3 blocks),
-`top_k=2` with the query's own block included:
-
-```
-  gate output (query → blocks)        CSC transpose (block → queries)
-
-  q0 → B0                             B0 │ q0 q1 q2 q3 q4      (5 queries)
-  q1 → B0                             B1 │       q2 q3    q5   (3 queries)
-  q2 → B0 B1                          B2 │             q4 q5   (2 queries)
-  q3 → B0 B1
-  q4 → B0    B2                       col_nnz     = [5, 3, 2]
-  q5 →    B1 B2                       col_offsets = [0, 5, 8, 10]
-                                      row_indices = [0,1,2,3,4, 2,3,5, 4,5]
-```
-
-Read left to right and it's six independent choices. Read top to bottom and
-it's three work items, each with a query list attached. **Same decision, two
-directions; the right-hand form is the one a KV-block-major kernel can
-schedule.**
-
-That picture also shows the kernel's main open problem: B0 has 5 queries and B2
-has 2. Early blocks are visible to everyone, late blocks to almost nobody, and
-that skew (measured at 6.2× in the worst column) is a load-balancing problem the
-scheduler has to absorb.
-
-The transpose is built entirely on the GPU — count, prefix-sum, scatter — with
-no `nonzero()` anywhere. `nonzero()` returns a data-dependent number of results,
-which forces PyTorch to copy a count back to the CPU before it can allocate. On
-this machine that round trip costs ~230 µs against ~6 µs for the same
-arithmetic kept on device.
-
-### 4. Merging the partials
-
-Because a query's row is now split across programs, each program produces an
-**un-normalized** partial: it cannot divide by a softmax denominator it hasn't
-seen. Each writes out its local max `m`, its local sum `l`, and its
-accumulator.
-
-`combine_partials` then does exactly what FlashAttention's online softmax does
-between loop iterations — rescale by `exp(m_local − m_global)` and sum — except
-across *programs* instead of across iterations. Identical algebra, relocated.
-
-This is the one genuinely extra pass the inversion costs. It buys the 88%.
-
-### 5. The backward
-
-Standard FlashAttention-2 recomputation: the softmax is rebuilt from `q`, `k`,
-`v` and the saved log-sum-exp rather than stored, so no S×S matrix ever exists.
-The two large forward buffers (64 MB at S=8192) are deliberately *not* saved.
-
-**The gate receives no gradient.** MoBA's routing is a hard top-k, and the
-backward reuses the forward's selection as a fixed sparsity pattern — matching
-Moonshot's reference, which likewise treats block choice as
-non-differentiable. So `q` gets gradient through the attention scores, not
-through its role in choosing blocks.
-
----
+The rest of `docs/` holds the individual measurements, including three
+occasions where a result flattered this kernel and turned out to be a
+measurement artifact.
 
 ## Layout
 
 ```
 src/moba/                 the library, and nothing else
-  config.py               MoBAConfig — semantics flags, block arithmetic
-  naive.py                the PyTorch oracle: an executable definition of MoBA
-  device.py  gqa.py  varlen.py
+  config.py               MoBAConfig: semantics flags, block arithmetic
+  naive.py                the PyTorch oracle, an executable definition of MoBA
   kernels/
-    pooling.py            block → representative key
-    gating.py             query × representatives → top-k blocks
+    pooling.py            block to representative key
+    gating.py             queries against representatives, top-k blocks
     routing.py            that choice, transposed into CSC
     moba_fwd.py           one program per (KV block, batch, KV head)
     moba_bwd.py           the backward of the same
     tuning.py             host-side launch policy the kernels share
     attention.py          the two halves as one differentiable op
 
-implementations/          uniform adapters for the head-to-head — ours, the
-                          three references, and two dense baselines
-bench/                    benchmark drivers; run as modules (python -m bench.compare)
-tests/                    461 tests, plus the tolerance policy
+implementations/          uniform adapters for the head-to-head
+bench/                    benchmark drivers, run as modules
+tests/                    the suite, plus the tolerance policy
 docs/                     measurements and learning notes
 ```
 
-`implementations/` and `tests/` sit outside the package on purpose: nothing
+`implementations/` and `tests/` sit outside the package on purpose. Nothing
 under `src/moba` may import either, so the library ships without the harness.
-
----
-
-## Documentation
-
-Written to be read in order.
-
-| Document | What it covers |
-|---|---|
-| [learning/01 — loop order and memory traffic](docs/learning/01-loop-order-and-memory-traffic.md) | Why per-query routing breaks FlashAttention, from first principles. No GPU background assumed. |
-| [learning/02 — anatomy of a FlashAttention kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md) | Reading a real Triton kernel: grids, tiling, occupancy, warps, online softmax — then breaking it on purpose. |
-| [learning/03 — GQA and the column merge](docs/learning/03-gqa-and-the-column-merge.md) | How grouped-query attention changes the CSC columns, and what stays the same. |
-| [learning/04 — packed sequences and where the work goes](docs/learning/04-packed-sequences-and-where-the-work-goes.md) | Variable-length packing, and what it does to the block boundaries. |
-| [learning/05 — the backward pass](docs/learning/05-the-backward-pass.md) | Recomputation, and why dQ needs a different strategy than dK/dV. |
-| [environment](docs/environment.md) | Every version pin and where it is decided, including the reference commits each published number was measured against. |
-| [occupancy-measurements](docs/occupancy-measurements.md) | Why the attend kernel keeps only 8 of 48 warps resident, and why raising that makes it slower. |
-| [flashmoba-digest](docs/flashmoba-digest.md) | What FlashMoBA's CUDA actually does, cited line by line. |
-| [a100-results](docs/a100-results.md) | The head-to-head on an A100: four MoBA implementations, S up to 65536, and the three checks behind the FlashMoBA claim. |
-| [reference-comparison](docs/reference-comparison.md) | The head-to-head, and three measurement artifacts that flattered us. |
-| [divergence-measurements](docs/divergence-measurements.md) | Routing divergence measured from real selection masks. |
-| [gather-cost-measurements](docs/gather-cost-measurements.md) | What gathering scattered query rows actually costs. |
-| [load-balance-measurements](docs/load-balance-measurements.md) | What KV-block skew costs after scheduling. |
-| [semantics-crosscheck](docs/semantics-crosscheck.md) | Rule-by-rule agreement with MoonshotAI's reference. |
 
 ## References
 
-- **MoBA** — Lu et al., Moonshot AI — [arXiv:2502.13189](https://arxiv.org/abs/2502.13189)
-- **FlashMoBA** — Xiao, Guo, Mazaheri, Han (MIT Han Lab) — [arXiv:2511.11571](https://arxiv.org/abs/2511.11571) — the performance target
-- **FSA** — [arXiv:2508.18224](https://arxiv.org/abs/2508.18224) — closest structural template: the same loop-order problem, for NSA
-- **FlashAttention** — [arXiv:2205.14135](https://arxiv.org/abs/2205.14135) · **FlashAttention-2** — [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
+- MoBA, Lu et al., Moonshot AI: [arXiv:2502.13189](https://arxiv.org/abs/2502.13189)
+- FlashMoBA, Xiao, Guo, Mazaheri, Han (MIT Han Lab): [arXiv:2511.11571](https://arxiv.org/abs/2511.11571), the performance target
+- FSA: [arXiv:2508.18224](https://arxiv.org/abs/2508.18224), the same loop-order problem solved for NSA
+- FlashAttention: [arXiv:2205.14135](https://arxiv.org/abs/2205.14135) and FlashAttention-2: [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
 
 Reference implementations are vendored read-only under `references/`
 (gitignored) and are never modified. Fetch them with
