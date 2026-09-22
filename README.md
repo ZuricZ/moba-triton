@@ -24,14 +24,7 @@ FlashMoBA's published configuration, in bf16 at shape `[1, S, 4, 64]`.
 
 ![Forward and backward latency against sequence length, the full training step](results/sm90-h100/figures/moba-bwd.png)
 
-This is what was measured: wall-clock latency, from which everything else on
-this page is derived. Two lines stop early because those implementations run
-out of memory, which is itself the result at that end of the axis.
-
-Both passes are here because you cannot train with a forward pass. The backward
-carries the widest margin against dense attention and the narrower one against
-FlashMoBA, 3.3x rather than 3.8x at 524K, which is the honest reason not to
-show the forward alone.
+Two lines stop early: those implementations run out of memory.
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -39,17 +32,14 @@ show the forward alone.
 | 131,072 | 3.93 ms | 4.2x | 7.2x | 6.08 ms | 3.1x | 16.9x |
 | 524,288 | 38.16 ms | 3.8x | 13.0x | 47.05 ms | 3.3x | 36.0x |
 
-Above, a speedup is the vertical gap between two lines and its trend is a
-difference of slopes. Dividing shows both directly, at the cost of absolute
-scale, which is why both figures are here:
+As ratios:
 
 ![Speedup over FlashMoBA and dense attention, against sequence length](results/sm90-h100/figures/speedup.png)
 
-Two different things are happening. Against dense attention the margin keeps
-growing, because dense work is quadratic in S and this is not. Against
-FlashMoBA, which is also sparse, the ratio settles around 4x: both kernels are
-linear in S, and what separates them is a constant factor in how much memory
-traffic each spends per selected block.
+Against dense attention the margin keeps growing, because dense work is
+quadratic in S and this is not. Against FlashMoBA, which is also sparse, the
+ratio settles around 4x: both kernels are linear in S, and what separates them
+is a constant factor in how much memory traffic each spends per selected block.
 
 The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
 FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
@@ -201,9 +191,9 @@ position on the x axis: ours needs 3.14x fewer bytes for the same work, which
 is exactly the byte ratio the residual analysis derives independently at this
 length ([`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)).
 
-That is the claim the whole design rests on. The win is not better tuning, it
-is that a program owning a key block asks for less memory than a program owning
-a query tile. The A100 and the 3050 Ti say the same at different scales, in
+The win is not better tuning. A program owning a key block asks for less
+memory than a program owning a query tile. The A100 and the 3050 Ti say the
+same at different scales, in
 `results/<card>/figures/roofline.png`.
 
 ## Scope
@@ -251,12 +241,11 @@ is `top_k` copies of the output:
 | `[2, 1048576, 16, 128]`, top_k 8 | 64 GiB |
 
 The second is FlashMoBA's 1M benchmark shape, and it does not fit an 80 GB
-card. That is the cost of the inversion rather than an oversight: allocating
-across all of S is what lets a block-owning program gather over the entire
-sequence and keep its tiles full, and FlashMoBA made the opposite trade,
-holding scratch at one copy of the output and paying for it in padding at every
-length. The fix needs no kernel change, only chunking the queries host-side and
-reusing the buffer, but it is unbuilt
+card. Allocating across all of S is what lets a block-owning program gather
+over the entire sequence and keep its tiles full; FlashMoBA made the opposite
+trade, holding scratch at one copy of the output and paying for it in padding
+at every length. The fix needs no kernel change, only chunking the queries
+host-side and reusing the buffer, but it is unbuilt
 ([`docs/deferred-decisions.md`](docs/deferred-decisions.md) DD-2).
 
 One gap in the comparison, for completeness: the community Triton port imports
