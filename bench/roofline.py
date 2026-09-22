@@ -36,6 +36,7 @@ collecting.
 import argparse
 import dataclasses
 import math
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -640,6 +641,31 @@ def print_breakdown(points: list[Point], seq_len: int) -> None:
                   f"{value / p.traffic.total:>5.0%} {bar}")
 
 
+def _faint_note(drawn: list[str]) -> str:
+    """Describes the faint reference lines, or says nothing when there are none.
+
+    This sentence used to be a constant reading "The faint lines above are a
+    big GEMM and the datasheet". On the H100 neither line is drawn -- the
+    attainable roof was never measured there, so the GEMM *is* the roof, and
+    sm_90 has no datasheet entry because one tag covers boards 1.6x apart -- so
+    the subtitle described two lines the reader cannot find. On the 3050 Ti the
+    GEMM line is drawn *below* the roof, our tile shape beating a 4096^3 GEMM
+    by 9%, so "above" was wrong there too.
+
+    Args:
+        drawn: The labels of the faint lines actually drawn, in draw order.
+
+    Returns:
+        A sentence to append to the subtitle, starting with a newline, or "".
+    """
+    if not drawn:
+        return ""
+    named = " and ".join(f"the {label}" for label in drawn)
+    return (f"\nThe faint lines mark {named}: neither bounds this work."
+            if len(drawn) > 1 else
+            f"\nThe faint line marks {named}: it does not bound this work.")
+
+
 def plot(points: list[Point], c: Ceilings, path: str) -> str:
     """Draws the roofline: attainable FLOP/s against arithmetic intensity."""
     fig, ax = plots.figure(width=9.0, height=5.8)
@@ -653,6 +679,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     # attention being expensive. Weight encodes authority -- dotted for a
     # datasheet nobody reaches, dashed for a GEMM no attention kernel
     # resembles, solid for the line that actually bounds this work.
+    faint = []
     for value, label, dashes in (
         (c.spec_flops, "datasheet peak", (0, (1, 3))),
         (c.peak_flops if c.attainable_flops else None,
@@ -660,6 +687,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     ):
         if not value:
             continue
+        faint.append(label)
         ax.axhline(value / 1e12, color=plots.INK_FAINT, linewidth=1.0,
                    linestyle=dashes, zorder=2)
         ax.text(lo * 1.3, value / 1e12 * 1.06, label, color=plots.INK_FAINT,
@@ -669,7 +697,6 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
             linewidth=1.6, zorder=3)
     ax.axvline(c.ridge, color=plots.INK_FAINT, linewidth=0.9,
                linestyle=(0, (3, 3)), zorder=2)
-
 
     seen, biggest = set(), max(p.seq_len for p in points)
     for p in sorted(points, key=lambda p: p.name):
@@ -681,10 +708,6 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
         ax.scatter(p.intensity, p.achieved / 1e12, s=size,
                    color=plots.color(p.name), label=label, zorder=5,
                    edgecolor=plots.SURFACE, linewidth=1.2)
-    tips = [p for p in points if p.seq_len == biggest]
-    plots.label_points(ax, [p.intensity for p in tips],
-                       [p.achieved / 1e12 for p in tips],
-                       [p.name for p in tips], log=True)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -694,33 +717,54 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
     top = max(c.roof_flops, c.peak_flops, c.spec_flops or 0.0)
     ax.set_ylim(top / 1e12 * 1e-4, top / 1e12 * 2.2)
 
-    # Region labels last, and both *under* the roof. The roof is a ceiling, so
-    # the area above it is unattainable: a label printed up there names a
-    # region no kernel can occupy, and reads as "compute bound means faster
-    # than the machine can go". The two regions being named are the halves of
-    # the space below the line, split at the ridge.
+    # Region labels before the direct labels, and both *under* the roof. The
+    # roof is a ceiling, so the area above it is unattainable: a label printed
+    # up there names a region no kernel can occupy, and reads as "compute bound
+    # means faster than the machine can go". The two regions being named are
+    # the halves of the space below the line, split at the ridge.
     #
     # After set_xscale/set_ylim, not before -- the sloped label's angle is read
     # off the axes transform, which is not final until the scales and limits
-    # are.
+    # are. And before `label_points`, which treats text already on the axes as
+    # something to steer around: these three are placed by hand and the per-
+    # point labels are the ones free to move.
     ax.text(lo * 6.0, c.bandwidth * lo * 6.0 / 1e12 * 0.45, "memory bound",
             color=plots.INK_SOFT, fontsize=9.5,
             rotation=plots.slope_degrees(ax), rotation_mode="anchor",
             ha="left", va="top")
     ax.text(c.ridge * 1.6, c.peak_flops / 1e12 * 0.62, "compute bound",
             color=plots.INK_SOFT, fontsize=9.5, va="top")
-    # The ridge label sits at the bottom of its own line rather than partway up
-    # it. At mid-height it landed on whichever implementation happened to have
-    # an intensity near the ridge -- on the A100 that was flash_moba, and the
-    # two strings printed through each other.
-    # Just left of its own line, reading upward. Two horizontal placements
-    # have now collided with something -- a data point at mid-height, the
-    # legend at the foot -- because the ridge is a vertical line through the
-    # busiest part of the figure. Setting the text along it avoids competing
-    # for horizontal space at all.
-    ax.text(c.ridge * 0.88, c.roof_flops / 1e12 * 0.30,
-            f"ridge {c.ridge:.0f} FLOP/byte", color=plots.INK_SOFT,
-            fontsize=9, rotation=90, va="bottom", ha="center")
+    # The ridge label rides at the top of its own line, reading across. Three
+    # placements below the roof have now collided with something -- a data
+    # point at mid-height, the legend at the foot, and rotated up the line it
+    # ran through the subtitle -- because the ridge is a vertical line through
+    # the busiest part of the figure and the busy part reaches the ceiling.
+    #
+    # The strip above the highest ceiling is the one place guaranteed empty:
+    # `set_ylim` leaves 2.2x of headroom over it, and nothing can be drawn
+    # above a roof nothing can beat. That is the same fact that bars "memory
+    # bound" and "compute bound" from up there -- but those name *regions*, and
+    # a region label above the roof would claim an impossible place exists.
+    # This names a line, and the line it names runs the full height of the
+    # figure to meet it.
+    #
+    # Positioned in axes fractions on y, not data: the gap between the roof and
+    # the datasheet above it is 27 px on the A100, too narrow to hold a line of
+    # 9pt text, and any data-space placement has to guess which gaps exist on a
+    # card whose ceilings have not been measured yet.
+    ax.text(c.ridge * 1.03, 0.985, f"ridge {c.ridge:.0f} FLOP/byte",
+            transform=ax.get_xaxis_transform(), color=plots.INK_SOFT,
+            fontsize=9, va="top", ha="left")
+
+    tips = [p for p in points if p.seq_len == biggest]
+    # Every mark in the figure is an obstacle, not just the labelled ones: the
+    # smaller sequence lengths are drawn too, and `naive_torch` used to print
+    # across the `flash_moba` marker two sizes down from it.
+    plots.label_points(ax, [p.intensity for p in tips],
+                       [p.achieved / 1e12 for p in tips],
+                       [p.name for p in tips],
+                       avoid=[(p.intensity, p.achieved / 1e12)
+                              for p in points])
 
     plots.titles(
         ax,
@@ -731,11 +775,12 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
          f"Marker size is sequence length, {min(p.seq_len for p in points)} to "
          f"{biggest}; labels mark S={biggest}. ") +
         "Higher is faster. The solid roof is what an attention kernel reaches "
-        "here.\nThe faint lines above are a big GEMM and the datasheet: "
-        "neither is reachable by this work.",
+        "here." + _faint_note(faint),
         "arithmetic intensity (FLOP per byte of compulsory HBM traffic)",
         "achieved throughput (TFLOP/s)")
-    plots.legend(ax, loc="lower right", ncol=2)
+    # Masked, because the ridge is vertical and lands inside a lower-right
+    # legend on every card this has been drawn for.
+    plots.legend(ax, loc="lower right", ncol=2, mask=True)
     return plots.save(fig, path)
 
 
@@ -755,8 +800,10 @@ def _with_extra_ceilings(ceilings: Ceilings,
 
     Args:
         ceilings: The measured bandwidth and GEMM figures.
-        attainable_tflops: `bench/tile_ceiling.py`'s dots+softmax result, or
-            None to leave the GEMM standing in as the roof.
+        attainable_tflops: `bench/tile_ceiling.py`'s dots+softmax result. None
+            keeps whatever `ceilings` already carries -- `--from-log` recovers
+            it from the log, and an absent flag must not erase a measurement
+            that is already in hand.
 
     Returns:
         A new `Ceilings` carrying whatever is known.
@@ -765,7 +812,7 @@ def _with_extra_ceilings(ceilings: Ceilings,
     return dataclasses.replace(
         ceilings,
         attainable_flops=(attainable_tflops * 1e12 if attainable_tflops
-                          else None),
+                          else ceilings.attainable_flops),
         spec_flops=spec.get("tflops_bf16", 0.0) * 1e12 or None,
         spec_bandwidth=spec.get("bandwidth_gbs", 0.0) * 1e9 or None,
     )
@@ -784,6 +831,7 @@ def main() -> None:
     parser.add_argument("--from-log", default=None,
                         help="redraw a finished run's log instead of "
                              "measuring; needs no GPU")
+    paths.add_card_argument(parser)
     args = parser.parse_args()
     seq_lens = [int(x) for x in args.seq_lens.split(",")]
 
@@ -793,8 +841,13 @@ def main() -> None:
                                         device_name)
         print_ceilings(ceilings, device_name)
         print_table(points, ceilings)
+        # `--card`, not the local GPU. This branch exists to draw a rented
+        # box's log on a laptop, so defaulting the destination to whatever card
+        # is doing the drawing would file an A100 figure under the 3050 Ti.
+        out = args.out or os.path.join(
+            paths.card_dir(args.card, "figures", create=True), "roofline.png")
         print()
-        print(f"wrote {plot(points, ceilings, args.out)}")
+        print(f"wrote {plot(points, ceilings, out)}")
         return
 
     if lock_clocks():
@@ -824,7 +877,6 @@ def main() -> None:
             return
         print_table(points, ceilings)
         print_breakdown(points, max(seq_lens))
-        import os
         out = args.out or os.path.join(
             paths.card_dir(kind="figures", create=True), "roofline.png")
         print(f"\nwrote {plot(points, ceilings, out)}")
@@ -838,7 +890,7 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 
 
-def parse_log(path: str) -> tuple[list[Point], Ceilings]:
+def parse_log(path: str) -> tuple[list[Point], Ceilings, str]:
     """Rebuilds the points and ceilings of a finished run from its log.
 
     WHY THIS EXISTS. The ceilings and every point are measured on the GPU, so
@@ -856,17 +908,26 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
     `intensity` and `achieved`, and not enough for `print_breakdown`, which is
     why this returns points fit for drawing rather than for re-analysis.
 
+    THE CEILING LINES HAVE TWO SPELLINGS and both are read. `print_ceilings`
+    said "bf16 peak 204.29 TFLOP/s (4096^3 GEMM)" when the A100 log was
+    written; it now prints a three-line stack ("bf16, 4096^3 GEMM" and, when it
+    was measured, "bf16, our tile <- the roof"). Matching only the old spelling
+    made `--from-log` raise on the 3050 Ti's own log, which is the log it was
+    written for. The attainable roof comes out of the log too, rather than
+    being retyped on the command line: it is a measurement, and a measurement
+    that has to be re-entered by hand is one that can be entered wrong.
+
     Args:
         path: A log written by a previous `main()` run.
 
     Returns:
-        A tuple of (points, ceilings).
+        A tuple of (points, ceilings, device name).
 
     Raises:
         ValueError: If the ceiling lines are missing, so a caller never gets a
             figure drawn against a roof that was silently defaulted.
     """
-    bandwidth = peak = None
+    bandwidth = peak = attainable = None
     device_name = ""
     points: list[Point] = []
 
@@ -882,6 +943,10 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
                 bandwidth = float(fields[2]) * BYTES_PER_GIB
             elif "bf16 peak" in line:
                 peak = float(fields[2]) * 1e12
+            elif f"bf16, {MATMUL_N}^3 GEMM" in line:
+                peak = float(fields[3]) * 1e12
+            elif "bf16, our tile" in line and "not measured" not in line:
+                attainable = float(fields[3]) * 1e12
             elif len(fields) >= 8 and fields[0] in MODELS:
                 # backend S ms GB FLOP/byte [~] TFLOP/s roof pct bound
                 numbers = [f for f in fields[1:] if f not in ("~",)]
@@ -907,7 +972,7 @@ def parse_log(path: str) -> tuple[list[Point], Ceilings]:
     if bandwidth is None or peak is None:
         raise ValueError(f"{path} has no ceiling lines; refusing to draw a "
                          "roofline against an assumed roof")
-    return points, Ceilings(bandwidth, peak), device_name
+    return points, Ceilings(bandwidth, peak, attainable), device_name
 
 
 if __name__ == "__main__":

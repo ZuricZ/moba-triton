@@ -96,6 +96,61 @@ def card_dir(card: str | None = None, kind: str = "data",
     return path
 
 
+def device(card: str | None = None) -> dict:
+    """Returns what `nvidia-smi` recorded about the card that made the results.
+
+    WHY THE READING SIDE NEEDS THIS. A figure caption naming a card is a claim
+    about provenance, and until now those claims were module-level string
+    constants: `bench/sweep_plot.py` said "on an A100-40GB" on every figure it
+    drew, including the H100's, where it was simply false. The card that
+    produced a directory of results is recorded in that directory, by the
+    session that produced it -- so a caption can read it instead of asserting
+    it, and cannot drift out of date the way a constant did.
+
+    The file is the header-and-one-row CSV `nvidia-smi --query-gpu` writes:
+
+        name, memory.total [MiB], compute_cap, driver_version
+        NVIDIA H100 80GB HBM3, 81559 MiB, 9.0, 550.163.01
+
+    Args:
+        card: Directory name such as "sm80-a100"; the local card when None.
+
+    Returns:
+        A dict with "name" ("NVIDIA H100 80GB HBM3"), "short" (the same with
+        the vendor stripped, which is how this project's prose writes it),
+        "memory_mib" and "memory_gib" (int, rounded), "compute_cap" and
+        "driver". Empty when the card kept no `device.txt` -- sm86-3050ti did
+        not, and an empty dict is a caller's cue to leave the clause out
+        rather than guess it.
+    """
+    path = os.path.join(card_dir(card, "logs"), "device.txt")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            rows = [line.strip() for line in handle if line.strip()]
+    except OSError:
+        return {}
+    if len(rows) < 2:
+        return {}
+
+    fields = [field.strip() for field in rows[1].split(",")]
+    if not fields or not fields[0]:
+        return {}
+    facts = {"name": fields[0], "short": fields[0].removeprefix("NVIDIA ")}
+    if len(fields) > 1 and fields[1].split()[:1]:
+        try:
+            mib = int(fields[1].split()[0])
+        except ValueError:
+            mib = 0
+        if mib:
+            facts["memory_mib"] = mib
+            facts["memory_gib"] = round(mib / 1024)
+    if len(fields) > 2:
+        facts["compute_cap"] = fields[2]
+    if len(fields) > 3:
+        facts["driver"] = fields[3]
+    return facts
+
+
 def known_cards(kind: str = "data") -> list[str]:
     """Returns the cards that actually have results on disk.
 
