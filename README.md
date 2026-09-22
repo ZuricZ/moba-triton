@@ -23,14 +23,14 @@ Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
 
 ![Forward and backward latency against sequence length, the full training step](results/sm90-h100/figures/moba-bwd.png)
 
-This is what was measured: wall-clock latency. Everything else on this page is
-derived from it. Two lines stop early because those implementations run out of
-memory, which is itself the result at that end of the axis.
+This is what was measured: wall-clock latency, from which everything else on
+this page is derived. Two lines stop early because those implementations run
+out of memory, which is itself the result at that end of the axis.
 
-Both passes are here because you cannot train with a forward pass, and the
-backward is where the gap against dense attention is widest. It is also the
-weaker of the two against FlashMoBA, 3.3x rather than 3.9x at 524K, which is
-the honest reason not to show only the forward.
+Both passes are here because you cannot train with a forward pass. The backward
+carries the widest margin against dense attention and the narrower one against
+FlashMoBA, 3.3x rather than 3.9x at 524K, which is the honest reason not to
+show the forward alone.
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -38,9 +38,9 @@ the honest reason not to show only the forward.
 | 131,072 | 3.94 ms | 4.2x | 7.2x | 6.18 ms | 3.1x | 16.8x |
 | 524,288 | 38.2 ms | 3.9x | 13.0x | 47.0 ms | 3.3x | 36.0x |
 
-On a log-log latency plot a speedup is the vertical gap between two lines, and
-whether it is growing is the difference between two slopes. Dividing shows that
-directly:
+Above, a speedup is the vertical gap between two lines and its trend is a
+difference of slopes. Dividing shows both directly, at the cost of absolute
+scale, which is why both figures are here:
 
 ![Speedup over FlashMoBA and dense attention, against sequence length](results/sm90-h100/figures/speedup.png)
 
@@ -50,18 +50,13 @@ FlashMoBA, which is also sparse, the ratio settles around 4x: both kernels are
 linear in S, and what separates them is a constant factor in how much memory
 traffic each spends per selected block.
 
-The cost of dividing is that absolute scale disappears, which is why both
-figures are here. A ratio cannot tell you whether 3.9x is 3.9x of 38 ms or of
-38 us, and at some point that is the number you have to budget for.
-
 The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
 FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
 architectures, one ordering.
 
-Past S=131072 the dense baselines stop being a practical comparison and become
-a demonstration instead. PyTorch's own reference implementation runs out of
-memory at S=32768 trying to allocate 16 GiB, because the score matrix is
-quadratic in S.
+Past S=131072 the dense baselines stop being a comparison and become a
+demonstration: PyTorch's own reference runs out of memory at S=32768 trying to
+allocate 16 GiB, because the score matrix is quadratic in S.
 
 ## Why per-query selection is hard
 
@@ -115,15 +110,12 @@ wants. Six queries and three blocks is small enough to count by hand.
 
 ![The same ten selections grouped by query, needing ten block reads, and grouped by key block, needing three](docs/figures/csc-transpose.svg)
 
-The arithmetic is the same on both sides. Every one of those ten selections
-still has to be computed, and the answer is identical. The only thing that
-changes is which program owns what, and that decides how often a key block
-travels in from memory: once per selection when a program owns a query, once
-per block when a program owns a block.
-
-Fetching from memory is the expensive part, so the kernel groups by block. It
-needs the right-hand form before it starts, because a program cannot fetch its
-block until it knows the list of queries that will use it.
+The arithmetic is identical on both sides. All that changes is which program
+owns what, and that decides how often a key block travels in from memory: once
+per selection when a program owns a query, once per block when a program owns
+a block. Fetching is the expensive part, so the kernel groups by block, and it
+needs that form before it starts, because a program cannot fetch its block
+until it knows which queries will use it.
 
 Real programs own a tile of many queries rather than one, so the counts are not
 literally ten against three. The mechanism is the same, and at full size it
@@ -133,11 +125,9 @@ Grouping by block also creates the kernel's main open problem. The three
 programs do not have equal work: block 0 serves five queries and block 2 serves
 two, because early blocks are visible to every later query and late blocks to
 almost nobody. On real selections that skew reaches 6.2x in the worst case, and
-since the programs run at the same time the slowest one sets the pace.
-
-Those five queries are why block 0 is worth loading once, and they are also why
-its program finishes last. The saving and the imbalance have the same cause, so
-no scheduler can remove one without giving up the other.
+the programs run at the same time, so the slowest sets the pace. Those same
+five queries are why block 0 is worth loading once and why its program finishes
+last, so no scheduler can remove the imbalance without giving up the saving.
 
 The grouping is stored as compressed sparse column and built entirely on the
 GPU with a count, a prefix sum and a scatter, using no `nonzero()` anywhere.
@@ -204,34 +194,32 @@ between the two sparse kernels at S=8192:
 | ours | 75.8 FLOP/byte | 32.1 TFLOP/s | 187.0 | 17% |
 | FlashMoBA | 24.1 FLOP/byte | 10.7 TFLOP/s | 59.5 | 18% |
 
-Both reach about the same fraction of the ceiling their own position allows.
-Neither is running the machine harder than the other. The entire lead is the
-position on the x axis: ours needs 3.14x fewer bytes for the same work, and
-3.14x is exactly the byte ratio the residual analysis reports independently at
-this length ([`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)).
+Both reach about the same fraction of the ceiling their own position allows, so
+neither is running the machine harder than the other. The entire lead is the
+position on the x axis: ours needs 3.14x fewer bytes for the same work, which
+is exactly the byte ratio the residual analysis derives independently at this
+length ([`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)).
 
-That is worth stating plainly, because it is the claim the whole design rests
-on. The win is not better tuning. It is that a program owning a key block asks
-for less memory than a program owning a query tile.
-
-The A100 and the 3050 Ti tell the same story at different scales, in
+That is the claim the whole design rests on. The win is not better tuning, it
+is that a program owning a key block asks for less memory than a program owning
+a query tile. The A100 and the 3050 Ti say the same at different scales, in
 `results/<card>/figures/roofline.png`.
 
 ## Scope
 
 This is a learning project, and the numbers above come with three limits.
 
-It is one configuration. Everything here is `block_size=128, top_k=8` at
-`[1, S, 4, 64]`, chosen because it is what FlashMoBA publishes. A block-size
-sweep is in [`docs/block-size-results.md`](docs/block-size-results.md), but the
+**One configuration.** Everything here is `block_size=128, top_k=8` at
+`[1, S, 4, 64]`, because that is what FlashMoBA publishes. A block-size sweep
+is in [`docs/block-size-results.md`](docs/block-size-results.md), but the
 headline is a single point.
 
-It is two rented cards. The H100 and A100 runs each lasted one session and both
+**Two rented cards.** The H100 and A100 runs each lasted one session and both
 machines are gone, so nothing here can be re-measured without renting again.
 The development machine is a 4 GB laptop that cannot hold these shapes.
 
-Speed is not quality. Selection is verified against the oracle, but no model
-was trained or evaluated here, so none of this says whether MoBA is a good
+**Speed is not quality.** Selection is verified against the oracle, but nothing
+here trains or evaluates a model, so none of this says whether MoBA is a good
 idea. It says how fast this implementation of it runs.
 
 ## Future work
@@ -246,11 +234,10 @@ The obvious fix does not work. Replacing the hand-rolled merge loop with
 Triton's `tl.topk` was built, verified bit-identical against the shipping
 kernel, and measured at 1.04x to 1.10x
 ([`docs/gate-topk-measurements.md`](docs/gate-topk-measurements.md)). At
-32-wide chunks and k=8, a bitonic network and a hand-rolled loop cost the same
+32-wide chunks and k=8 a bitonic network and a hand-rolled loop cost the same
 number of cross-lane operations, so there is no asymptotic regime to enter. The
-lever is merging less often rather than merging faster, which means a
-coarse-to-fine selection scheme, and that changes which blocks get chosen
-rather than how they are found.
+lever is merging less often, which means coarse-to-fine selection, and that
+changes which blocks get chosen rather than how they are found.
 
 Also open: a comment pass over the kernels, a crash in the community Triton
 port above S=65536 that keeps it out of the long sweeps, and host-side query
@@ -258,20 +245,18 @@ chunking for the memory wall.
 
 ## Reading further
 
-Start with [loop order and memory
-traffic](docs/learning/01-loop-order-and-memory-traffic.md), which builds the
-argument above from first principles and assumes no GPU background, then
-[anatomy of a FlashAttention
-kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md), which reads a
-real Triton kernel and then breaks it on purpose.
+[Loop order and memory
+traffic](docs/learning/01-loop-order-and-memory-traffic.md) builds the argument
+above from first principles and assumes no GPU background; [anatomy of a
+FlashAttention kernel](docs/learning/02-anatomy-of-a-flash-attention-kernel.md)
+reads a real Triton kernel and then breaks it on purpose.
 
 For the measurements, [`docs/h100-results.md`](docs/h100-results.md) has the
-full sweep, and [`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)
-separates how much of the win is byte count and how much is efficiency.
-[`docs/flashmoba-digest.md`](docs/flashmoba-digest.md) is a line-by-line
-account of what FlashMoBA's CUDA actually does, and
-[`docs/environment.md`](docs/environment.md) pins every version and the
-reference commit each published number was measured against.
+full sweep, [`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)
+separates how much of the win is byte count and how much is efficiency,
+[`docs/flashmoba-digest.md`](docs/flashmoba-digest.md) reads FlashMoBA's CUDA
+line by line, and [`docs/environment.md`](docs/environment.md) pins every
+version and the reference commit each number was measured against.
 
 The rest of `docs/` holds the individual measurements, including three
 occasions where a result flattered this kernel and turned out to be a
