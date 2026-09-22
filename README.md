@@ -201,20 +201,14 @@ same at different scales, in
 
 ## Scope
 
-This is a learning project, and the numbers above come with three limits.
+Every number above is one configuration: `block_size=128, top_k=8` at
+`[1, S, 4, 64]`, FlashMoBA's published point. Block size is swept separately in
+[`docs/block-size-results.md`](docs/block-size-results.md).
 
-**One configuration.** Everything here is `block_size=128, top_k=8` at
-`[1, S, 4, 64]`, because that is what FlashMoBA publishes. A block-size sweep
-is in [`docs/block-size-results.md`](docs/block-size-results.md), but the
-headline is a single point.
-
-**Two rented cards.** The H100 and A100 runs each lasted one session and both
-machines are gone, so nothing here can be re-measured without renting again.
-The development machine is a 4 GB laptop that cannot hold these shapes.
-
-**Speed is not quality.** Selection is verified against the oracle, but nothing
-here trains or evaluates a model, so none of this says whether MoBA is a good
-idea. It says how fast this implementation of it runs.
+Each card was measured in a single session, so the figures carry that session's
+variance and have not been independently reproduced. The thermal protocol they
+were taken under, and the four measurement artifacts it exists to catch, are in
+[`docs/reference-comparison.md`](docs/reference-comparison.md).
 
 ## Future work
 
