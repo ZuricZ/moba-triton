@@ -24,7 +24,11 @@ FlashMoBA's published configuration, in bf16 at shape `[1, S, 4, 64]`.
 
 ![Forward and backward latency against sequence length, the full training step](results/sm90-h100/figures/moba-bwd.png)
 
-Two lines stop early: those implementations run out of memory.
+Two lines stop at S=32768. `naive_torch` and MoonshotAI's naive path build the
+full S x S score matrix, which is quadratic in S, so one step further asks for
+single allocations of 32 and 16 GiB and both fail. The fused baselines never
+build that matrix and run the whole sweep, which is why `sdpa_dense` is still
+in the table at 524288.
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -44,10 +48,6 @@ is a constant factor in how much memory traffic each spends per selected block.
 The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
 FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
 architectures, one ordering.
-
-Past S=32768 the dense baselines stop being a comparison and become a
-demonstration: PyTorch's own reference runs out of memory at S=65536 asking for
-a single 32 GiB allocation, because the score matrix is quadratic in S.
 
 ## Why per-query selection is hard
 
