@@ -38,9 +38,11 @@ from.
 
 `data/residual-b.json` (second residual run), `data/tabled-*.csv` (tuned-table
 confirmation), `figures/roofline-alt.png` (a second render from this session;
-`figures/roofline.png` is the one the docs cite, and since the
-2026-09-22 rebuild the two are byte-identical, so this one can go
-whenever someone decides to), `figures/moba-*.png`,
+`figures/roofline.png` is the one the docs cite. It is not a duplicate:
+it renders S=4096..65536 where `roofline.png` renders 2048..8192, so it
+shows the points moving with sequence length. "A second render" sold it
+short and cost it a regeneration at the wrong lengths on 2026-09-22,
+since corrected), `figures/moba-*.png`,
 `figures/results.html` (84 bytes of `<img>` tags `triton.testing` writes next
 to its CSVs), and the session logs `last`, `occ`, `passA`, `passB`, `sweep`,
 `fairness`, `65k-recovery`.
