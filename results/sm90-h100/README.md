@@ -54,7 +54,25 @@ int64 (`04236d3`); full details in `docs/deferred-decisions.md` DD-2a.
   B=4 H=32 S=65536, the 16 GiB shape that crashed before the int64 fix
   (`04236d3`). Re-run after the fix, it now measures 3.50x.
 * Panel A never made it into a JSON; it lives in `logs/residual-ab.log`.
-* `figures/roofline.png` — the first roofline with a real Hopper roof
+* `figures/roofline.png` — the first roofline with a real Hopper roof.
+  **Rebuilt 2026-09-22 without the card**, because this session never logged
+  its ceiling table: `logs/profile-roofline.log` holds the profile and the byte
+  breakdown, and the run ended before `print_ceilings` ran. `bench/roofline.py
+  --from-data` rebuilds it from `data/moba-fwd.csv` (the only measured input a
+  point needs is its latency; FLOPs and traffic are analytic) plus
+  `data/roofline-ceilings.json`. Re-run it with
+  `uv run python -m bench.roofline --from-data --card sm90-h100`.
+* `data/roofline-ceilings.json` — the two ceilings, with the sentence that
+  justifies each. Bandwidth is the measured 2297.8 GiB/s copy roof already
+  recorded in `data/residual.json`. The bf16 GEMM roof was recovered as
+  `ridge x bandwidth` from the ridge annotation on the original figure, which
+  is exact arithmetic against a label printed to three significant figures, so
+  ±0.16%. It lands at 769.8 TFLOP/s, 77.8% of the 989.4 datasheet, and the
+  rebuilt figure's ridge comes back out at 312.0 FLOP/byte, matching the
+  annotation it was derived from. The same reconstruction run against the A100,
+  which kept both a log and a CSV, reproduces that card's logged ceilings and
+  every arithmetic intensity exactly, with latencies differing by 1 to 6%.
+* `logs/roofline-from-data.log` — that rebuild's output
 * `logs/int32-overflow.log` / `-after-fix.log` — DD-2a
 * `logs/ab-backward-config.log`, `logs/ab-forward-group.log` — the A/B that corrected the table
 

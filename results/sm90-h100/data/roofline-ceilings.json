@@ -1,0 +1,10 @@
+{
+  "_note": "Ceilings for bench/roofline.py --from-data, which rebuilds this card's roofline without the card. Every value here was measured on the hardware; `*_source` says where each one is recorded. Nothing in this file is a datasheet figure: the datasheet is the audit line, and bench/roofline.py gets it from SPEC_BY_NAME.",
+  "device": "NVIDIA H100 80GB HBM3",
+  "bandwidth_gibs": 2297.7940871837072,
+  "bandwidth_source": "Measured by copy on the card during the 2026-09-20 session, by bench/residual.py panel C. Recorded as `roof_gibs` in data/residual.json and quoted in docs/h100-results.md:57.",
+  "peak_tflops": 769.78,
+  "peak_source": "bf16 4096^3 GEMM, measured on the card. This run's ceiling table was never written to a log, so the value is recovered from the ridge annotation (312 FLOP/byte) on the original figures/roofline.png as ridge x bandwidth. The identity roof = ridge x bandwidth is exact and reproduces the A100's logged ridge (153.5) from its logged ceilings, so the only error is the ridge label's three significant figures: +/-0.16%. The result is 77.8% of the 989.4 TFLOP/s SXM datasheet, the ordinary efficiency for a measured GEMM.",
+  "attainable_tflops": null,
+  "attainable_source": "Never measured here. bench/tile_ceiling.py was not run before the rented box was deleted, so the 4096^3 GEMM stands in as the flat roof. Every MoBA point on this figure is memory bound and is read against the slanted roof, which the flat roof does not enter."
+}

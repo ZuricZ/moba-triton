@@ -166,6 +166,36 @@ details the paper leaves open, such as tie-breaking and whether a query's own
 block consumes a `top_k` slot. The reasoning is in
 [`src/moba/config.py`](src/moba/config.py).
 
+## Where the kernel is pinned
+
+A roofline places each implementation by how much arithmetic it does per byte
+it moves. Left of the ridge a kernel is limited by memory and cannot go faster
+without moving fewer bytes, however well it is written.
+
+![Roofline on the H100: every MoBA implementation sits left of the ridge, memory bound](results/sm90-h100/figures/roofline.png)
+
+Every MoBA implementation is far left of the ridge, so this is a memory-bound
+problem and the design was built on that assumption. The useful comparison is
+between the two sparse kernels at S=8192:
+
+| | arithmetic intensity | achieved | its own roof | fraction reached |
+|---|---:|---:|---:|---:|
+| ours | 75.8 FLOP/byte | 32.1 TFLOP/s | 187.0 | 17% |
+| FlashMoBA | 24.1 FLOP/byte | 10.7 TFLOP/s | 59.5 | 18% |
+
+Both reach about the same fraction of the ceiling their own position allows.
+Neither is running the machine harder than the other. The entire lead is the
+position on the x axis: ours needs 3.14x fewer bytes for the same work, and
+3.14x is exactly the byte ratio the residual analysis reports independently at
+this length ([`docs/why-we-beat-flashmoba.md`](docs/why-we-beat-flashmoba.md)).
+
+That is worth stating plainly, because it is the claim the whole design rests
+on. The win is not better tuning. It is that a program owning a key block asks
+for less memory than a program owning a query tile.
+
+The A100 and the 3050 Ti tell the same story at different scales, in
+`results/<card>/figures/roofline.png`.
+
 ## Scope
 
 This is a learning project, and the numbers above come with three limits.

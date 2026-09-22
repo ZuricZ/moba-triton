@@ -35,6 +35,7 @@ collecting.
 
 import argparse
 import dataclasses
+import json
 import math
 import os
 import time
@@ -43,7 +44,7 @@ from dataclasses import dataclass, field
 import torch
 import triton.testing
 
-from bench import paths, plots
+from bench import paths, plots, sweep_plot
 from bench.suite import (
     BYTES_PER_MIB,
     cool_down_device,
@@ -666,6 +667,32 @@ def _faint_note(drawn: list[str]) -> str:
             f"\nThe faint line marks {named}: it does not bound this work.")
 
 
+def _roof_note(c: Ceilings) -> str:
+    """Says what the solid roof actually is on this card.
+
+    This sentence used to be the constant "The solid roof is what an attention
+    kernel reaches here", which is only true when `attainable_flops` was
+    measured. Where it was not, `Ceilings.roof_flops` falls back to the 4096^3
+    GEMM, and the figure then claimed an attention-kernel ceiling while drawing
+    a matmul one. That is the same frozen-claim bug as the old `CAPTIONS` dict
+    in `bench/sweep_plot.py`: a sentence asserting something the data beside it
+    decides.
+
+    Args:
+        c: The ceilings being drawn.
+
+    Returns:
+        One or two sentences describing the solid roof, each opening with
+        a newline so the subtitle wraps instead of running off the canvas.
+    """
+    if c.attainable_flops:
+        return "\nThe solid roof is what an attention kernel reaches here."
+    return (f"\nThe solid roof is a measured {MATMUL_N}^3 GEMM, standing in "
+            "for a tile-shape roof this card never measured, so it overstates."
+            "\nIt bounds nothing below: every MoBA point here is memory bound, "
+            "read against the slanted roof.")
+
+
 def plot(points: list[Point], c: Ceilings, path: str) -> str:
     """Draws the roofline: attainable FLOP/s against arithmetic intensity."""
     fig, ax = plots.figure(width=9.0, height=5.8)
@@ -774,8 +801,7 @@ def plot(points: list[Point], c: Ceilings, path: str) -> str:
         (f"S = {biggest}. " if min(p.seq_len for p in points) == biggest else
          f"Marker size is sequence length, {min(p.seq_len for p in points)} to "
          f"{biggest}; labels mark S={biggest}. ") +
-        "Higher is faster. The solid roof is what an attention kernel reaches "
-        "here." + _faint_note(faint),
+        "Higher is faster." + _roof_note(c) + _faint_note(faint),
         "arithmetic intensity (FLOP per byte of compulsory HBM traffic)",
         "achieved throughput (TFLOP/s)")
     # Masked, because the ridge is vertical and lands inside a lower-right
@@ -831,9 +857,27 @@ def main() -> None:
     parser.add_argument("--from-log", default=None,
                         help="redraw a finished run's log instead of "
                              "measuring; needs no GPU")
+    parser.add_argument("--from-data", action="store_true",
+                        help="rebuild from this card's sweep CSV and "
+                             "data/roofline-ceilings.json, for a card whose "
+                             "roofline run was never logged; needs no GPU")
     paths.add_card_argument(parser)
     args = parser.parse_args()
     seq_lens = [int(x) for x in args.seq_lens.split(",")]
+
+    if args.from_data:
+        ceilings, device_name = read_ceilings(args.card)
+        ceilings = _with_extra_ceilings(ceilings, args.attainable_tflops,
+                                        device_name)
+        points = points_from_data(args.card, seq_lens)
+        print_ceilings(ceilings, device_name)
+        print_table(points, ceilings)
+        print_breakdown(points, max(p.seq_len for p in points))
+        out = args.out or os.path.join(
+            paths.card_dir(args.card, "figures", create=True), "roofline.png")
+        print()
+        print(f"wrote {plot(points, ceilings, out)}")
+        return
 
     if args.from_log:
         points, ceilings, device_name = parse_log(args.from_log)
@@ -888,6 +932,106 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 # Replotting a finished run
 # ---------------------------------------------------------------------------
+
+
+def read_ceilings(card: str | None = None) -> tuple[Ceilings, str]:
+    """Loads a card's measured ceilings from `data/roofline-ceilings.json`.
+
+    WHY A FILE AND NOT A FLAG. `--from-log` recovers the ceilings from a run's
+    own log, which is the right source when a log exists. The H100's does not:
+    `logs/profile-roofline.log` captured the profile table and the byte
+    breakdown, and the run ended before the ceiling table was printed, so the
+    two numbers that position every roof on that card were never written down
+    anywhere. They are recoverable, but only by argument, and an argument that
+    has to be retyped on a command line is one that will eventually be retyped
+    wrong. The JSON carries the values and, beside each, the sentence that
+    justifies it.
+
+    Args:
+        card: Directory name such as "sm90-h100"; the local card when None.
+
+    Returns:
+        The ceilings, and the device name they belong to.
+
+    Raises:
+        FileNotFoundError: If the card has no recorded ceilings.
+    """
+    path = os.path.join(paths.card_dir(card, "data"), "roofline-ceilings.json")
+    with open(path, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    attainable = spec.get("attainable_tflops")
+    return Ceilings(
+        bandwidth=spec["bandwidth_gibs"] * BYTES_PER_GIB,
+        peak_flops=spec["peak_tflops"] * 1e12,
+        attainable_flops=attainable * 1e12 if attainable else None,
+    ), spec.get("device", "")
+
+
+def points_from_data(card: str | None, seq_lens: list[int],
+                     cfg: MoBAConfig = CFG) -> list[Point]:
+    """Rebuilds a card's roofline points from its committed sweep CSV.
+
+    WHY THIS IS NOT A SECOND MEASUREMENT. A `Point` carries four things, and
+    three of them are arithmetic: `flops` is counted from the shape, `traffic`
+    is the analytic model in this module, and `intensity` is their ratio. Only
+    `ms` was ever measured. The sweep CSV holds `ms` for every backend at every
+    sequence length, so a roofline can be rebuilt from it exactly, on any
+    machine, for a card that no longer exists.
+
+    HOW FAR THE LATENCIES CAN BE TRUSTED. They come from a different run than
+    the original roofline's, so they carry that run's noise rather than this
+    one's. Checked against the A100, where both a logged roofline and a sweep
+    CSV survive, the two disagree by 1 to 6 percent at S=8192 -- ordinary
+    run-to-run variation, and a fraction of a marker's width on an axis
+    spanning five decades.
+
+    WHICH SOURCE TO PREFER, WHICH IS NOT SIMPLY "THE LOG". `--from-log` replays
+    a run's own derived values, so its latencies and its intensities come from
+    one session. But intensity is a *model* output, and the model is code that
+    has since changed: the A100's log places `flash_moba` at 186.2 FLOP/byte,
+    from a traffic model that has since been replaced by one counting its
+    window reloads and fp32 round trip, which puts it at 24.1. Replaying that
+    log redraws the old model's answer. This path recomputes traffic with the
+    model in the tree and pays for it with latencies from a different session.
+
+    So: prefer `--from-log` when the log was written by roughly the current
+    model, as the 3050 Ti's was, and this when it was not, as for the A100, or
+    when there is no ceiling table at all, as for the H100.
+
+    Backends with no traffic model are skipped rather than placed by a model
+    known to be wrong, which is why `triton_moba` and `moonshot_efficient` do
+    not appear.
+
+    Args:
+        card: Directory name such as "sm90-h100"; the local card when None.
+        seq_lens: Sequence lengths to place. Ones absent from the CSV are
+            skipped.
+        cfg: The MoBA configuration the sweep was run at.
+
+    Returns:
+        One `Point` per (backend, sequence length) that has both a latency and
+        a traffic model, ordered by sequence length then backend.
+    """
+    seqs, series = sweep_plot.read_sweep(card, "fwd")
+    index = {int(s): i for i, s in enumerate(seqs)}
+    points = []
+    for seq_len in seq_lens:
+        if seq_len not in index:
+            continue
+        row = index[seq_len]
+        for name in sorted(series):
+            ms = series[name][row]
+            if ms is None:
+                continue
+            traffic = model_traffic(name, BATCH, seq_len, HEADS, HEAD_DIM, cfg)
+            if traffic is None:
+                continue
+            points.append(Point(
+                name=name, seq_len=seq_len, ms=ms,
+                flops=flops_performed(name, BATCH, seq_len, HEADS, HEAD_DIM,
+                                      cfg),
+                traffic=traffic))
+    return points
 
 
 def parse_log(path: str) -> tuple[list[Point], Ceilings, str]:

@@ -1,0 +1,10 @@
+{
+  "_note": "Ceilings for bench/roofline.py --from-data, which rebuilds this card's roofline without the card. Every value here was measured on the hardware; `*_source` says where each one is recorded. Nothing in this file is a datasheet figure: the datasheet is the audit line, and bench/roofline.py gets it from SPEC_BY_NAME.",
+  "device": "NVIDIA A100-PCIE-40GB",
+  "bandwidth_gibs": 1239.3,
+  "bandwidth_source": "Measured by copy; logs/roofline.log, 'HBM bandwidth'.",
+  "peak_tflops": 204.29,
+  "peak_source": "bf16 4096^3 GEMM measured on the card; logs/roofline.log, 'bf16 peak'.",
+  "attainable_tflops": null,
+  "attainable_source": "Not measured on this card. bench/tile_ceiling.py landed 2026-09-14 but was never run on either rented box."
+}

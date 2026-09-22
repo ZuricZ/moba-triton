@@ -1,0 +1,78 @@
+
+NVIDIA H100 80GB HBM3 -- ceilings
+  HBM bandwidth         2297.8 GiB/s  (74% of spec)
+  bf16, 4096^3 GEMM    769.78 TFLOP/s  (78% of spec)
+  bf16, our tile         not measured -- run `python -m bench.tile_ceiling` and pass --attainable-tflops;
+                         the GEMM stands in, and overstates the roof
+  ridge point            312.0 FLOP/byte  <- below this, memory bound however good the kernel
+
+Forward, block_size=128 top_k=8, B=1 H=4 D=64
+  backend            S       ms  GB moved  FLOP/byte  TFLOP/s     roof  of roof  bound
+  ----------------------------------------------------------------------------------------
+  fa2_minimal     2048    0.032     0.004      512.0 ~  66.71   769.78      9%  compute
+  flash_moba      2048    0.405     0.075       26.5 ~   5.30    65.38      8%  memory
+  moonshot_naive   2048    1.181     0.254        7.9 ~   1.82    19.43      9%  memory
+  naive_torch     2048    0.564     0.254        7.9 ~   3.81    19.43     20%  memory
+  ours            2048    0.155     0.026       75.8    13.88   187.04      7%  memory
+  sdpa_dense      2048    0.030     0.004      512.0 ~  72.39   769.78      9%  compute
+  fa2_minimal     4096    0.079     0.008     1024.0 ~ 108.37   769.78     14%  compute
+  flash_moba      4096    0.524     0.168       23.9 ~   8.19    58.90     14%  memory
+  moonshot_naive   4096    2.910     1.008        7.9 ~   2.95    19.58     15%  memory
+  naive_torch     4096    1.469     1.008        7.9 ~   5.85    19.58     30%  memory
+  ours            4096    0.174     0.053       75.8    24.65   187.04     13%  memory
+  sdpa_dense      4096    0.078     0.008     1024.0 ~ 110.01   769.78     14%  compute
+  fa2_minimal     8192    0.267     0.016     2048.0 ~ 128.47   769.78     17%  compute
+  flash_moba      8192    0.804     0.332       24.1 ~  10.68    59.51     18%  memory
+  moonshot_naive   8192    9.187     4.016        8.0 ~   3.74    19.66     19%  memory
+  naive_torch     8192    5.204     4.016        8.0 ~   6.60    19.66     34%  memory
+  ours            8192    0.267     0.106       75.8    32.14   187.04     17%  memory
+  sdpa_dense      8192    0.225     0.016     2048.0 ~ 152.53   769.78     20%  compute
+  ~ = traffic model is a lower bound; see the module docstring.
+
+Where the bytes go at S=8192
+
+  fa2_minimal  (16.0 MiB, ignores K/V re-reads across query tiles)
+    Q                             4.0 MiB   25% ##########
+    K                             4.0 MiB   25% ##########
+    V                             4.0 MiB   25% ##########
+    O                             4.0 MiB   25% ##########
+
+  flash_moba  (339.6 MiB, closed-form window model; docs/traffic-derivation.md s8.2)
+    o_tmp fp32 round trip (x top_k)    128.0 MiB   38% ###############
+    K (per window-block chunk)     79.2 MiB   23% #########
+    V (per window-block chunk)     79.2 MiB   23% #########
+    Q (gathered, x top_k)        32.0 MiB    9% ####
+    o_tmp zero-fill + final read     16.0 MiB    5% ##
+    O                             4.0 MiB    1% #
+    row indices                   1.0 MiB    0% #
+    LSE                           0.1 MiB    0% #
+
+  moonshot_naive  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  naive_torch  (4112.0 MiB, four passes over the S x S matrix, approximate)
+    scores write               1024.0 MiB   25% ##########
+    scores read (softmax)      1024.0 MiB   25% ##########
+    softmax write              1024.0 MiB   25% ##########
+    softmax read (PV)          1024.0 MiB   25% ##########
+    Q + K + V + O                16.0 MiB    0% #
+
+  ours  (108.1 MiB)
+    partials write               32.0 MiB   30% ############
+    partials read                32.0 MiB   30% ############
+    Q (gathered, x top_k)        32.0 MiB   30% ############
+    K                             4.0 MiB    4% #
+    V                             4.0 MiB    4% #
+    O                             4.0 MiB    4% #
+
+  sdpa_dense  (16.0 MiB, ignores K/V re-reads across query tiles)
+    Q                             4.0 MiB   25% ##########
+    K                             4.0 MiB   25% ##########
+    V                             4.0 MiB   25% ##########
+    O                             4.0 MiB   25% ##########
+
+wrote results/sm90-h100/figures/roofline.png

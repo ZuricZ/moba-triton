@@ -30,7 +30,7 @@ from.
 | `logs/dip-stages.log` | `docs/why-we-beat-flashmoba.md` §2 — 247,808 pairs, cross-checking `tile_census` |
 | `logs/dip-overhead.log` | `docs/a100-results.md:63` — the small-S dip |
 | `logs/twopass.log`, `logs/pass2.log` | `docs/a100-results.md:9` — raw session logs |
-| `logs/roofline.log` | `docs/a100-results.md:339` — `figures/roofline.png` was regenerated from it |
+| `logs/roofline.log` | `docs/a100-results.md:339`. It no longer draws `figures/roofline.png`: this log predates the FlashMoBA traffic model that counts window reloads, so replaying it places `flash_moba` at the superseded 186.2 FLOP/byte instead of 24.1. The figure is now built by `--from-data`, which recomputes traffic with the current model. |
 | `logs/65k.log` | `docs/block-size-results.md:165` — block_size=32 at 2048 columns |
 | `logs/block-sweep.log` | `docs/superpowers/plans/2026-09-14-block-size-sweep.md` |
 
@@ -38,7 +38,9 @@ from.
 
 `data/residual-b.json` (second residual run), `data/tabled-*.csv` (tuned-table
 confirmation), `figures/roofline-alt.png` (a second render from this session;
-`figures/roofline.png` is the one the docs cite), `figures/moba-*.png`,
+`figures/roofline.png` is the one the docs cite, and since the
+2026-09-22 rebuild the two are byte-identical, so this one can go
+whenever someone decides to), `figures/moba-*.png`,
 `figures/results.html` (84 bytes of `<img>` tags `triton.testing` writes next
 to its CSVs), and the session logs `last`, `occ`, `passA`, `passB`, `sweep`,
 `fairness`, `65k-recovery`.
