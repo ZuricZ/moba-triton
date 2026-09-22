@@ -11,13 +11,14 @@ the queries that chose it, rather than owning a query tile and loading the
 union of whatever its queries asked for.
 
 Forward and backward, grouped-query attention and variable-length packing are
-all implemented. Correctness is checked against a PyTorch oracle that matches
-MoonshotAI's reference bitwise, block choice for block choice.
+all implemented. Correctness is checked against a PyTorch oracle whose output
+matches MoonshotAI's reference to 0.000e+00 in fp32
+([`docs/semantics-crosscheck.md`](docs/semantics-crosscheck.md)).
 
 ## Results
 
-Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, bf16, shape
-`[1, S, 4, 64]`, which is FlashMoBA's published configuration.
+Measured on an H100 80GB HBM3 at `block_size=128, top_k=8`, which is
+FlashMoBA's published configuration, in bf16 at shape `[1, S, 4, 64]`.
 
 ![Forward pass latency against sequence length, six implementations, log-log](results/sm90-h100/figures/moba-fwd.png)
 
@@ -29,14 +30,14 @@ out of memory, which is itself the result at that end of the axis.
 
 Both passes are here because you cannot train with a forward pass. The backward
 carries the widest margin against dense attention and the narrower one against
-FlashMoBA, 3.3x rather than 3.9x at 524K, which is the honest reason not to
+FlashMoBA, 3.3x rather than 3.8x at 524K, which is the honest reason not to
 show the forward alone.
 
 | S | forward | vs FlashMoBA | vs dense | backward | vs FlashMoBA | vs dense |
 |---:|---:|---:|---:|---:|---:|---:|
 | 65,536 | 1.49 ms | 3.8x | 5.0x | 2.66 ms | 2.6x | 10.0x |
-| 131,072 | 3.94 ms | 4.2x | 7.2x | 6.18 ms | 3.1x | 16.8x |
-| 524,288 | 38.2 ms | 3.9x | 13.0x | 47.0 ms | 3.3x | 36.0x |
+| 131,072 | 3.93 ms | 4.2x | 7.2x | 6.08 ms | 3.1x | 16.9x |
+| 524,288 | 38.16 ms | 3.8x | 13.0x | 47.05 ms | 3.3x | 36.0x |
 
 Above, a speedup is the vertical gap between two lines and its trend is a
 difference of slopes. Dividing shows both directly, at the cost of absolute
@@ -54,9 +55,9 @@ The same shape holds on an A100-PCIE-40GB, where at S=65536 the forward is 4.6x
 FlashMoBA and 5.8x dense ([`docs/a100-results.md`](docs/a100-results.md)). Two
 architectures, one ordering.
 
-Past S=131072 the dense baselines stop being a comparison and become a
-demonstration: PyTorch's own reference runs out of memory at S=32768 trying to
-allocate 16 GiB, because the score matrix is quadratic in S.
+Past S=32768 the dense baselines stop being a comparison and become a
+demonstration: PyTorch's own reference runs out of memory at S=65536 asking for
+a single 32 GiB allocation, because the score matrix is quadratic in S.
 
 ## Why per-query selection is hard
 
@@ -225,7 +226,7 @@ idea. It says how fast this implementation of it runs.
 ## Future work
 
 The gate is now the bottleneck. At S=524288 block selection is 87% of the
-forward pass, while the attention half on its own is 21x FlashMoBA's.
+forward pass, while the attention half on its own is 21.5x FlashMoBA's.
 Selection is quadratic in S, since every query scores every past block, and
 attention is linear, so the gate is what holds the whole-pipeline ratio near
 4x.
@@ -258,9 +259,9 @@ length. The fix needs no kernel change, only chunking the queries host-side and
 reusing the buffer, but it is unbuilt
 ([`docs/deferred-decisions.md`](docs/deferred-decisions.md) DD-2).
 
-One gap in the comparison, for completeness: the community Triton port crashes
-above S=65536 on this harness, so it appears in the A100 table and not in the
-long sweeps.
+One gap in the comparison, for completeness: the community Triton port imports
+`flash_attn` at module scope, which was not installed on the rented H100, so it
+was skipped there. It appears in the A100 runs, where it reaches S=65536.
 
 ## Reading further
 
