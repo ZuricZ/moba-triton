@@ -1,107 +1,103 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" width="900" height="420"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="960" height="440"
      font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
 
   <!-- Hand-authored, not generated: this is a structure with six queries and
-       three blocks, not a measurement. Colour ties a block to itself across
-       the transpose, which is the whole point of the picture.
-       Presentation attributes only - GitHub's sanitiser strips <style>. -->
+       three key blocks, not a measurement. Six is the size at which a reader
+       can verify the counts by hand, which is the whole point of the picture.
+       Colour ties a key block to itself across the two groupings.
+       Presentation attributes only: GitHub's sanitiser strips <style>. -->
 
-  <!-- headings -->
-  <text x="24"  y="28" font-size="15" font-weight="600" fill="#767676">gate output</text>
-  <text x="24"  y="48" font-size="13" fill="#767676">for each query, which blocks?</text>
-  <text x="510" y="28" font-size="15" font-weight="600" fill="#767676">CSC transpose</text>
-  <text x="510" y="48" font-size="13" fill="#767676">for each block, which queries?</text>
+  <text x="480" y="30" font-size="16" font-weight="600" fill="#767676" text-anchor="middle">The same 10 selections, grouped two ways</text>
+  <text x="480" y="52" font-size="13" fill="#767676" text-anchor="middle">The gate has already chosen. All that changes below is who owns a program.</text>
 
-  <!-- arrow between the panels -->
-  <path d="M 432 210 L 484 210" stroke="#767676" stroke-width="1.5" fill="none"/>
-  <path d="M 484 210 l -8 -5 l 0 10 z" fill="#767676"/>
+  <line x1="468" y1="80" x2="468" y2="352" stroke="#e4e4e4" stroke-width="1"/>
 
-  <!-- ================= left: query -> blocks ================= -->
-  <text x="150" y="88" font-size="13" font-weight="600" fill="#2a78d6" text-anchor="middle">B0</text>
-  <text x="222" y="88" font-size="13" font-weight="600" fill="#eb6834" text-anchor="middle">B1</text>
-  <text x="294" y="88" font-size="13" font-weight="600" fill="#1baf7a" text-anchor="middle">B2</text>
+  <!-- ==================== left: grouped by query ==================== -->
+  <text x="20" y="104" font-size="14" font-weight="600" fill="#767676">Grouped by query</text>
+  <text x="20" y="124" font-size="12.5" fill="#767676">One program per query. It fetches every block</text>
+  <text x="20" y="141" font-size="12.5" fill="#767676">its query wants.</text>
 
-  <!-- q0 -->
-  <text x="96" y="115" font-size="13" fill="#767676" text-anchor="end">q0</text>
-  <rect x="118" y="99" width="64" height="24" rx="4" fill="#2a78d6"/>
-  <rect x="190" y="99" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <rect x="262" y="99" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <!-- q1 -->
-  <text x="96" y="151" font-size="13" fill="#767676" text-anchor="end">q1</text>
-  <rect x="118" y="135" width="64" height="24" rx="4" fill="#2a78d6"/>
-  <rect x="190" y="135" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <rect x="262" y="135" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <!-- q2 -->
-  <text x="96" y="187" font-size="13" fill="#767676" text-anchor="end">q2</text>
-  <rect x="118" y="171" width="64" height="24" rx="4" fill="#2a78d6"/>
-  <rect x="190" y="171" width="64" height="24" rx="4" fill="#eb6834"/>
-  <rect x="262" y="171" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <!-- q3 -->
-  <text x="96" y="223" font-size="13" fill="#767676" text-anchor="end">q3</text>
-  <rect x="118" y="207" width="64" height="24" rx="4" fill="#2a78d6"/>
-  <rect x="190" y="207" width="64" height="24" rx="4" fill="#eb6834"/>
-  <rect x="262" y="207" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <!-- q4 -->
-  <text x="96" y="259" font-size="13" fill="#767676" text-anchor="end">q4</text>
-  <rect x="118" y="243" width="64" height="24" rx="4" fill="#2a78d6"/>
-  <rect x="190" y="243" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <rect x="262" y="243" width="64" height="24" rx="4" fill="#1baf7a"/>
-  <!-- q5 -->
-  <text x="96" y="295" font-size="13" fill="#767676" text-anchor="end">q5</text>
-  <rect x="118" y="279" width="64" height="24" rx="4" fill="none" stroke="#c9c9c9" stroke-dasharray="3 3"/>
-  <rect x="190" y="279" width="64" height="24" rx="4" fill="#eb6834"/>
-  <rect x="262" y="279" width="64" height="24" rx="4" fill="#1baf7a"/>
+  <text x="200" y="154" font-size="12" font-weight="600" fill="#2a78d6" text-anchor="middle">block 0</text>
+  <text x="290" y="154" font-size="12" font-weight="600" fill="#eb6834" text-anchor="middle">block 1</text>
+  <text x="380" y="154" font-size="12" font-weight="600" fill="#1baf7a" text-anchor="middle">block 2</text>
 
-  <text x="24" y="336" font-size="12" fill="#767676">six independent choices, one row each</text>
+  <!-- query 0: block 0 -->
+  <text x="150" y="186" font-size="12" fill="#767676" text-anchor="end">query 0</text>
+  <rect x="160" y="169" width="80" height="26" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="169" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <rect x="340" y="169" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <!-- query 1: block 0 -->
+  <text x="150" y="218" font-size="12" fill="#767676" text-anchor="end">query 1</text>
+  <rect x="160" y="201" width="80" height="26" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="201" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <rect x="340" y="201" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <!-- query 2: blocks 0, 1 -->
+  <text x="150" y="250" font-size="12" fill="#767676" text-anchor="end">query 2</text>
+  <rect x="160" y="233" width="80" height="26" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="233" width="80" height="26" rx="4" fill="#eb6834"/>
+  <rect x="340" y="233" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <!-- query 3: blocks 0, 1 -->
+  <text x="150" y="282" font-size="12" fill="#767676" text-anchor="end">query 3</text>
+  <rect x="160" y="265" width="80" height="26" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="265" width="80" height="26" rx="4" fill="#eb6834"/>
+  <rect x="340" y="265" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <!-- query 4: blocks 0, 2 -->
+  <text x="150" y="314" font-size="12" fill="#767676" text-anchor="end">query 4</text>
+  <rect x="160" y="297" width="80" height="26" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="297" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <rect x="340" y="297" width="80" height="26" rx="4" fill="#1baf7a"/>
+  <!-- query 5: blocks 1, 2 -->
+  <text x="150" y="346" font-size="12" fill="#767676" text-anchor="end">query 5</text>
+  <rect x="160" y="329" width="80" height="26" rx="4" fill="none" stroke="#d4d4d4" stroke-dasharray="3 3"/>
+  <rect x="250" y="329" width="80" height="26" rx="4" fill="#eb6834"/>
+  <rect x="340" y="329" width="80" height="26" rx="4" fill="#1baf7a"/>
 
-  <!-- ================= right: block -> queries ================= -->
-  <text x="826" y="88" font-size="11" fill="#767676" text-anchor="middle">col_nnz</text>
-  <!-- B0 : five queries -->
-  <text x="530" y="115" font-size="13" font-weight="600" fill="#2a78d6" text-anchor="end">B0</text>
-  <rect x="546" y="99"  width="44" height="24" rx="4" fill="#2a78d6"/>
-  <text x="568" y="116" font-size="12" fill="#ffffff" text-anchor="middle">q0</text>
-  <rect x="598" y="99"  width="44" height="24" rx="4" fill="#2a78d6"/>
-  <text x="620" y="116" font-size="12" fill="#ffffff" text-anchor="middle">q1</text>
-  <rect x="650" y="99"  width="44" height="24" rx="4" fill="#2a78d6"/>
-  <text x="672" y="116" font-size="12" fill="#ffffff" text-anchor="middle">q2</text>
-  <rect x="702" y="99"  width="44" height="24" rx="4" fill="#2a78d6"/>
-  <text x="724" y="116" font-size="12" fill="#ffffff" text-anchor="middle">q3</text>
-  <rect x="754" y="99"  width="44" height="24" rx="4" fill="#2a78d6"/>
-  <text x="776" y="116" font-size="12" fill="#ffffff" text-anchor="middle">q4</text>
-  <path d="M 806 111 L 816 111" stroke="#c9c9c9" stroke-width="1"/>
-  <text x="826" y="116" font-size="12" fill="#767676" text-anchor="middle">5</text>
+  <text x="20" y="390" font-size="15" font-weight="600" fill="#767676">10 block reads</text>
+  <text x="20" y="410" font-size="12" fill="#767676">one per coloured cell: block 0 alone is fetched five times</text>
 
-  <!-- B1 : three queries -->
-  <text x="530" y="187" font-size="13" font-weight="600" fill="#eb6834" text-anchor="end">B1</text>
-  <rect x="546" y="171" width="44" height="24" rx="4" fill="#eb6834"/>
-  <text x="568" y="188" font-size="12" fill="#ffffff" text-anchor="middle">q2</text>
-  <rect x="598" y="171" width="44" height="24" rx="4" fill="#eb6834"/>
-  <text x="620" y="188" font-size="12" fill="#ffffff" text-anchor="middle">q3</text>
-  <rect x="650" y="171" width="44" height="24" rx="4" fill="#eb6834"/>
-  <text x="672" y="188" font-size="12" fill="#ffffff" text-anchor="middle">q5</text>
-  <path d="M 702 183 L 816 183" stroke="#e4e4e4" stroke-width="1" stroke-dasharray="2 3"/>
-  <text x="826" y="188" font-size="12" fill="#767676" text-anchor="middle">3</text>
+  <!-- ==================== right: grouped by key block ==================== -->
+  <text x="500" y="104" font-size="14" font-weight="600" fill="#767676">Grouped by key block</text>
+  <text x="500" y="124" font-size="12.5" fill="#767676">One program per block. It fetches the block once,</text>
+  <text x="500" y="141" font-size="12.5" fill="#767676">then serves every query that wanted it.</text>
 
-  <!-- B2 : two queries -->
-  <text x="530" y="259" font-size="13" font-weight="600" fill="#1baf7a" text-anchor="end">B2</text>
-  <rect x="546" y="243" width="44" height="24" rx="4" fill="#1baf7a"/>
-  <text x="568" y="260" font-size="12" fill="#ffffff" text-anchor="middle">q4</text>
-  <rect x="598" y="243" width="44" height="24" rx="4" fill="#1baf7a"/>
-  <text x="620" y="260" font-size="12" fill="#ffffff" text-anchor="middle">q5</text>
-  <path d="M 650 255 L 816 255" stroke="#e4e4e4" stroke-width="1" stroke-dasharray="2 3"/>
-  <text x="826" y="260" font-size="12" fill="#767676" text-anchor="middle">2</text>
+  <!-- block 0 serves five queries -->
+  <rect x="500" y="169" width="76" height="26" rx="4" fill="#2a78d6"/>
+  <text x="538" y="186" font-size="11.5" fill="#ffffff" text-anchor="middle">block 0</text>
+  <path d="M 582 182 L 600 182" stroke="#767676" stroke-width="1.2" fill="none"/>
+  <path d="M 600 182 l -7 -4.5 l 0 9 z" fill="#767676"/>
+  <rect x="608" y="169" width="62" height="26" rx="4" fill="none" stroke="#2a78d6"/>
+  <text x="639" y="186" font-size="10.5" fill="#2a78d6" text-anchor="middle">query 0</text>
+  <rect x="676" y="169" width="62" height="26" rx="4" fill="none" stroke="#2a78d6"/>
+  <text x="707" y="186" font-size="10.5" fill="#2a78d6" text-anchor="middle">query 1</text>
+  <rect x="744" y="169" width="62" height="26" rx="4" fill="none" stroke="#2a78d6"/>
+  <text x="775" y="186" font-size="10.5" fill="#2a78d6" text-anchor="middle">query 2</text>
+  <rect x="812" y="169" width="62" height="26" rx="4" fill="none" stroke="#2a78d6"/>
+  <text x="843" y="186" font-size="10.5" fill="#2a78d6" text-anchor="middle">query 3</text>
+  <rect x="880" y="169" width="62" height="26" rx="4" fill="none" stroke="#2a78d6"/>
+  <text x="911" y="186" font-size="10.5" fill="#2a78d6" text-anchor="middle">query 4</text>
 
-  <text x="510" y="336" font-size="12" fill="#767676">three work items, each with a query list</text>
+  <!-- block 1 serves three queries -->
+  <rect x="500" y="249" width="76" height="26" rx="4" fill="#eb6834"/>
+  <text x="538" y="266" font-size="11.5" fill="#ffffff" text-anchor="middle">block 1</text>
+  <path d="M 582 262 L 600 262" stroke="#767676" stroke-width="1.2" fill="none"/>
+  <path d="M 600 262 l -7 -4.5 l 0 9 z" fill="#767676"/>
+  <rect x="608" y="249" width="62" height="26" rx="4" fill="none" stroke="#eb6834"/>
+  <text x="639" y="266" font-size="10.5" fill="#eb6834" text-anchor="middle">query 2</text>
+  <rect x="676" y="249" width="62" height="26" rx="4" fill="none" stroke="#eb6834"/>
+  <text x="707" y="266" font-size="10.5" fill="#eb6834" text-anchor="middle">query 3</text>
+  <rect x="744" y="249" width="62" height="26" rx="4" fill="none" stroke="#eb6834"/>
+  <text x="775" y="266" font-size="10.5" fill="#eb6834" text-anchor="middle">query 5</text>
 
-  <!-- ================= the arrays ================= -->
-  <text x="24" y="376" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#767676">col_offsets = [0, 5, 8, 10]</text>
-  <text x="24" y="398" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#767676">row_indices = [</text>
-  <text x="128" y="398" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#2a78d6">0, 1, 2, 3, 4,</text>
-  <text x="248" y="398" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#eb6834">2, 3, 5,</text>
-  <text x="322" y="398" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1baf7a">4, 5</text>
-  <text x="362" y="398" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#767676">]</text>
+  <!-- block 2 serves two queries -->
+  <rect x="500" y="329" width="76" height="26" rx="4" fill="#1baf7a"/>
+  <text x="538" y="346" font-size="11.5" fill="#ffffff" text-anchor="middle">block 2</text>
+  <path d="M 582 342 L 600 342" stroke="#767676" stroke-width="1.2" fill="none"/>
+  <path d="M 600 342 l -7 -4.5 l 0 9 z" fill="#767676"/>
+  <rect x="608" y="329" width="62" height="26" rx="4" fill="none" stroke="#1baf7a"/>
+  <text x="639" y="346" font-size="10.5" fill="#1baf7a" text-anchor="middle">query 4</text>
+  <rect x="676" y="329" width="62" height="26" rx="4" fill="none" stroke="#1baf7a"/>
+  <text x="707" y="346" font-size="10.5" fill="#1baf7a" text-anchor="middle">query 5</text>
 
-  <!-- skew callout: B0 holds five, B2 holds two -->
-  <text x="510" y="376" font-size="12" fill="#767676">B0 is visible to everyone, B2 to almost nobody:</text>
-  <text x="510" y="396" font-size="12" fill="#767676">the load imbalance the scheduler has to absorb.</text>
+  <text x="500" y="390" font-size="15" font-weight="600" fill="#767676">3 block reads</text>
+  <text x="500" y="410" font-size="12" fill="#767676">one per block, however many queries it goes on to serve</text>
 </svg>

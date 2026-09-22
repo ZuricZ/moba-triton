@@ -89,25 +89,40 @@ across programs instead of across iterations.
 
 ## The transpose
 
-The gate answers "for each query, which blocks?". The inverted kernel needs the
-other direction, "for each block, which queries?", stored as compressed sparse
-column. Six queries and three blocks, small enough to check by hand:
+All the gate produces is a list of selections: which key blocks each query
+wants. Six queries and three blocks is small enough to count by hand.
 
-![The gate's per-query choice, and the same decision transposed into CSC](docs/figures/csc-transpose.svg)
+![The same ten selections grouped by query, needing ten block reads, and grouped by key block, needing three](docs/figures/csc-transpose.svg)
 
-Both halves record one decision. The right-hand form is the one a block-major
-kernel can schedule, because a program needs its query list before it starts.
+The arithmetic is the same on both sides. Every one of those ten selections
+still has to be computed, and the answer is identical. The only thing that
+changes is which program owns what, and that decides how often a key block
+travels in from memory: once per selection when a program owns a query, once
+per block when a program owns a block.
 
-It also shows the kernel's main open problem. B0 holds five queries and B2
-holds two, because early blocks are visible to every later query and late
-blocks to almost nobody. Measured on real selections that skew reaches 6.2x in
-the worst column, and the scheduler has to absorb it.
+Fetching from memory is the expensive part, so the kernel groups by block. It
+needs the right-hand form before it starts, because a program cannot fetch its
+block until it knows the list of queries that will use it.
 
-The transpose is built on the GPU with a count, a prefix sum and a scatter, and
-uses no `nonzero()` anywhere. `nonzero()` returns a data-dependent number of
-results, which forces a copy back to the CPU before PyTorch can allocate. That
-round trip costs about 230 us against about 6 us for the same arithmetic kept
-on device.
+Real programs own a tile of many queries rather than one, so the counts are not
+literally ten against three. The mechanism is the same, and at full size it
+shows up as the discarded work in the table above.
+
+Grouping by block also creates the kernel's main open problem. The three
+programs do not have equal work: block 0 serves five queries and block 2 serves
+two, because early blocks are visible to every later query and late blocks to
+almost nobody. On real selections that skew reaches 6.2x in the worst case, and
+since the programs run at the same time the slowest one sets the pace.
+
+Those five queries are why block 0 is worth loading once, and they are also why
+its program finishes last. The saving and the imbalance have the same cause, so
+no scheduler can remove one without giving up the other.
+
+The grouping is stored as compressed sparse column and built entirely on the
+GPU with a count, a prefix sum and a scatter, using no `nonzero()` anywhere.
+`nonzero()` returns a data-dependent number of results, which forces a copy
+back to the CPU before PyTorch can allocate. That round trip costs about 230 us
+against about 6 us for the same arithmetic kept on device.
 
 ## Using it
 
